@@ -1,0 +1,75 @@
+name: build
+
+on:
+  push:
+    paths-ignore: ["docs/**", "design/**", "**/*.md"]
+  pull_request:
+    paths-ignore: ["docs/**", "design/**", "**/*.md"]
+  workflow_dispatch:
+    inputs:
+      selftest:
+        description: "Also run the 1x/2x self-test (scripts/selftest.sh)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Standard arm64 runner with macOS 27 and Xcode 27 (GA since 2026-10-15). Free for public repositories.
+    # Do not switch to xcode-27-xlarge: larger runners are billed even for public repositories.
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build/repositories
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+
+      # Same script as local builds: release, whole-module; writes build/OrganicShell.app with Runtime/Core inside,
+      # ad-hoc signed.
+      - name: Build release app
+        run: zsh scripts/build.sh
+
+      - name: Package
+        run: |
+          sha="$(git rev-parse --short=7 HEAD)"
+          ditto -c -k --keepParent build/OrganicShell.app "OrganicShell-$sha.zip"
+          shasum -a 256 "OrganicShell-$sha.zip" | tee "OrganicShell-$sha.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OrganicShell-${{ github.sha }}
+          path: OrganicShell-*.zip*
+          retention-days: 14
+          if-no-files-found: error
+
+      # The self-test opens real AppKit windows at 1x and 2x. Whether it runs cleanly in the runner's virtual
+      # display is untested, so it is opt-in and cannot fail the build until it has proved reliable there.
+      - name: Self-test (1x and 2x)
+        if: github.event_name == 'workflow_dispatch' && inputs.selftest
+        continue-on-error: true
+        run: zsh scripts/selftest.sh "$RUNNER_TEMP/selftest"
+
+      - name: Upload self-test logs
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.selftest
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-${{ github.sha }}
+          path: ${{ runner.temp }}/selftest
+          retention-days: 14
+          if-no-files-found: ignore

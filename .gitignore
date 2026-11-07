@@ -1,0 +1,7 @@
+.build/
+build/
+/runs/
+.build-log.*
+*.mov
+*.trace
+.DS_Store
