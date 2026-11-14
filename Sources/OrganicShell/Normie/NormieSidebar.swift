@@ -4,6 +4,11 @@ import QuartzCore
 @MainActor final class NormieSidebarController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     var onModeEndpointVisibilityChanged:(()->Void)?
     let model: NormieSidebarModel
+    var presentationActive = true { didSet {
+        guard presentationActive != oldValue else { return }
+        if isViewLoaded { NormieSidebarSpinner.setPresented(presentationActive, in: view) }
+        for entry in preparedRows.values { entry.cell.runningIndicator.presented = presentationActive }
+    } }
     let searchField = NormieField()
     let table = NormieSidebarTable()
     let scrollView = NSScrollView()
@@ -304,7 +309,7 @@ import QuartzCore
         return makeCell(item)
     }
     private func makeCell(_ item:NormieSidebarRow)->NormieSidebarCell {
-        let cell=NormieSidebarCell();cell.configure(item, model:model)
+        let cell=NormieSidebarCell();cell.runningIndicator.presented=presentationActive;cell.configure(item, model:model)
         cell.activate = { [weak self] in self?.model.activate(item) }
         if let id = item.conversationID {
             cell.setFlightSourceHidden(hiddenPlanets.contains(id))

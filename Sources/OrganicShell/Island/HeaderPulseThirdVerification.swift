@@ -29,7 +29,7 @@ import QuartzCore
         }
         do {
             let f=fixture(),scene=f.scene,c=scene.columns[0].conversation
-            var time=CACurrentMediaTime()+3600
+            var time=VerificationClock.modelOrigin
             for column in scene.columns {column.island?.now={time}}
             time+=8.01;scene.setAmbientRunning(false)
             for (i,method) in ["turn/started","core/approvalRequested","error"].enumerated() {
@@ -43,7 +43,7 @@ import QuartzCore
         }
         do {
             let f=fixture(),scene=f.scene
-            var time=CACurrentMediaTime()+3600;scene.now={time}
+            var time=VerificationClock.modelOrigin;scene.now={time}
             scene.enterFocused(scene.current,reason:"pulse-test");time+=10;scene.settle()
             scene.splitWithNext();time+=10;scene.settle();scene.manualSettle=false
             check(!scene.isMoving && scene.columns.count>1,"T5 actual Split is at rest before consecutive deltas")
@@ -68,7 +68,7 @@ import QuartzCore
         let began=CACurrentMediaTime(),header=HeaderIsland(),host=IslandPlane(frame:CGRect(x:0,y:0,width:507,height:320))
         let window=NSWindow(contentRect:host.bounds,styleMask:.borderless,backing:.buffered,defer:true)
         window.isReleasedWhenClosed=false;window.contentView=host;host.addSubview(header)
-        var time=CACurrentMediaTime()
+        var time=VerificationClock.modelOrigin
         header.now={time}
         var input=HeaderIslandConfiguration(id:"fresh-cold",title:"Fresh process Pulse",columnWidth:507,ambient:false)
         input.notices = .init();header.configure(input)
@@ -174,7 +174,8 @@ private actor PulseHistoryTransport:CoreTransport {
         }
         #if !PULSE_THIRD_OLD_INPUT
         do {
-            let header=HeaderIsland(),host=IslandPlane(frame:CGRect(x:0,y:0,width:507,height:320))
+            let header=HeaderIsland(),host=IslandPlane(frame:CGRect(x:0,y:0,width:507,height:320)),first=VerificationClock.modelOrigin
+            header.now={first}
             let window=NSWindow(contentRect:host.bounds,styleMask:.borderless,backing:.buffered,defer:true);window.isReleasedWhenClosed=false;window.contentView=host;host.addSubview(header)
             var input=HeaderIslandConfiguration(id:"cold",title:"Cold Pulse",columnWidth:507,ambient:false)
             input.notices = .init();header.configure(input)
@@ -183,7 +184,6 @@ private actor PulseHistoryTransport:CoreTransport {
             let warm=pulse.probe
             check(warm["warmSlices"] as? Int == 10,"T6 actual beforeWaiting observer prewarms ten content layers")
             input.notices?.journal=[.init(id:1,kind:.command,text:"Synthetic cold command")];header.configure(input)
-            let first=CACurrentMediaTime()
             for i in 1...48 {header.sampleMotion(at:first+Double(i)/240)}
             let after=pulse.probe
             check(after["filterBuilds"] as? Int == 10,"T6 first Pulse reuses prewarmed filters without frame allocations")

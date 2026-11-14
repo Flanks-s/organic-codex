@@ -17,7 +17,7 @@ extension JSONValue {
     static let standard:[String:JSONValue] = [
         "general.access":"auto","general.preventSleep":true,"general.folder":"~/Documents/Codex","general.openIn":"default","general.language":"system",
         "notifications.done":"banner","notifications.approval":"sound","notifications.error":"banner","notifications.cloud":"email","notifications.inactive":true,"notifications.badge":true,"notifications.bounce":false,
-        "look.mode":"dark","look.accent":"multi","look.custom":"","look.theme":"canopy","look.code":"match","look.glass":"tinted","look.background":"","look.foreground":"","look.font":"sf","look.size":12,"look.text":1,
+        "look.accent":"multi","look.custom":"","look.theme":"canopy","look.code":"match","look.glass":"tinted","look.background":"","look.foreground":"","look.font":"sf","look.size":12,"look.text":1,
         "organic.playfulSummaries":true,"organic.forceClickPeek":true,"organic.identityLiquid":true,"organic.fullyFocused":false,"organic.organicFullBleed":true,"organic.simulateReduceMotion":false,"organic.compareNeverAsk":false,
         "collapseOnHoverSpace":false,"numberShortcuts":"chats","followUpDefault":"steer","coreNotifications":true
     ]

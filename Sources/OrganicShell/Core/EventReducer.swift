@@ -78,7 +78,7 @@ import Foundation
         }
     }
 
-    static func hydrate(_ thread: JSONValue, into c: Conversation) {
+    static func hydrate(_ thread: JSONValue, into c: Conversation, phaseEvent: CoreEvent? = nil) {
         c.running = false; c.activeTurnID = nil
         if let name = thread["name"]?.stringValue, !name.isEmpty { c.title = name }
         c.cwd = thread["cwd"]?.stringValue ?? c.cwd
@@ -114,6 +114,7 @@ import Foundation
         let recovered = turns.first { $0["id"]?.stringValue == c.activeTurnID } ?? turns.last { ["completed","failed","interrupted"].contains($0["status"]?.stringValue ?? "") }
         c.notices.restore(in: c, started: recovered?["startedAt"]?.doubleValue, ended: recovered?["completedAt"]?.doubleValue,
                           confirmedTurn: recovered?["id"]?.stringValue, status: recovered?["status"]?.stringValue)
+        c.phaseFacts.restore(thread,in:c,eventID:phaseEvent?.id)
     }
 
     static func approval(_ p: JSONValue, in c: Conversation) {
@@ -170,12 +171,13 @@ import Foundation
     }
 
     static func apply(_ event: CoreEvent, to c: Conversation) {
+        defer {c.phaseFacts.consume(event,in:c)}
         let p = event.params
         let turnID = p["turnId"]?.stringValue ?? p["turn"]?["id"]?.stringValue ?? c.activeTurnID ?? ""
         switch event.method {
         case "thread/started", "thread/restored":
             if let thread = p["thread"] {
-                hydrate(thread, into: c)
+                hydrate(thread, into: c, phaseEvent:event)
                 c.branch = thread["branch"]?.stringValue ?? c.branch
                 c.projectID = thread["projectId"]?.stringValue ?? c.projectID
                 c.deviceID = thread["deviceId"]?.stringValue ?? c.deviceID

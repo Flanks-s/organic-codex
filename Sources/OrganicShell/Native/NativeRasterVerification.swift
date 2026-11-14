@@ -1,4 +1,22 @@
 import AppKit
+import QuartzCore
+
+/// Absolute fixture epochs, independent of the machine's uptime.
+@MainActor enum VerificationClock {
+    // A small, nonzero binade for model sampling, including 240 Hz expiry boundaries.
+    static let modelOrigin = 4096.0
+
+    // 2^26 seconds (about 2.1 years); Double spacing is about 15 ns here.
+    // CA rejects frames predating its commits. Refuse an exhausted horizon instead of rebasing.
+    static var renderOrigin: Double {
+        let origin = 67_108_864.0
+        let observed = max(CACurrentMediaTime(), ProcessInfo.processInfo.systemUptime)
+        guard observed.isFinite && observed + 3600 < origin else {
+            fatalError("VerificationClock render epoch \(origin) is not ahead of CA commits (uptime \(observed)); choose a new fixed horizon explicitly")
+        }
+        return origin
+    }
+}
 
 /// Fixed inputs for windowless pixel checks. Never derive density or color from a display.
 @MainActor enum VerificationRaster {

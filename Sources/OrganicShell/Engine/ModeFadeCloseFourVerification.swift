@@ -62,7 +62,7 @@ import QuartzCore
 
         // A Pulse event is already near expiry when the body epoch starts.
         let model=Conversation(id:"close4.pulse",title:"Stable source header")
-        let header=HeaderIsland();var time=CACurrentMediaTime()+3600
+        let header=HeaderIsland();var time=VerificationClock.renderOrigin
         header.now={time};header.noticeWallTime={1000}
         var input=HeaderIslandConfiguration.conversation(model,variant:.full,columnWidth:507,band:44,ambient:false,scale:2)
         input.notices = .init();header.configure(input)
@@ -104,7 +104,7 @@ import QuartzCore
         check(movement>0,"v2 the first replay packet really introduces a new visible source line")
         check(animation != nil && abs((animation?.fromValue as? Double ?? -1000)-movement)<0.01 && animation!.duration>=0.05,"v2 native scroll compensation preserves the previously displayed glyph positions on the first replay frame")
         if let animation,movement>0 {
-            let t=CACurrentMediaTime()+3600
+            let t=VerificationClock.renderOrigin
             func tree(compensated:Bool)->CALayer {
                 let canvas=CALayer();canvas.frame=native.bounds;canvas.isGeometryFlipped=true
                 let glyphs=CALayer();glyphs.frame=canvas.bounds;glyphs.contents=sourceInk;glyphs.contentsScale=2;canvas.addSublayer(glyphs)

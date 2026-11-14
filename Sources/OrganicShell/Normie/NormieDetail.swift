@@ -85,7 +85,7 @@ import QuartzCore
     private func cancelIdleMotionCapture() {warmTask?.cancel();warmTask=nil;idleCapture=nil;idleCaptureKey=nil}
     func setModePresentationActive(_ active:Bool) {
         modePresentationActive=active
-        if active {scheduleMotionPrewarm()} else {cancelIdleMotionCapture()}
+        if active {scheduleMotionPrewarm()} else {settleMotions()}
     }
     /// A stream packet invalidates pixels without starting invisible drawing or a polling loop.
     func invalidateIdleMotionPictures() {
@@ -321,6 +321,10 @@ import QuartzCore
         motionClock.stop();terminalAnimating=false;terminalProgress=isTerminalShown ? 1:0;composer?.motionLayoutContinuous=false
         terminalProxies.forEach{$0.1.retire()};terminalProxies=[];terminalFrames=[]
         itemMotions.forEach{$0.proxy.retire()};itemMotions=[];toastMotion?.proxy.retire();toastMotion=nil
+        // An interrupted entrance may retire at zero ink alpha; the next mode owns fully visible native cards.
+        CATransaction.begin();CATransaction.setDisableActions(true)
+        for card in backgroundCards.values where card.superview === approvalDocument {card.layer?.opacity=1}
+        CATransaction.commit()
         terminalPane.watchMotionOutput(false)
         if isViewLoaded,!NormieIdleMotionCapture.orreryEnabled || modePresentationActive {view.needsLayout=true}
     }
@@ -457,6 +461,8 @@ import QuartzCore
     func republishComposerPresentation(){if isViewLoaded,!externalComposer,let composer,composer.superview === view{publishedComposer=composer;onComposerPresentationChange?(composer,view)}}
     var onContextChange: ((NormieNewChatContext) -> Void)?
     var onReview: (() -> Void)?
+    var onReference: ((Conversation, TranscriptReferenceRequest) -> Void)?
+    var onReferenceHostState: ((Conversation, Bool) -> Void)?
     var onUndo: (() -> Void)?
     var onSelectConversation: ((String) -> Void)?
 
@@ -581,6 +587,12 @@ import QuartzCore
         configuration.onForkMessage = actions.fork.map { handler in { handler(c, $0) } }
         configuration.onRevertChanges = actions.revertTranscript.map { handler in { handler(c, $0) } }
         configuration.onReviewChanges = { [weak self] _ in self?.onReview?() }
+        configuration.onReference = { [weak self, weak c] request in
+            guard let self, let c, self.conversation === c else { return }; self.onReference?(c, request)
+        }
+        configuration.onReferenceHostState = { [weak self, weak c] active in
+            guard let c else { return }; self?.onReferenceHostState?(c, active)
+        }
         let selected=c.id == conversation?.id
         if backgroundTranscriptHost.superview !== view {backgroundTranscriptHost.isHidden=true;view.addSubview(backgroundTranscriptHost)}
         // An approval in another conversation needs its actions/cards, not a full-width visible history reflow.
@@ -790,11 +802,13 @@ import QuartzCore
     }
 
     private func updateApprovalMotionRest(){
+        // An inactive mode cannot capture or hide a retained card that Organic now presents.
+        guard !NormieIdleMotionCapture.orreryEnabled || modePresentationActive else{return}
         let afterMode=approvalRestAfterMode;approvalRestAfterMode=false
         let ids=store.conversations.filter{!$0.archived}.flatMap(\.approvals).map(\.id)
         guard ids != presentedApprovalIDs else{return};presentedApprovalIDs=ids
         let previous=approvalRest;approvalRest=[:]
-        for card in backgroundCards.values where card.superview != nil {
+        for card in backgroundCards.values where card.superview === approvalDocument {
             let key=ObjectIdentifier(card),r=card.convert(card.bounds,to:view)
             let picture:NormieMotionPicture?
             if afterMode {picture=warmPictures[key].flatMap{$0.0 == pictureKey(card) ? $0.1:nil}}
@@ -915,6 +929,7 @@ extension NormieDetailController {
         terminalPane.modeContentInputBlocked=blocked
         func visit(_ view:NSView) {
             (view as? NativeInteractionSurface)?.modeContentInputBlocked=blocked
+            (view as? NativeTranscript)?.refreshReferenceAdmission()
             for child in view.subviews {visit(child)}
         }
         if isViewLoaded {visit(view)}

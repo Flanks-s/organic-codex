@@ -58,7 +58,7 @@ import AppKit
         flightHidden = hidden; planet.isHidden = !isChat || hidden
     }
     func configure(_ row: NormieSidebarRow, model: NormieSidebarModel) {
-        showsRunning = false; runningIndicator.stopAnimation(nil); toolTip = nil
+        showsRunning = false; runningIndicator.running = false; toolTip = nil
         isChat = row.conversationID != nil; nested = false; topLevel = false; isGroup = false; isMore = false
         projectColor = nil; projectExpanded = false; hasStatus = false; rename.isHidden = true
         folder.isHidden = true; device.isHidden = true; deviceMark.isHidden = true
@@ -107,7 +107,7 @@ import AppKit
         }
         planet.isHidden = !isChat || flightHidden
         runningIndicator.isHidden = !showsRunning
-        if showsRunning, window != nil { runningIndicator.startAnimation(nil) }
+        runningIndicator.running = showsRunning
         disclosure.setAccessibilityLabel(title.stringValue); updatePalette(); updateHover(); needsLayout = true
     }
     private func showDevice(_ id: String, store: ConversationStore) {
@@ -189,10 +189,6 @@ import AppKit
         super.updateTrackingAreas(); if let tracking { removeTrackingArea(tracking) }
         let area = NSTrackingArea(rect: .zero, options: [.inVisibleRect, .mouseEnteredAndExited, .activeInKeyWindow], owner: self)
         addTrackingArea(area); tracking = area
-    }
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window != nil, showsRunning { runningIndicator.startAnimation(nil) } else { runningIndicator.stopAnimation(nil) }
     }
     override func mouseEntered(with event: NSEvent) { hovering = true; updateHover() }
     override func mouseExited(with event: NSEvent) { hovering = false; updateHover() }

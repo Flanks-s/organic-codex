@@ -44,7 +44,7 @@ import QuartzCore
                 let root=CALayer();root.backgroundColor=NSColor.black.cgColor
                 let material=CALayer();material.frame=CGRect(x:12,y:12,width:40,height:40);material.backgroundColor=NSColor.white.cgColor
                 material.opacity=Float(actual.alphaValue);root.addSublayer(material)
-                let epoch=CACurrentMediaTime()+3600
+                let epoch=VerificationClock.renderOrigin
                 if let group=actual.layer?.animation(forKey:"mode.orrery.appearance")?.copy() as? CAAnimation {
                     group.beginTime=epoch;material.add(group,forKey:"production.material")
                 }
@@ -150,7 +150,7 @@ import QuartzCore
             hot.hold(image(size,color:.red),in:host,below:front,holes:[]);hot.verificationImageLayer?.opacity=0.35
             let beforeHot=viewTree(hot)
             hot.restoreSource(ModeSurfacePicture(image:image(size,color:.green)),in:host,below:front,holes:[]) {}
-            let afterHot=viewTree(hot),hotEpoch=CACurrentMediaTime()+3600
+            let afterHot=viewTree(hot),hotEpoch=VerificationClock.renderOrigin
             func rebase(_ root:CALayer,_ epoch:Double) {
                 for key in root.animationKeys() ?? [] {if let a=root.animation(forKey:key)?.copy() as? CAAnimation {a.beginTime=epoch;root.add(a,forKey:key)}}
                 for child in root.sublayers ?? [] {rebase(child,epoch)}
@@ -171,7 +171,7 @@ import QuartzCore
             host.layer?.backgroundColor=NSColor.green.cgColor
             // AppKit does not attach an unwindowed view's backing subtree automatically. Mirror its actual
             // view/layer order and opacity into CARenderer, retaining every production animation command.
-            let epoch=CACurrentMediaTime()+3600
+            let epoch=VerificationClock.renderOrigin
             let initialRoot=CALayer();initialRoot.backgroundColor=NSColor.green.cgColor;initialRoot.addSublayer(viewTree(plate))
             plate.revealDestination(duration:0.14) {}
             let layer=plate.verificationContentFadeLayer

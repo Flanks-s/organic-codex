@@ -10,6 +10,7 @@ import AppKit
         fileprivate weak var host: NSView?
         fileprivate var generation: UInt64 = 0
         fileprivate var onUnmount: (() -> Void)?
+        fileprivate var referenceUnmount: (() -> Void)?
         fileprivate init(_ transcript: NativeTranscript) { self.transcript = transcript }
         isolated deinit { transcript.dispose(); transcript.removeFromSuperview() }
     }
@@ -70,6 +71,8 @@ import AppKit
         var onApprovalValue: ((Approval, JSONValue) -> Void)?
         var onAnswer: ((UserInputRequest, [String: [String]]) -> Void)?
         var onReviewChanges: ((TranscriptItem) -> Void)?
+        var onReference: ((TranscriptReferenceRequest) -> Void)?
+        var onReferenceHostState: ((Bool) -> Void)?
         var onRevertChanges: ((TranscriptItem) -> Void)?
     }
     private(set) var modeMountGeneration:UInt64=0
@@ -141,6 +144,7 @@ import AppKit
         retire(session)
         modeMountGeneration &+= 1
         session.host = host
+        session.referenceUnmount = { configuration.onReferenceHostState?(false) }
         let lease = Lease(session: session, generation: session.generation)
         host.addSubview(transcript)
         if let frame { _ = lease.place(frame) }
@@ -157,6 +161,8 @@ import AppKit
             if let action = configuration.onApprovalValue { transcript.onApprovalValue = { if lease.canAct { action($0, $1) } } }
             if let action = configuration.onAnswer { transcript.onAnswer = { if lease.canAct { action($0, $1) } } }
             if let action = configuration.onReviewChanges { transcript.onReviewChanges = { if lease.canAct { action($0) } } }
+            transcript.onReferenceHostState = { if lease.isCurrent { configuration.onReferenceHostState?($0) } }
+            if let action = configuration.onReference { transcript.onReference = { if lease.canAct { action($0) } } }
             if let action = configuration.onRevertChanges { transcript.onRevertChanges = { if lease.canAct { action($0) } } }
         }
         transcript.presentationActive = true; transcript.isHidden = !visible
@@ -168,6 +174,7 @@ import AppKit
         retire(session); return true
     }
     private func retire(_ session: Session) {
+        session.referenceUnmount?(); session.referenceUnmount = nil
         session.generation &+= 1; session.host = nil
         let cleanup = session.onUnmount; session.onUnmount = nil
         cleanup?()

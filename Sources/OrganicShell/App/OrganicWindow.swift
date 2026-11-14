@@ -6,6 +6,9 @@ import AppKit
 @MainActor final class OrganicWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     let scene: AutoScene
+    var browserOwner: BrowserOrbWindowOwner?
+    var browserApp: AppController? { app }
+    var browserCanPresent: Bool { !isClosed && collapsed == nil }
     let shell: WindowShell
     let workbench: NormieWorkbench
     let transcriptSessions: NativeTranscriptSessions
@@ -38,7 +41,7 @@ import AppKit
         transcriptSessions = NativeTranscriptSessions(store: store)
         for session in transferredTranscripts { precondition(transcriptSessions.adopt(session), "A new window must adopt the released transcript before constructing hosts") }
         let size = frame.size
-        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+        window = ModeContentWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false, screen: screen)
         window.contentMinSize = CGSize(width: 560, height: 520)
         window.titlebarAppearsTransparent = true
@@ -86,6 +89,20 @@ import AppKit
             case .signOut: self.command(.signOut, tag: 0)
             }
         }
+        scene.sunHover?.command = { [weak self] action in
+            guard let self, !self.isClosed else { return }
+            switch action {
+            case .search: self.command(.search, tag: 0)
+            case .sidebar: self.command(.sidebar, tag: 0)
+            case .profile: self.command(.profile, tag: 0)
+            case .settings: self.command(.settings, tag: 0)
+            case .shortcuts: self.command(.shortcuts, tag: 0)
+            case .collapse: self.command(.collapse, tag: 0)
+            case .signOut: self.command(.signOut, tag: 0)
+            case .newChat, .conversation: break
+            }
+        }
+        scene.sunHover?.bindAccountUsage(app.observeAccountUsage)
         scene.onStatus = { [weak self] in self?.statusText() ?? "" }
         // Sends and stops go to the app's runtime (mock or live) and finish on their receipts (CORE-M7 App 接线).
         scene.onSubmit = { [weak app] c, request, finish in
@@ -120,6 +137,16 @@ import AppKit
             guard let app, let self, let fork = app.runtime.fork(c, at: item.id) else { return }
             (app.windows.first { $0.scene.members.contains { $0.id == fork.id } } ?? self).reveal(fork.id)
         }
+        scene.onForkWhole = { [weak app, weak self] c, _, finish in
+            Task { @MainActor [weak self] in
+                guard let self, !self.isClosed, let runtime = app?.runtime else { return }
+                let result: Result<Conversation, Error>
+                do { result = .success(try await runtime.forkWhole(c)) }
+                catch { result = .failure(error) }
+                guard !self.isClosed else { return }
+                finish(result)
+            }
+        }
         actions.revertTranscript = { [weak app] c, item in app?.runtime.revert(item, in: c) }
         // Live: what Normie does to a conversation goes to the Core (CORE-M7 App 接线): seen (which reads its history),
         // pin, archive, rename, fork, compact, commit. The mock keeps its local handling.
@@ -148,6 +175,12 @@ import AppKit
         }
         // The Status inspector's sub-agent rows open their read-only windows (AP23).
         actions.subAgent = { [weak self] c, s in self?.scene.subAgentWindows.present(subagentID: s.id, of: c) }
+        actions.referencePreview = { [weak app] target, c in
+            await app?.liveArtifacts.referencePreview(target, in: c) ?? .init(state: .unavailable, message: "Preview is unavailable.")
+        }
+        actions.referenceWeb = { [weak app] url in
+            if let open = app?.liveArtifacts.onOpenURL { open(url) } else { NSWorkspace.shared.open(url) }
+        }
         // A new draft starts with General ▸ Default access, once per draft editor (AP11).
         actions.configureComposer = { [weak app] composer, c in
             guard c == nil, let app, !OrganicWindow.defaulted.contains(ObjectIdentifier(composer)) else { return }
@@ -175,10 +208,12 @@ import AppKit
         // (OWC searchChats, renameChat; app audit AP04, AP05, AP17); the window title follows what shows (AP16).
         shell.onModeChange = { [weak self] mode in
             guard let self else { return }
+            self.browserOwner?.modeChanged(mode)
             self.actions.externalCommands = mode == .organic ? Self.windowCommands.union(Self.organicCommands) : Self.windowCommands
             DispatchQueue.main.async { [weak self] in self?.shell.refreshTitle() }
         }
         if !normie { actions.externalCommands = Self.windowCommands.union(Self.organicCommands) }
+        reconcileBrowserOrb()
         titleObservation = store.observe { [weak self] c in
             guard let self, c.id == (self.shell.mode == .normie ? self.workbench.selectedConversation?.id : self.scene.focusTarget) else { return }
             self.shell.refreshTitle()
@@ -295,6 +330,7 @@ import AppKit
 
     func click(_ p: CGPoint) {
         guard !isClosed else { return }
+        browserOwner?.prepareForSceneInput()
         if scene.isMe(at: p) { scene.meClicked(); return }
         if scene.isFocused, let i = scene.column(at: p) { scene.focusColumn(i); return }
         if let c = scene.orb(at: p) { scene.land(c.id, reason: "click") }
@@ -310,6 +346,8 @@ import AppKit
 
     /// Menu commands the window owns rather than the workbench (NormieActions.externalCommands).
     func command(_ command: NormieCommand, tag: Int) {
+        browserOwner?.prepareForSceneInput()
+        defer { reconcileBrowserOrb() }
         if shell.modeContentInputBlocked,[NormieCommand.newChat,.focus,.attach,.inspector,.terminal,.moveWindow,.mergeWindows].contains(command) {return}
         guard !isClosed else { return }
         switch command {
@@ -387,6 +425,7 @@ import AppKit
     /// To the screen's right third (at least 320 pt), floating, showing `id`; the window's arrangement is kept to come
     /// back to. Refused (a beep) without a member to show, or when already collapsed.
     func collapseToSide(_ id: String?, fromFullScreen: Bool = false) {
+        browserOwner?.retire();browserOwner=nil
         // The draft has no command target (WindowModel commandTarget): nothing to collapse to.
         if shell.mode == .organic, scene.composingNew { NSSound.beep(); return }
         if window.styleMask.contains(.fullScreen), let id, collapsed == nil {
@@ -415,6 +454,10 @@ import AppKit
         let size = window.contentRect(forFrameRect: target).size
         let strip = CollapseStrip(store: scene.store, sessions: scene.composers, members: scene.members, shown: id, scale: screen.backingScaleFactor,
                                   transcriptSessions: transcriptSessions)
+        strip.sunHoverBadge = { [weak scene] changed in
+            scene?.sunHover?.refreshData(changed: changed)
+            return scene?.sunHover?.badge
+        }
         strip.frame = CGRect(x: shell.view.bounds.width - size.width, y: 0, width: size.width, height: size.height)
         strip.onRestore = { [weak self] in self?.restoreFromSide() }
         strip.onSelect = { [weak self] id in _ = self?.workbench.select(id) }
@@ -478,6 +521,8 @@ import AppKit
 
     func key(_ e: NSEvent) -> Bool {
         guard !isClosed else { return false }
+        if browserOwner?.full == true,e.keyCode == 53 {browserOwner?.toggleFull();return true}
+        browserOwner?.prepareForSceneInput()
         // Space while a dock node is held: Collapse to it (f050; not while typing: the root only sees keys no editor took).
         if e.keyCode == 49, !e.isARepeat, e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty, let id = scene.pressedNode {
             scene.cancelDrag(); collapseToSide(id); return true
@@ -537,6 +582,7 @@ import AppKit
     /// input, whatever asks, and its end is scheduled for what is left (OWC updateAmbient; app audit AP22).
     private var lastInput = 0.0
     private func updateAmbient(idle _: Bool = false) {
+        browserOwner?.visibilityChanged()
         let left = 8 - (CACurrentMediaTime() - lastInput)
         let visible = window.occlusionState.contains(.visible) && !window.isMiniaturized
         let running = visible && window.isKeyWindow && left > 0
@@ -573,6 +619,8 @@ import AppKit
         collapseToSide(id, fromFullScreen: true)
     }
     func windowDidResignKey(_ n: Notification) {
+        scene.sunHover?.retire()
+        scene.orbTrash.suspend()
         updateAmbient(); scene.updateEditing()
         // A held node goes home when the window loses key, as a header's does. A tear is already between windows.
         if !scene.isTearing { scene.cancelDrag() }
@@ -588,6 +636,8 @@ import AppKit
     func windowWillClose(_ n: Notification) {
         guard !isClosed else { return }
         isClosed = true
+        browserOwner?.retire();browserOwner=nil
+        scene.orbTrash.close()
         app?.closing(self)
         shell.flight.shutdown()
         shell.clearTranscriptStandIns()

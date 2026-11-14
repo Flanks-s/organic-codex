@@ -2,6 +2,10 @@ import AppKit
 import UserNotifications
 
 extension AppController {
+    /// B-stage window entry point; retain and cancel the token with the window. A-stage adds no subscribers.
+    func observeAccountUsage(_ change: @escaping (AccountUsage) -> Void) -> AccountUsageObservation {
+        store.observeAccountUsage(change)
+    }
     /// The app keeps arrivals in the store even when there is no presentation owner.
     func watchArrivals() { store.onAdd = { [weak self] c in self?.front?.scene.admit(c, reason: "arrival") } }
 
@@ -10,14 +14,27 @@ extension AppController {
         core = service
         let live = LiveConversationRuntime(store: store, client: service.client, service: service)
         self.live = live
+        installLiveBrowser(client: service.client)
+        connectBrowserMutations()
         runtime = live
         // Shown in any window (a column, Normie's selection, the strip): its reads are kept current.
         live.isShown = { [weak self] id in
             self?.windows.contains { w in w.strip?.shown == id || (w.shell.mode == .normie ? w.workbench.selectedConversation?.id == id : w.scene.members.contains { $0.id == id }) } ?? false
         }
-        live.onStateChange = { [weak self] in self?.windows.forEach { $0.workbench.refresh() } }
+        live.onStateChange = { [weak self] in self?.liveBrowser?.connectionChanged(self?.live?.isConnected == true); self?.windows.forEach { $0.workbench.refresh() } }
+        // Settings owns its own Usage snapshot, not ConversationStore's quota fields.
+        // A local read/clear refreshes legacy quota visuals and invalidates the Settings cache.
+        // This Settings-only notification never enters the runtime stream or advances its cursor.
+        live.onAccountUsageChange = { [weak self] in
+            guard let self else { return }
+            self.windows.forEach { window in
+                window.scene.dock.refreshOrbs()
+                if window.scene.meController.isQuotaPresented { window.scene.meController.update(window.scene.meModel()) }
+            }
+            self.liveSettings.receive(.init(id: 0, time: nil, method: "account/rateLimits/updated", params: [:]))
+        }
         // One SSE stream: Settings, artifacts and terminals hear it from the runtime.
-        live.onEvent = { [weak self] e in self?.liveSettings.receive(e); self?.liveArtifacts.receive(e); self?.liveTerminals.receive(e) }
+        live.onEvent = { [weak self] e in self?.liveSettings.receive(e); self?.liveArtifacts.receive(e); self?.liveTerminals.receive(e); self?.liveBrowser?.receive(e) }
         // Revert's native confirmation belongs to the window (CORE-M7): the runtime reviews, the window asks.
         live.onRevertRequested = { [weak self, weak live] card, c in
             live?.revertReviewed(card, in: c) { paths, staged, worktree in
@@ -25,6 +42,11 @@ extension AppController {
             }
         }
         connectLive()
+    }
+
+    /// Tools keeps its own tab selection; only its mutation result invalidates the shared browser list.
+    func connectBrowserMutations() {
+        liveArtifacts.onBrowserMutated = { [weak self] in self?.liveBrowser?.noteShellMutation() }
     }
 
     private func connectLive() {

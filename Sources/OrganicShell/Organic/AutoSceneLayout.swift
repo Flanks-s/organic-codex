@@ -37,6 +37,17 @@ extension AutoScene {
     func arrange(_ members: [Conversation], current: String, scheme next: Scheme? = nil) -> (AutoLayout, [String]) {
         let ids = members.map(\.id)
         let sch = next ?? scheme
+        let arrivals=members.map(\.id).filter { id in !self.members.contains{$0.id==id} }
+        let keepTrashColumns=orbTrash.applyingDelta || arrivals.isEmpty || arrivals.allSatisfy(sch.parked.contains)
+        if let browserPort {
+            let certificate = orbTrash.constraint
+            let protected = keepTrashColumns ? certificate?.arrange(members,current:current,scheme:sch,size:size,metrics:metrics,scale:scale) : nil
+            let leases = dock.trashLeaseFacts()
+            let proposed = browserPort.project(members: members, current: current, scheme: sch, size: size,
+                metrics: metrics, scale: scale, protected: protected, hasConstraint: certificate.map { _ in true } ?? false,
+                hasLease: leases.tide != nil || leases.addToken != nil)
+            if let projected = protected ?? proposed { return projected }
+        } else if keepTrashColumns,let certificate=orbTrash.constraint,let projected=certificate.arrange(members,current:current,scheme:sch,size:size,metrics:metrics,scale:scale) { return projected }
         if sch.mode == .focused {
             // Focused / Split: the capsule centred under its columns, the others as orbs either side in the order they
             // took on the way in; a member that arrives meanwhile joins the shorter side, the right one on a tie.

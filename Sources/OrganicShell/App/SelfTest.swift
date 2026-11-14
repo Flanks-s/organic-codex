@@ -108,6 +108,12 @@ import QuartzCore
     /// Every scenario at 1× and at 2× (regression b022: first-frame pixel alignment at both), each in its own folder.
     /// SELFTEST_SCALES=1 or 2 runs one of them, so scripts/selftest.sh can run both at once in two processes.
     static func run(to path: String, size: CGSize) -> Int32 {
+        if ProcessInfo.processInfo.environment["SELFTEST_BODY_PACKAGE"] == "1" { return BodyPackageVerification.run(to:path) }
+        if ProcessInfo.processInfo.environment["SELFTEST_BODY_WIRING"] == "1" { return BodyWiringVerification.run(to: path) }
+#if !M10_DOCK_SELFTEST && !ORGANIC_SELFTEST && !ORB_SELFTEST && !ISLAND_SELFTEST && !M9_SPLIT_SELFTEST && !M11_MODE_SELFTEST
+        if ProcessInfo.processInfo.environment["SELFTEST_MOCK_BODY_STARTUP"] == "1" { return MockBodyStartupVerification.run(to:path) }
+        if ProcessInfo.processInfo.environment["SELFTEST_ORB_SWITCH"] == "1" { return OrbInputVerification.run(to:path) }
+#endif
         if ProcessInfo.processInfo.environment["SELFTEST_HEADER_PULSE"] == "1" {
             return HeaderPulseVerification.run(to: path)
         }

@@ -9,12 +9,18 @@ final class RootView: NSView {
     private var pressed = false
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
+        if let owner, owner.shell.mode == .organic,
+           owner.scene.routeOrbInput(event, ordinary: { [weak owner] point in owner?.click(point) }) { return }
         if owner?.scene.peekClick(at: p) == true { return }
         pressed = owner?.scene.pointerDown(p) ?? false
         if pressed { owner?.scene.pressFromPointer = true } else { owner?.click(p) }
     }
-    override func mouseDragged(with event: NSEvent) { if pressed { owner?.scene.pointerDragged(convert(event.locationInWindow, from: nil)) } }
+    override func mouseDragged(with event: NSEvent) {
+        if owner?.scene.orbInput.isPressed == true { owner?.scene.orbInput.dragged(event); return }
+        if pressed { owner?.scene.pointerDragged(convert(event.locationInWindow, from: nil)) }
+    }
     override func mouseUp(with event: NSEvent) {
+        if owner?.scene.orbInput.isPressed == true { owner?.scene.orbInput.released(event); return }
         guard pressed else { return }
         pressed = false
         let p = convert(event.locationInWindow, from: nil)
@@ -25,9 +31,13 @@ final class RootView: NSView {
         // The press ends here: its mouse-up must not become a click on whatever is under it now (TearSession consumed).
         if pressed { pressed = false }
         owner?.scene.cancelDrag()
+        owner?.scene.orbInput.cancel()
     }
     /// Right-click on the dock: me's account menu, or the node's (f073).
     override func rightMouseDown(with event: NSEvent) {
+        if let owner, owner.shell.mode == .organic,
+           owner.scene.routeOrbInput(event, ordinary: { _ in }) { return }
+        if owner?.scene.isDragging == true { return }
         guard let owner, owner.shell.mode == .organic, let menu = owner.scene.contextMenu(at: convert(event.locationInWindow, from: nil)) else {
             super.rightMouseDown(with: event); return
         }
@@ -49,6 +59,7 @@ final class RootView: NSView {
     }
     /// Force Click on an orb peeks at once (Settings ▸ Organic ▸ Force Click to Peek, on by default; f045).
     override func pressureChange(with event: NSEvent) {
+        guard event.modifierFlags.intersection([.option,.command,.shift,.control]).isEmpty else { return }
         guard event.stage == 2, UserDefaults.standard.object(forKey: "toggle.forceClickPeek") as? Bool ?? true else { return }
         owner?.scene.forcePeek(at: convert(event.locationInWindow, from: nil))
     }

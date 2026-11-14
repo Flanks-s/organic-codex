@@ -33,12 +33,13 @@ extension NativeComposer {
     func beginSegmentTransition(at now: Double) {
         guard !isComposing else { return }
         sampleSegmentTransition(at: now)
+        guard let image = modelButton.segmentImage() else { finishSegmentTransition(); return }
         (scrollView.contentView as? NativeComposerSegmentClipView)?.held = true
         segmentTransition = NativeComposerSegmentMotion(before: segmentViews.map {
             .init(view: $0, rect: $0.frame,
                   opacity: $0.isHidden ? 0 : $0.alphaValue, hidden: $0.isHidden)
         }, began: now, sourceFrame: frame, sourceClip:scrollView.contentView.bounds, sourceClipFrame:scrollView.contentView.frame,
-            sourceModel: NSImage(cgImage:NativeViewBitmap.capture(modelButton,scale:controlScale),size:modelButton.bounds.size))
+            sourceModel: image)
     }
 
     func commitSegmentTransition(at now: Double) {
@@ -46,8 +47,8 @@ extension NativeComposer {
         transition.targetFrame = frame
         transition.targetClipFrame = scrollView.bounds
         transition.targetClip = (scrollView.contentView as? NativeComposerSegmentClipView)?.normalized(scrollView.contentView.bounds) ?? scrollView.contentView.bounds
-        modelButton.segmentBlend = nil
-        transition.targetModel = NSImage(cgImage:NativeViewBitmap.capture(modelButton,scale:controlScale),size:modelButton.bounds.size)
+        guard let image = modelButton.segmentImage(blended: false) else { finishSegmentTransition(); return }
+        transition.targetModel = image
         transition.after = segmentViews.map {
             .init(view: $0, rect: $0.frame, opacity: $0.isHidden ? 0 : 1, hidden: $0.isHidden)
         }

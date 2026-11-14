@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py split, split-model, native, overlay (overlay: debt #75). Kept, not deleted (#181).
 """Export HEAD, overlay this round's NativeComposer implementation/checks, and build incrementally without windows/Core.
 --suite model --baseline measures the committed implementation with the new checks; failures demonstrate the regression.
 """

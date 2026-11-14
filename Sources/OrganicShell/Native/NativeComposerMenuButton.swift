@@ -10,6 +10,16 @@ import CoreText
         var progress: CGFloat
     }
     var segmentBlend: SegmentBlend? { didSet { needsDisplay = true } }
+    var drawingPlate = false
+    /// Draw immutable endpoints, including an interrupted blend, without consulting backing opacity.
+    func segmentImage(blended: Bool = true) -> NSImage? {
+        let saved = segmentBlend
+        if !blended { segmentBlend = nil }
+        defer { segmentBlend = saved }
+        guard let image = M10DockPicture.draw(self, scale: drawingScale, plates: false),
+              !M10DockPicture.tiles(image, scale: drawingScale).isEmpty else { return nil }
+        return NSImage(cgImage: image, size: bounds.size)
+    }
     private var presentationItem: NSMenuItem?
     private var tracking: NSTrackingArea?
     private var hovering = false
@@ -97,7 +107,7 @@ import CoreText
         return extra + ceil(width*drawingScale)/drawingScale
     }
     override func draw(_ dirtyRect: NSRect) {
-        if let blend = segmentBlend {
+        if !drawingPlate, let blend = segmentBlend {
             for (image, alpha) in [(blend.from, 1-blend.progress), (blend.to, blend.progress)] where alpha > 0 {
                 image.draw(in: CGRect(origin:.zero,size:image.size), from:.zero, operation:.sourceOver,
                            fraction:alpha,respectFlipped:true,hints:[.interpolation:NSImageInterpolation.none])
@@ -110,6 +120,7 @@ import CoreText
             NativeDisplayOptions.plate(alpha:drawingPressed ? 0.14 : 0.08).setFill()
             NSBezierPath(roundedRect: bounds, xRadius: 7, yRadius: 7).fill()
         }
+        if drawingPlate { return }
         let base = contentTintColor ?? NSColor.secondaryLabelColor
         let color = base.withAlphaComponent(base.alphaComponent * (isEnabled ? 1 : 0.45))
         let chevronWidth = self.chevronWidth, padding = horizontalPadding

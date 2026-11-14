@@ -31,7 +31,8 @@ import QuartzCore
                 c.concatenate(CGAffineTransform(a:x.x-o.x,b:x.y-o.y,c:y.x-o.x,d:y.y-o.y,tx:o.x,ty:o.y));c.clip(to:v.bounds)
                 if let color=v.layer?.backgroundColor {c.setFillColor(color);let r=v.layer?.cornerRadius ?? 0;c.addPath(CGPath(roundedRect:v.bounds,cornerWidth:r,cornerHeight:r,transform:nil));c.fillPath()}
                 NSGraphicsContext.saveGraphicsState();NSGraphicsContext.current=NSGraphicsContext(cgContext:c,flipped:v.isFlipped)
-                if plates,let b=v as? NSButton {let title=b.title,image=b.image;b.title="";b.image=nil;b.draw(b.bounds);b.title=title;b.image=image}
+                if let b=v as? NativeComposerMenuButton {let saved=b.drawingPlate;b.drawingPlate=plates;b.draw(b.bounds);b.drawingPlate=saved}
+                else if plates,let b=v as? NSButton {let title=b.title,image=b.image;b.title="";b.image=nil;b.draw(b.bounds);b.title=title;b.image=image}
                 else {v.draw(source.convert(source.bounds,to:v).intersection(v.bounds))}
                 NSGraphicsContext.restoreGraphicsState();c.restoreGState()
             }
@@ -119,6 +120,7 @@ import QuartzCore
         weak var source:NSView?
         let layer=CALayer(),history=M10DockHistory()
         var tiles:[(M10DockPicture.Tile,ChordTrail,CALayer)]=[],plates:[(M10DockPicture.Tile,CALayer)]=[]
+        var modelSplit:Int?
         let gaussianInk=CALayer()
         var gaussian:ContentGaussianTransition?
         var active=false,prepared=CGSize.zero
@@ -218,7 +220,7 @@ import QuartzCore
                 self.scheduleIdlePreparation()
             }
         }
-        if !onePart,atCommit && (e.dirty || e.parts.contains(where:{$0.source?.bounds.size != $0.prepared})) {e.reset()}
+        if !onePart,atCommit && (e.dirty || source.modelButton.segmentBlend != nil || e.parts.contains(where:{$0.source?.bounds.size != $0.prepared})) {e.reset();e.dirty=true;e.preparationViews=nil}
         guard !e.active,!e.moving,e.dirty || e.parts.contains(where:{$0.source?.bounds.size != $0.prepared}) else{return}
         if e.preparationViews == nil {
             e.reset();for p in e.parts{p.layer.removeFromSuperlayer()};e.parts=[]
@@ -238,7 +240,14 @@ import QuartzCore
             #if M10_DOCK_SELFTEST
             p.full=full
             #endif
-            p.tiles=M10DockPicture.tiles(M10DockPicture.ink(full,solid),scale:scale).map {tile in let t=ChordTrail(),l=CALayer();ReplicaContainerAudit.register(l,material:.glyph,note:"Composer own-draw tight alpha ink");l.contents=tile.image;l.contentsScale=scale;t.layer.addSublayer(l);p.layer.addSublayer(t.layer);return(tile,t,l)}
+            var tiles=M10DockPicture.tiles(M10DockPicture.ink(full,solid),scale:scale)
+            if view === source.modelButton,let blend=source.modelButton.segmentBlend {
+                guard let a=blend.from.cgImage(forProposedRect:nil,context:nil,hints:nil),let b=blend.to.cgImage(forProposedRect:nil,context:nil,hints:nil) else{continue}
+                let from=M10DockPicture.tiles(a,scale:scale),to=M10DockPicture.tiles(b,scale:scale)
+                guard !from.isEmpty,!to.isEmpty else{continue}
+                p.modelSplit=from.count;tiles=from+to
+            }
+            p.tiles=tiles.map {tile in let t=ChordTrail(),l=CALayer();ReplicaContainerAudit.register(l,material:.glyph,note:"Composer own-draw tight alpha ink");l.contents=tile.image;l.contentsScale=scale;t.layer.addSublayer(l);p.layer.addSublayer(t.layer);return(tile,t,l)}
             p.plates=M10DockPicture.plates(solid,scale:scale).map {tile in let l=CALayer();l.contents=tile.image;l.contentsScale=scale;let x=min(0.49,20/tile.rect.width),y=min(0.49,20/tile.rect.height);l.contentsCenter=CGRect(x:x,y:y,width:1-2*x,height:1-2*y);p.layer.insertSublayer(l,at:0);return(tile,l)}
             // Prepared at the same semantic commit. Gaussian ink shares immutable CGImages, never a backing tree.
             #if M10_DOCK_SELFTEST
@@ -290,10 +299,24 @@ import QuartzCore
             e.moving = e.moving || f.exposure.gate>0
             let active=(f.exposure.gate>0 || semanticGaussian) && !source.isHiddenOrHasHiddenAncestor && !view.isHidden && !e.dirty
             if !active {p.reset();continue}
+            let gaussianGlyphs=p.gaussianInk.sublayers ?? []
+            if p.modelSplit != nil && gaussianGlyphs.count != p.tiles.count {
+                #if M10_DOCK_SELFTEST
+                modelMaterialMismatchCount += 1
+                #endif
+                p.reset();continue
+            }
             p.active=true;p.layer.isHidden=false
             var alpha:Float=1;var ancestor:NSView?=view
             while let v=ancestor,v !== host {alpha *= v === view ? Float(v.alphaValue):(v.layer?.presentation()?.opacity ?? Float(v.alphaValue));ancestor=v.superview}
             p.layer.opacity=alpha;view.layer?.opacity=0
+            if let split=p.modelSplit {
+                let k=source.modelButton.segmentBlend?.progress ?? 1
+                for (i,(_,trail,_)) in p.tiles.enumerated() {
+                    let opacity=Float(i<split ? 1-k:k);trail.layer.opacity=opacity
+                    gaussianGlyphs[i].opacity=opacity
+                }
+            }
             p.layer.frame=foreground.bounds
             #if M10_DOCK_SELFTEST
             p.glyphFrames=[]
@@ -335,6 +358,7 @@ import QuartzCore
         };refreshForeground()
     }
     #if M10_DOCK_SELFTEST
+    private(set) var modelMaterialMismatchCount=0
     private(set) var gaussianPreparationMs=0.0
     var verificationGaussianFields:[String:Any] {
         let parts=entries.values.flatMap{$0.parts}.filter{!$0.gaussianInk.isHidden}

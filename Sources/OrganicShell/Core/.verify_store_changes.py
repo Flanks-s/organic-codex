@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py native, settings, overlay (overlay: debt #75). Kept, not deleted (#181).
 """Offscreen checks in a frozen HEAD archive. Retains per-suite debug incremental object caches.
 Run from a private work/baseline checkout, with the output directory as the second positional argument.
 No runtime environment or application switches are added.

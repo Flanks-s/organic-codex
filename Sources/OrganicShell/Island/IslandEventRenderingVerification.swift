@@ -9,7 +9,7 @@ import QuartzCore
         for scale:CGFloat in [1,2] {
             let header=HeaderIsland(),root=IslandPlane(frame:CGRect(x:0,y:0,width:400,height:300))
             root.addSubview(header)
-            var time=CACurrentMediaTime()+3600
+            var time=VerificationClock.renderOrigin
             header.now={time};header.motionExposure.enabled=false
             header.configure(.init(id:"render-phase",title:"Filter rendering",columnWidth:400,band:44,ambient:false,scale:scale))
             header.receive(.init(kind:.approval,text:"1 approval needs you",at:time),at:time)

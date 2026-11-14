@@ -25,9 +25,7 @@ import SwiftUI
     }
     static func glyph(_ identity: OrbIdentity, in rect: CGRect, weight: CGFloat = 1.8) {
         guard !capturesPlates else {return}
-        guard let c = NSGraphicsContext.current?.cgContext else { return }
-        c.saveGState(); c.setStrokeColor(identity.tint.color.cgColor); c.setLineWidth(weight); c.setLineCap(.round); c.setLineJoin(.round)
-        c.addPath(OrbCelestialGlyph(symbol: identity.symbol).path(in: rect).cgPath); c.strokePath(); c.restoreGState()
+        BodyFaceDrawing.draw(identity.resolvedBodyID,in:rect)
     }
 }
 
@@ -182,15 +180,38 @@ import SwiftUI
     override func layout() { super.layout(); glass.frame = bounds; glass.cornerRadius = bounds.width / 2; ink.frame = bounds }
 }
 @MainActor private final class SheetIdentityPreviewInk: OverlayView {
-    var identity = OrbIdentity.assigned(0) { didSet { needsDisplay = true } }
+    private let body=BodyPresentationLeaf()
+    private var windowObservations: [NSObjectProtocol]=[]
+    var identity = OrbIdentity.assigned(0) { didSet { needsDisplay = true; updateBody() } }
     var level = 0.3 { didSet { needsDisplay = true } }
+    override init(frame: NSRect) { super.init(frame:frame); wantsLayer=true; layer?.addSublayer(body.layer) }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() { super.layout(); updateBody() }
+    override func viewDidHide() { super.viewDidHide(); updateBody() }
+    override func viewDidUnhide() { super.viewDidUnhide(); updateBody() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for token in windowObservations { NotificationCenter.default.removeObserver(token) }; windowObservations=[]
+        if let window {
+            for name in [NSWindow.didChangeOcclusionStateNotification,NSWindow.didMiniaturizeNotification,NSWindow.didDeminiaturizeNotification,NSWindow.didBecomeKeyNotification,NSWindow.didResignKeyNotification] {
+                windowObservations.append(NotificationCenter.default.addObserver(forName:name,object:window,queue:.main) { [weak self] _ in MainActor.assumeIsolated { self?.updateBody() } })
+            }
+        }
+        updateBody()
+    }
+    private func updateBody() {
+        guard bounds.width>0 else { return }
+        let visible = !isHiddenOrHasHiddenAncestor && window?.isVisible == true && window?.isMiniaturized != true && window?.occlusionState.contains(.visible) == true
+        body.configure(bodyID:identity.resolvedBodyID,outer:bounds.width,drawingSize:bounds.width,scale:window?.backingScaleFactor ?? 2,unknown:false,visible:visible,keyWindow:window?.isKeyWindow ?? false)
+        body.setGeometry(view:self,center:CGPoint(x:bounds.midX,y:bounds.midY))
+    }
+    isolated deinit { for token in windowObservations { NotificationCenter.default.removeObserver(token) }; body.dispose() }
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.saveGraphicsState(); NSBezierPath(ovalIn: bounds.insetBy(dx: 1, dy: 1)).addClip()
         NSColor.white.withAlphaComponent(0.065).setFill(); bounds.fill()
-        identity.tint.color.withAlphaComponent(0.32).setFill()
+        identity.bodyTintColor.withAlphaComponent(0.32).setFill()
         let h = bounds.height * CGFloat(min(1, max(0, level.isFinite ? level : 0)))
         CGRect(x: 0, y: bounds.height - h, width: bounds.width, height: h).fill()
-        SheetStyle.glyph(identity, in: bounds.insetBy(dx: bounds.width * 0.22, dy: bounds.height * 0.22), weight: 2.1)
         NSGraphicsContext.restoreGraphicsState()
         NSColor.white.withAlphaComponent(0.2).setStroke(); let p = NSBezierPath(ovalIn: bounds.insetBy(dx: 0.5, dy: 0.5)); p.lineWidth = 1; p.stroke()
     }

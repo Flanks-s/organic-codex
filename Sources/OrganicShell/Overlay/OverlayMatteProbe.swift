@@ -16,7 +16,7 @@ struct OverlayExposureFrame { var time: Double; var sample: ExposureSample }
         let source=CALayer(),group=CALayer();source.anchorPoint = .zero;source.frame=root.bounds;source.contents=image;root.addSublayer(source)
         source.shadowColor = NSColor.black.cgColor; source.shadowOpacity = 0.42; source.shadowRadius = 18; source.shadowOffset = CGSize(width: 0, height: 16)
         group.anchorPoint = .zero;group.frame=root.bounds;root.addSublayer(group)
-        let origin=CACurrentMediaTime()+3600
+        let origin=VerificationClock.renderOrigin
         var pixels=[UInt8](repeating:0,count:40000)
         func read() -> UInt8 {
             for _ in 0..<3 {

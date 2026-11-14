@@ -12,7 +12,9 @@ import Foundation
     private var owners: [UUID: String] = [:]
     private var stopIDs: Set<UUID> = []
     init(store: ConversationStore, replay: MockReplay? = nil, animatePlayback: Bool = true) { self.store = store; self.replay = replay ?? MockReplay(store: store); self.animatePlayback = animatePlayback }
-    func start() { replay.start(live: animatePlayback) }
+    func start() {
+        replay.start(live: animatePlayback)
+    }
     func shutdown() { replay.stopPlayback() }
     @discardableResult func send(_ c: Conversation, text: String, followUp: FollowUp = .steer) -> Bool { replay.send(c, text: text, followUp: followUp) }
     @discardableResult func submit(_ s: CoreSubmission, in c: Conversation, completion: @escaping @MainActor (CoreSubmissionReceipt) -> Void) -> Bool {
@@ -57,6 +59,16 @@ import Foundation
     func fork(_ c: Conversation, at itemID: String) -> Conversation? {
         guard let i = c.items.firstIndex(where: { $0.id == itemID }) else { return nil }; let fork = createUnsentConversation(title: "Fork of " + c.title, projectID: c.projectID, deviceID: c.deviceID)
         fork.items = Array(c.items.prefix(through: i)); fork.draft = c.items[i].text; store.add(fork); return fork
+    }
+    func forkWhole(_ c: Conversation) async throws -> Conversation {
+        let items = c.completedForkItems
+        guard store.conversation(c.id) === c, !c.archived, !items.isEmpty else { throw CoreWire.failure("No completed history to fork yet") }
+        // App Server inherits the source's explicit name; it does not prepend "Fork of".
+        let fork = createUnsentConversation(title: c.title, projectID: c.projectID, deviceID: c.deviceID)
+        fork.cwd = c.cwd; fork.settings = c.settings; fork.next = c.next; fork.access = c.access
+        fork.items = items; fork.historyLoaded = true
+        registerWholeFork(fork); store.changed(fork)
+        return fork
     }
     func compactNow(_ c: Conversation) { c.compactions += 1; c.contextUsed *= 0.5; store.changed(c) }
     func commit(_ c: Conversation, message: String) { c.lastCommit = .init(message: message, hash: "prototype", at: Date()); store.changed(c) }

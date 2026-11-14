@@ -43,6 +43,51 @@ import AppKit
     var onEdit: (() -> Void)? { didSet { if (oldValue == nil) != (onEdit == nil) { layoutActions() } } }
     var onFork: (() -> Void)? { didSet { if (oldValue == nil) != (onFork == nil) { layoutActions() } } }
     var allowsRevert = true
+    private(set) var referenceInteraction: NativeReferenceInteraction?
+    private weak var referenceNextKeyView: NSView?
+    private var referenceSourcesHidden = false
+    private var referenceWasVisible = false
+    private var referenceIsVisible: Bool { onReference != nil && !body.isHidden && !referenceSourcesHidden && !body.visibleRect.isEmpty && NativeInteractionSurface.permits(body) }
+    var onReference: ((ReferenceTarget, NSRange) -> Void)? { didSet { updateReferences() } }
+    func reconcileReferenceVisibility() { if referenceWasVisible != referenceIsVisible { updateReferences() } }
+    func updateReferences() {
+        referenceWasVisible = referenceIsVisible
+        guard referenceWasVisible, let onReference else {
+            if let interaction = referenceInteraction, body.nextKeyView === interaction { body.nextKeyView = referenceNextKeyView }
+            referenceInteraction?.revoke(); referenceInteraction?.removeFromSuperview(); referenceInteraction = nil; return
+        }
+        let interaction = referenceInteraction ?? NativeReferenceInteraction()
+        interaction.configure(body: body, action: onReference)
+        if !interaction.hits.isEmpty {
+            if referenceInteraction == nil {
+                referenceNextKeyView = body.nextKeyView; body.nextKeyView = interaction; interaction.nextKeyView = referenceNextKeyView
+                referenceInteraction = interaction; addSubview(interaction)
+            }
+        } else {
+            if body.nextKeyView === interaction { body.nextKeyView = referenceNextKeyView }
+            interaction.removeFromSuperview(); referenceInteraction = nil
+        }
+    }
+    func rawSelection(_ range: NSRange) -> String? {
+        let offsets = sourceOffsets
+        guard range.length > 0, range.location >= 0, NSMaxRange(range) <= offsets.count else { return nil }
+        let mapped = offsets[range.location..<NSMaxRange(range)].filter { $0 >= 0 }
+        guard let first = mapped.first, let last = mapped.last, last >= first else { return nil }
+        if range.location == 0, range.length == offsets.count { return item.text }
+        var source = NSRange(location: first, length: last + 1 - first)
+        for reference in TranscriptContentIndex.parse(item.text) where reference.labelRange.length > 0 && NSIntersectionRange(source, reference.labelRange) == reference.labelRange {
+            source = NSUnionRange(source, reference.range)
+        }
+        return (item.text as NSString).substring(with: source)
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "c", window?.firstResponder === body,
+           NativeInteractionSurface.permits(body), let text = rawSelection(body.selectedRange()) {
+            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string); return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     private var trackingInteraction = false
     var blocksHandoff: Bool {
@@ -65,7 +110,7 @@ import AppKit
         stream = nil; streamGeneration = -1; fixedSourceOffsets = []
         body.setSelectedRange(NSRange(location: 0, length: 0))
         applyFlightHidden([], textHidden: false); applyHiddenSourceRanges([])
-        onToggle = nil; onReview = nil; onRevert = nil; onEdit = nil; onFork = nil
+        onToggle = nil; onReview = nil; onRevert = nil; onEdit = nil; onFork = nil; onReference = nil
         activityMark.status = .none; if hasChrome { metaStatus.status = .none }
         isHidden = true
     }
@@ -169,7 +214,9 @@ import AppKit
             if body.selectedRanges != restored { body.selectedRanges = restored }
         }
         stream = streamed; streamGeneration = prepared.streamGeneration
+        body.isAutomaticLinkDetectionEnabled = false
         fixedSourceOffsets = streamed == nil ? prepared.offsets : []
+        defer { updateReferences() }
         let g = prepared.geometry
         geometry = g
         // Every child sits on the pixel grid: on screen a fractional layer is resampled, in a capture it is drawn
@@ -333,10 +380,11 @@ import AppKit
         let bodyHidden = textHidden || (geometry?.isCompact == true && parts.contains(.activityText))
         let markHidden = geometry?.indicatorRect == nil || parts.contains(.activityMark)
         if hasChrome, divider.isHidden != dividerHidden { divider.isHidden = dividerHidden }
-        if body.isHidden != bodyHidden { body.isHidden = bodyHidden }
+        if body.isHidden != bodyHidden { body.isHidden = bodyHidden; updateReferences() }
         if activityMark.isHidden != markHidden { activityMark.isHidden = markHidden }
     }
     func applyHiddenSourceRanges(_ indices: IndexSet) {
+        if referenceSourcesHidden != !indices.isEmpty { referenceSourcesHidden = !indices.isEmpty; updateReferences() }
         guard let manager = body.layoutManager as? NativeTranscriptFlightLayoutManager, let container = body.textContainer else { return }
         if indices.isEmpty { if manager.setOmittedRanges([], in: container) { body.needsDisplay = true }; return }
         var ranges: [NSRange] = [], start: Int?
@@ -356,6 +404,39 @@ import AppKit
     @discardableResult func copyMessage(to pasteboard:NSPasteboard = .general)->Bool {
         guard superview != nil,NativeInteractionSurface.permits(self)else{return false}
         pasteboard.clearContents();return pasteboard.setString(item.text,forType:.string)
+    }
+    /// Lazy source mapping, invoked only by a selection/drag request, never by row configuration or streaming.
+    func attachmentQuotes(conversationID: String) -> [DragAttachmentPayload.Quote] {
+        let shown = body.string as NSString, offsets = sourceOffsets, sourceLength = (item.text as NSString).length
+        return body.selectedRanges.compactMap { wrapped in
+            let range = wrapped.rangeValue
+            guard range.location != NSNotFound, range.location >= 0, range.length > 0,
+                  range.location < shown.length, range.length <= shown.length - range.location,
+                  range.location < offsets.count, range.length <= offsets.count - range.location else { return nil }
+            let mapped = offsets[range.location..<(range.location + range.length)].filter { $0 >= 0 && $0 < sourceLength }
+            guard let first = mapped.min(), let last = mapped.max() else { return nil }
+            let quote = DragAttachmentPayload.Quote(conversationID: conversationID, itemID: item.id,
+                range: NSRange(location: first, length: last - first + 1), exactText: shown.substring(with: range))
+            return quote.isValid ? quote : nil
+        }
+    }
+    /// Multiple selected items remain separate source ranges in transcript order.
+    func dragAttachmentQuotes() -> [DragAttachmentPayload.Quote] {
+        var parent = superview
+        while let view = parent {
+            if let transcript = view as? NativeTranscript {
+                func rows(_ view: NSView) -> [NativeTranscriptRow] {
+                    if let row = view as? NativeTranscriptRow { return row.isHidden ? [] : [row] }
+                    return view.subviews.flatMap(rows)
+                }
+                let order = Dictionary(transcript.conversation.items.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+                return rows(transcript).filter { order[$0.item.id] != nil }
+                    .sorted { order[$0.item.id]! < order[$1.item.id]! }
+                    .flatMap { $0.attachmentQuotes(conversationID: transcript.conversation.id) }
+            }
+            parent = view.superview
+        }
+        return []
     }
     @objc private func edited() { if !isHiddenOrHasHiddenAncestor { onEdit?() } }
     @objc private func forked() { if !isHiddenOrHasHiddenAncestor { onFork?() } }

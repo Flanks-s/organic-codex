@@ -38,6 +38,9 @@ extension AutoScene {
     }
     /// Only a semantic mode/Collapse admission can claim the views; background resize/store/prewarm cannot.
     func setTranscriptPresentationActive(_ active: Bool) {
+        if !active { sunHover?.retire() }
+        if !active { orbInput.cancel(); orbMenu.dismiss(); orbFlights.cancel(); orbToast.dismiss(); orbHint.cancel() }
+        if !active,!modeContentEpochFrozen {dock.retireTide()}
         if !modeContentEpochFrozen {for column in nodes.values {column.island?.setPulsePresentationRetired(!active)}}
         guard let transcriptSessions, !transcriptSessions.isDisposed else { return }
         transcriptsPresented = active
@@ -172,7 +175,11 @@ extension AutoScene {
     func customize(_ id: String, in host: NSView? = nil) {
         let host = host ?? overlayPlane
         guard let c = conversation(id), host.window != nil else { return }
-        customizeSheet.onDone = { [weak self] r in self?.applyCustomization(id, r) }
+        customizeSheet.bodySelectionEnabled=store.canSelectBodyIdentity
+        customizeSheet.onDone = { [weak self, weak c] r in
+            guard let self,let c,self.conversation(id) === c,self.store.conversation(id) === c,!c.archived else { return }
+            self.applyCustomization(id,r)
+        }
         customizeSheet.onCancel = {}
         customizeSheet.present(name: c.title, identity: orbIdentity(of: c), level: c.contextUsed, in: host)
     }
@@ -180,9 +187,11 @@ extension AutoScene {
     func applyCustomization(_ id: String, _ r: SheetChatCustomization) {
         guard let c = conversation(id) else { return }
         if r.name != c.title { if let onRename { onRename(c, r.name) } else { c.title = r.name } }
-        c.identitySymbol = String(describing: r.symbol); c.identityTint = String(describing: r.tint)
+        if store.canSelectBodyIdentity,BodyIdentityAdapter.choices.contains(r.resolvedBodyID) {
+            c.identitySymbol = r.resolvedBodyID; c.identityTint = r.tintID ?? String(describing:r.tint)
+            onIdentityChanged?(c)
+        }
         store.changed(c)
-        onIdentityChanged?(c)
         dock.refreshOrbs()
     }
     /// For demos: what Done does, and the sheet away.
@@ -260,6 +269,7 @@ extension AutoScene {
         remountComposers()
     }
     func setAmbientRunning(_ on: Bool) {
+        dock.resumeSunHoverTide(source: "ambient")
         guard on != ambientRunning else { return }
         ambientRunning = on
         dock.setAmbientRunning(on)
@@ -276,6 +286,7 @@ extension AutoScene {
     func backingChanged(_ next: CGFloat) {
         guard next > 0, next != scale else { return }
         scale = next
+        sunHover?.retire()
         statusLine.contentsScale = next
         peekNode.scale = next
         if drag != nil { cancelDrag() }
@@ -302,6 +313,8 @@ extension AutoScene {
     }
 
     func reduceMotionChanged() {
+        sunHover?.reductionChanged()
+        dock.refreshTideReduction()
         discardNewChatPreparation()
         showWashes()
         dock.refreshOrbs()
@@ -330,6 +343,8 @@ extension AutoScene {
     }
 
     func changed(_ c: Conversation) {
+        sunHover?.refreshData(changed: c)
+        orbMenu.validateTarget()
         if modeContentEpochFrozen || transcriptSessions?.existingTranscript(for:c.id)?.modeContentIsCatchingUp == true {modeContentEpochPending.insert(c.id);return}
         prewarmActivity() // every delta invalidates unfinished work, including offscreen/nonmember publications
         let work=M10ColumnWorkTrace.scope("scene.changed",["id":c.id,"moving":isMoving]);defer{work.end()}
@@ -341,8 +356,10 @@ extension AutoScene {
             entry.bridge.update(c)
         }
         if c.archived, members.contains(where: { $0.id == c.id }) { remove(c.id, reason: "archived"); return }
+        if !c.archived, orbArchivePositions[c.id] != nil, restoreOrbArchive(c) { return }
         // Undo brings an archived member back, full again (the selection it had).
         if !c.archived, archivedOut.remove(c.id) != nil { archiveToast.dismiss(); admit(c, reason: "unarchived"); return }
+        dock.receiveTide(c, enabled: sunHoverTideDeliveryEnabled)
         dock.refreshOrbs()
         guard let i = columns.firstIndex(where: { $0.conversation === c }) else { dock.refreshWords(); return }
         // Off screen (Normie shows, or the window is not up yet): the column waits until the scene is seen again. On
@@ -413,6 +430,7 @@ extension AutoScene {
         CATransaction.begin(); CATransaction.setDisableActions(true)
         columns[i].renderDisplay(fullWidth: fullWidth(i, layout), briefWidth: briefWidth(i, layout))
         columns[i].showRest(full: isFull(id))
+        dock.tideReadingRoomChanged()
         CATransaction.commit()
         columns[i].configureIsland(islandVariant(for: id), width: columns[i].rect.target.width)
         dock.refreshWords()

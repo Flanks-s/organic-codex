@@ -130,7 +130,8 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
     private static var checks = 0, findings: [String] = []
     private static func check(_ condition: Bool, _ label: String) { checks += 1; if !condition { findings.append(label); print("FINDING: " + label) } }
     private static func run(_ name: String, _ body: () async throws -> Void) async {
-        do { try await body(); print("PASS " + name) } catch { check(false, name + ": " + error.localizedDescription) }
+        let before = findings.count
+        do { try await body(); print((findings.count == before ? "PASS " : "FAIL ") + name) } catch { check(false, name + ": " + error.localizedDescription) }
     }
     private static func wait(_ label: String, _ predicate: () -> Bool) async {
         for _ in 0..<20_000 { if predicate() { return }; await Task.yield() }
@@ -143,6 +144,19 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
     }
     static func main() async {
         let previous = ModelCatalog.models
+        if ProcessInfo.processInfo.environment["CORE_4954_SKIP"] != "1" {
+            await run("#49 ambiguous writes reconcile without resending", debt49)
+            await run("#50 late failure preserves newer draft", debt50)
+            await run("#51 history metadata survives watermark", debt51)
+            await run("#52 snapshot and replay satellite authority", debt52)
+            await run("#53 presentation version boundary", debt53)
+            await run("#54 fenced code cannot become brief", debt54)
+        }
+        if ProcessInfo.processInfo.environment["CORE_4954_ONLY"] == "1" {
+            ModelCatalog.models = previous
+            print("CORE_4954: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0 : 1)
+        }
         await run("wire, HTTP envelopes and intercepted SSE", wire)
         await run("revert paths inside the repository", revertPaths)
         await run("endpoint ownership, health and capabilities", ownership)
@@ -157,6 +171,7 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
         await run("S3 private attachment sidecars, migration and failure atomicity") { try CoreAttachmentVerification.run(check: check) }
         await run("S3 sidecar-backed submission inputs and unreadable payload rejection", attachmentSubmissions)
         await run("first-free identity assignment and custom identities", identityAssignment)
+        await run("whole-history Fork, completed boundary and unchanged message Fork", wholeForks)
         await run("M8 settings protocol, pagination and acknowledged writes", m8Settings)
         await run("S1 observable Settings, permission and injected notifications") {try await CoreSettingsAsyncVerification.run(check:check)}
         await run("C08–C10 Settings thread options, Browser envelope and child routes", settingsComponentContracts)
@@ -276,10 +291,64 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
         let real = tmp.resolvingSymlinksInPath().path
         check(LiveConversationRuntime.repositoryRelative(real + "/README.md", root: real) == "README.md", "revert path: absolute file inside the repository")
         check(LiveConversationRuntime.repositoryRelative(real + "/a/b.swift", root: real) == "a/b.swift", "revert path: nested file")
-        check(LiveConversationRuntime.repositoryRelative("/tmp/../private/tmp/x", root: "/private/tmp") == "x", "revert path: resolves dot-dot and /tmp")
+        // On macOS /tmp is a symlink: walking through it before ".." reaches /private.
+        check(LiveConversationRuntime.repositoryRelative("/tmp/../tmp/x", root: "/private/tmp") == "x", "revert path: resolves dot-dot and /tmp")
+        check(LiveConversationRuntime.repositoryRelative("/tmp/../private/tmp/x", root: "/private/tmp") == nil, "revert path: dot-dot through the symlink cannot escape and re-enter by a textual prefix")
         check(LiveConversationRuntime.repositoryRelative("/etc/hosts", root: real) == nil, "revert path: outside the repository is refused")
         check(LiveConversationRuntime.repositoryRelative(real + "-other/x", root: real) == nil, "revert path: a sibling with the same prefix is outside")
         check(LiveConversationRuntime.repositoryRelative("docs/a.md", root: real) == "docs/a.md", "revert path: already relative stays")
+
+        let fm = FileManager.default
+        let unique = "organic-revert-private-\(UUID().uuidString)"
+        let privateDirectory = URL(fileURLWithPath: "/private/tmp/" + unique)
+        try fm.createDirectory(at: privateDirectory, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: privateDirectory) }
+        let privateRoot = privateDirectory.path + "/repo"
+        let shortRoot = "/tmp/" + unique + "/repo"
+        try fm.createDirectory(atPath: privateRoot, withIntermediateDirectories: true)
+        for (rootLabel, root) in [("private", privateRoot), ("short", shortRoot)] {
+            for (fileLabel, fileRoot) in [("private", privateRoot), ("short", shortRoot)] {
+                for relative in ["deleted.swift", "a/b/deleted.swift"] {
+                    check(LiveConversationRuntime.repositoryRelative(fileRoot + "/" + relative, root: root) == relative,
+                          "revert path: deleted \(relative), \(rootLabel) root, \(fileLabel) file")
+                }
+            }
+        }
+        try Data("existing".utf8).write(to: URL(fileURLWithPath: privateRoot + "/existing.swift"))
+        check(LiveConversationRuntime.repositoryRelative(shortRoot + "/existing.swift", root: privateRoot) == "existing.swift",
+              "revert path: existing short file with private root")
+        check(LiveConversationRuntime.repositoryRelative(privateRoot + "/existing.swift", root: shortRoot) == "existing.swift",
+              "revert path: existing private file with short root")
+
+        guard let buffer = realpath(tmp.path, nil) else { throw CocoaError(.fileReadUnknown) }
+        let physicalTemporaryRoot = String(cString: buffer)
+        free(buffer)
+        let deleted = tmp.appending(path: "deleted.swift")
+        try Data("deleted".utf8).write(to: deleted)
+        try fm.removeItem(at: deleted)
+        for (rootLabel, root) in [("temporary", tmp.path), ("physical", physicalTemporaryRoot)] {
+            for (fileLabel, fileRoot) in [("temporary", tmp.path), ("physical", physicalTemporaryRoot)] {
+                check(LiveConversationRuntime.repositoryRelative(fileRoot + "/deleted.swift", root: root) == "deleted.swift",
+                      "revert path: deleted temporary file, \(rootLabel) root, \(fileLabel) file")
+            }
+        }
+
+        try fm.createSymbolicLink(atPath: privateRoot + "/link", withDestinationPath: "/etc")
+        for leaf in ["hosts", "missing"] {
+            check(LiveConversationRuntime.repositoryRelative(privateRoot + "/link/" + leaf, root: privateRoot) == nil,
+                  "revert path: repository symlink to outside \(leaf) is refused")
+        }
+        check(LiveConversationRuntime.repositoryRelative(shortRoot + "/missing/../x", root: shortRoot) == "x",
+              "revert path: missing tail dot-dot returns inside")
+        check(LiveConversationRuntime.repositoryRelative(privateRoot + "/missing/../../sibling/x", root: privateRoot) == nil,
+              "revert path: missing tail dot-dot reaches sibling outside")
+        try fm.createSymbolicLink(atPath: privateDirectory.path + "/outside-link", withDestinationPath: "/etc")
+        check(LiveConversationRuntime.repositoryRelative(privateRoot + "/missing/../../outside-link/missing", root: privateRoot) == nil,
+              "revert path: missing tail climbs above prefix and resolves outside symlink")
+        check(LiveConversationRuntime.repositoryRelative(privateRoot + "/missing/../link/missing", root: privateRoot) == nil,
+              "revert path: cancelled missing tail resolves repository symlink")
+        check(LiveConversationRuntime.repositoryRelative(shortRoot + "/existing.swift", root: privateRoot + "/") == "existing.swift",
+              "revert path: trailing slash on root")
     }
     private static func identityAssignment() async throws {
         func fixture(id:String,identityIndex:Int,title:String)->Conversation { let c=Conversation(id:id,title:title); c.identityIndex=identityIndex; return c }
@@ -514,6 +583,144 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
         let b = FixtureBackend(), (r, t) = b.runtime(storage: storage); try await r.load()
         let c = r.createUnsentConversation(title: "Unsent", projectID: nil); r.store.add(c)
         return (b, r, t, c)
+    }
+    private static func debt49() async throws {
+        for code in [-32001, -32002, -32000] {
+            let (b, r, _, c) = try await ready(); defer { r.shutdown() }
+            c.backendThreadID = "debt49"; c.draft = "one immutable send"
+            let s = CoreSubmission(identity: c.id, text: c.draft, settings: c.next)
+            var receipt: CoreSubmissionReceipt?
+            b.before = { request in
+                if request.rpc == "turn/start" {
+                    b.threads["debt49"] = ["id": "debt49", "turns": [turn("sent", "completed", [row("receipt", s.text, type: "userMessage", clientID: s.id)])]]
+                    throw CoreError(code: code, message: "结果暂不可知", data: nil, httpStatus: 400)
+                }
+                return nil
+            }
+            _ = r.submit(s, in: c) { receipt = $0 }
+            await wait("#49 reconciled or blocked") { receipt != nil }
+            for _ in 0..<200 { await Task.yield() }
+            check(r.receipt(for: s.id)?.result == .accepted && b.count("thread/read") >= 1, "#49 \(code) automatically reads matching clientId receipt")
+            check(b.count("turn/start") == 1 && c.draft.isEmpty && !c.sendOutcomeUnknown, "#49 \(code) accepted once without restored sendable draft")
+        }
+        for code in [-32001, -32002, -32000, -32603] {
+            check(CoreWire.isAmbiguous(CoreError(code: code, message: "invalid timeout", data: ["sent": true], httpStatus: 400)), "#49 unknown code \(code) blocks independently of wording")
+        }
+        for code in [-32600, -32601, -32602, -32010, 400, 409] {
+            check(!CoreWire.isAmbiguous(CoreError(code: code, message: "timeout", data: nil, httpStatus: 400)), "#49 explicit rejection \(code) independent of wording")
+        }
+        let (b, r, _, c) = try await ready(); defer { r.shutdown() }
+        c.backendThreadID = "no-receipt"; c.draft = "retain original"
+        b.failures["turn/start"] = CoreError(code: -32000, message: "未知", data: nil, httpStatus: 400)
+        var result: CoreSubmissionReceipt?
+        let unresolved = CoreSubmission(identity: c.id, text: c.draft, settings: c.next)
+        _ = r.submit(unresolved, in: c) { result = $0 }
+        await wait("#49 missing receipt settles") { result != nil }
+        check(c.sendOutcomeUnknown && b.count("turn/start") == 1, "#49 absent receipt remains blocked with one write")
+        check(!r.send(c, text: "another"), "#49 unresolved write refuses a new UUID")
+        r.receive(b.event(1, "item/completed", ["threadId": "foreign", "turnId": "foreign-turn", "item": row("foreign-receipt", c.draft, type: "userMessage", clientID: unresolved.id)]))
+        check(c.sendOutcomeUnknown && r.receipt(for: unresolved.id)?.result != .accepted, "#49 matching clientId in another thread cannot acknowledge this write")
+    }
+    private static func debt50() async throws {
+        for newer in ["new typing", ""] {
+            let (b, r, _, c) = try await ready(); defer { r.shutdown() }
+            c.backendThreadID = "debt50"
+            let old = Attachment(id: "old", name: "old.txt", symbol: "doc", input: ["type": "text", "text": "old"])
+            let fresh = Attachment(id: "fresh", name: "fresh.txt", symbol: "doc", input: ["type": "text", "text": "fresh"])
+            c.draft = "old draft"; c.attachments = [old]
+            var release: CheckedContinuation<JSONValue, Error>?, result: CoreSubmissionReceipt?
+            b.before = { request in
+                if request.rpc == "turn/start" { return try await withCheckedThrowingContinuation { release = $0 } }
+                return nil
+            }
+            _ = r.submit(.init(identity: c.id, text: c.draft, attachments: c.attachments, settings: c.next), in: c) { result = $0 }
+            await wait("#50 held send") { release != nil }
+            c.draft = newer; c.attachments = [fresh]
+            release?.resume(throwing: CoreError(code: -32602, message: "rejected", data: nil, httpStatus: 400))
+            await wait("#50 late failure") { result != nil }
+            check(c.draft == newer && c.attachments == [fresh], "#50 late rejection leaves newer draft and files intact (text=\(newer))")
+            check(c.queued.contains { $0.text == "old draft" && $0.attachments == [old] && $0.deliveryError != nil }, "#50 old failed snapshot retained separately")
+        }
+    }
+    private static func debt51() async throws {
+        let b = FixtureBackend(), (r, _) = b.runtime(); defer { r.shutdown() }; try await r.load()
+        let c = r.conversation(threadID: "metadata")
+        let plan: JSONValue = ["threadId": "metadata", "turnId": "work", "plan": [["step": "preserve metadata", "status": "completed"]]]
+        let usage: JSONValue = ["threadId": "metadata", "tokenUsage": ["last": ["totalTokens": 1234], "modelContextWindow": 10000]]
+        b.high = 2; b.threads["metadata"] = ["id": "metadata", "turns": [turn("work", "inProgress", [])]]
+        b.log = [b.event(1, "turn/plan/updated", plan), b.event(2, "thread/tokenUsage/updated", usage)]
+        try await r.read(c, includeSatellites: false)
+        check(c.plan.first?.title == "preserve metadata" && c.plan.first?.done == true, "#51 cold replay restores plan")
+        check(c.exactTokensUsed == 1234 && c.contextLimit == 10000 && abs(c.contextUsed - 0.1234) < 0.00001, "#51 cold replay restores exact tokens and context")
+        b.log = []; try await r.read(c, includeSatellites: false)
+        check(c.plan.count == 1 && c.exactTokensUsed == 1234 && c.contextLimit == 10000, "#51 seeded read without updates retains metadata")
+        // SSE can arrive while reading, at/below the accepted watermark, without appearing in the fetched page.
+        b.high = 4
+        b.before = { request in
+            if request.rpc == "thread/read" {
+                r.receive(b.event(3, "turn/plan/updated", ["threadId": "metadata", "turnId": "work", "plan": []]))
+                r.receive(b.event(4, "thread/tokenUsage/updated", ["threadId": "metadata", "tokenUsage": ["last": ["totalTokens": 0], "modelContextWindow": 20000]]))
+            }; return nil
+        }
+        try await r.read(c, includeSatellites: false)
+        check(c.plan.isEmpty && c.exactTokensUsed == 0 && c.contextLimit == 20000 && c.contextUsed == 0, "#51 buffered watermark metadata including empty/zero survives")
+        b.before = nil; b.high = 5
+        b.log = [b.event(5, "thread/tokenUsage/updated", ["threadId": "metadata", "tokenUsage": ["modelContextWindow": 40000]])]
+        try await r.read(c, includeSatellites: false)
+        check(c.exactTokensUsed == 0 && c.contextLimit == 40000 && c.contextUsed == 0, "#51 partial usage replay seeds previous exact count")
+    }
+    private static func debt52() async throws {
+        func collab(_ done: Bool) -> JSONValue { ["id": "collab", "type": "collabAgentToolCall", "receiverThreadIds": ["child"], "agentsStates": ["child": ["status": done ? "completed" : "running"]]] }
+        for (seedDone, snapshotDone, eventDone) in [(false, true, nil as Bool?), (true, false, nil), (false, false, true), (true, true, false)] {
+            let b = FixtureBackend(), (r, _) = b.runtime(); defer { r.shutdown() }; try await r.load()
+            let c = r.conversation(threadID: "satellites")
+            b.threads["satellites"] = ["id": "satellites", "turns": [turn("same-turn", "inProgress", [collab(seedDone)])]]
+            try await r.read(c, includeSatellites: false)
+            b.threads["satellites"] = ["id": "satellites", "turns": [turn("same-turn", "inProgress", [collab(snapshotDone)])]]
+            if let eventDone {
+                b.high = 1; b.log = [b.event(1, "item/completed", ["threadId": "satellites", "turnId": "same-turn", "item": collab(eventDone)])]
+            }
+            try await r.read(c, includeSatellites: false)
+            check(c.satellites.count == 1 && c.satellites[0].done == (eventDone ?? snapshotDone), "#52 seed=\(seedDone) snapshot=\(snapshotDone) event=\(String(describing: eventDone)) uses explicit authority")
+        }
+        let b = FixtureBackend(), (r, _) = b.runtime(); defer { r.shutdown() }; try await r.load()
+        let c = r.conversation(threadID: "late-child")
+        b.threads["late-child"] = ["id": "late-child", "turns": [turn("parent", "inProgress", [collab(false)])]]
+        try await r.read(c, includeSatellites: false)
+        r.receive(b.event(10, "item/completed", ["threadId": "late-child", "turnId": "parent", "item": collab(true)]))
+        b.high = 5
+        do { try await r.read(c, includeSatellites: false); check(false, "#52 stale history watermark must be rejected") }
+        catch { check(c.satellites.first?.done == true && r.readWatermark(threadID: "late-child") == 10, "#52 older history cannot erase newer live completion") }
+    }
+    private static func debt53() async throws {
+        let scope = "versions", key = "organic.shell.presentation.v2." + Data(scope.utf8).base64EncodedString()
+        let storage = CoreMemoryStorage(), store = ConversationStore()
+        let c = Conversation(id: "saved", title: "saved"); c.draft = "preserve bytes"; store.add(c)
+        try LocalPresentationState(store: store, scope: scope, storage: storage).save()
+        let current = storage.values[key]!
+        for version in [99, -1, 0] {
+            var object = try JSONSerialization.jsonObject(with: current) as! [String: Any]
+            object["version"] = version; object["futureField"] = ["opaque": "keep me"]
+            let input = try JSONSerialization.data(withJSONObject: object); storage.values[key] = input
+            let loaded = LocalPresentationState(store: ConversationStore(), scope: scope, storage: storage); loaded.restore()
+            do { try loaded.save(); check(false, "#53 unsupported version \(version) refuses save") } catch { check(true, "#53 unsupported version \(version) refuses save") }
+            check(storage.values[key] == input && loaded.lastError != nil, "#53 unsupported version \(version) preserves original bytes and reports")
+        }
+        var v2 = try JSONSerialization.jsonObject(with: current) as! [String: Any]; v2["version"] = 2
+        storage.values[key] = try JSONSerialization.data(withJSONObject: v2)
+        let migrated = LocalPresentationState(store: ConversationStore(), scope: scope, storage: storage); migrated.restore(); try migrated.save()
+        let version = try JSONDecoder().decode(LocalPresentationState.Saved.self, from: storage.values[key]!).version
+        check(migrated.store.conversation(c.id)?.draft == c.draft && version == 3, "#53 v2 explicitly migrates preserving draft")
+    }
+    private static func debt54() async throws {
+        for fence in ["```cpp", "~~~~swift", "````"] {
+            let closing = String(fence.prefix(while: { $0 == "`" || $0 == "~" }))
+            let shorterOrForeignFence = fence == "```cpp" ? "" : "```\n"
+            let source = "\(fence)\nlet copied = 7;\n\(shorterOrForeignFence)\(closing)\nThe renderer retains source ranges."
+            check(MockBrief.leadClause(of: source) == "The renderer retains source ranges", "#54 ignores entire \(fence) block")
+        }
+        check(MockBrief.leadClause(of: "```swift\nlet copied = 7;").isEmpty, "#54 unclosed fence has no narration")
+        check(MockBrief.leadClause(of: "Use `value` in prose.") == "Use value in prose", "#54 inline code remains prose")
     }
     private static func submissions() async throws {
         let (b, r, _, c) = try await ready()
@@ -766,11 +973,11 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
         c.attachments = [.init(id: "memory", name: "memory.txt", symbol: "doc", input: ["type": "text", "text": "inline fixture"], persistedInputPath: "/not-read/sidecar")]
         c.items = [.init(id: "not-persisted", turnID: "never-persist-turn", kind: .assistant, text: "not cached as truth")]
         c.approvals = [.init(id: "not-persisted", title: "pending", command: "", note: "", acceptLabel: "", toolItemID: "")]
-        try r.presentation.setIdentity(c, symbol: "sun.max.fill", tint: "#FFAA33")
+        try r.presentation.setIdentity(c, symbol: "mars", tint: "#FFAA33")
         r.presentation.setWindows([.init(id: "window", payload: ["frame": [1, 2, 3, 4], "members": [.string(c.id)]])]); try r.presentation.save()
         let store2 = ConversationStore(), state2 = LocalPresentationState(store: store2, scope: "fixture", storage: storage)
         state2.restore(); let saved = store2.conversation(c.id)!
-        check(saved.identitySymbol == "sun.max.fill" && saved.identityTint == "#FFAA33" && saved.identityIndex == c.identityIndex, "persistent custom identity with index fallback")
+        check(saved.identitySymbol == "mars" && saved.identityTint == "#FFAA33" && saved.identityIndex == c.identityIndex, "persistent custom identity with index fallback")
         check(saved.draft == "saved draft" && saved.pinned && saved.attachments.first?.input == c.attachments.first?.input, "draft pin and inline attachment restored")
         check(saved.items.isEmpty && saved.approvals.isEmpty && !saved.running && saved.activeTurnID == nil, "local presentation never fabricates transcript, approval or running truth")
         check(state2.localID(forBackend: "saved-thread") == c.id && state2.windows.first?.id == "window", "stable UI identity and opaque window state")
@@ -854,6 +1061,83 @@ private final class FixtureURLProtocol: URLProtocol, @unchecked Sendable {
         await wait("missing sidecar rejected") { failed != nil }
         if case .failed = failed?.result { check(true, "S3 unreadable payload fails explicitly") } else { check(false, "S3 unreadable payload fails explicitly") }
         check(badBackend.count("thread/start") == 0 && badBackend.count("turn/start") == 0 && badChat.draft == "keep this draft" && badChat.attachments.count == 1, "S3 missing input cannot create a thread, submit a turn or discard the draft")
+    }
+    private static func wholeForks() async throws {
+        let previous = ModelCatalog.models; defer { ModelCatalog.models = previous }
+        let backend = FixtureBackend(), (runtime, transport) = backend.runtime()
+        backend.high = 50
+        defer { runtime.shutdown(); transport.close() }
+        let c = runtime.conversation(threadID:"fork-source")
+        var arrivals = 0
+        runtime.store.onAdd = { _ in arrivals += 1 }
+        c.title = "Source name"; c.historyLoaded = true
+        c.items = [TranscriptItem(id:"u1",turnID:"done",kind:.user,text:"Question"),
+                   TranscriptItem(id:"a1",turnID:"done",kind:.assistant,text:"Answer")]
+        let finished = turn("done","completed",[row("u1","Question",type:"userMessage"),row("a1","Answer")])
+        let source: JSONValue = ["thread":["id":"fork-source","turns":[finished]]]
+        let response: JSONValue = ["thread":["id":"fork-child","name":"Core name","turns":[finished]]]
+        backend.before = { r in
+            if r.rpc == "thread/read" { return source }
+            if r.rpc == "thread/fork" { return response }
+            return nil
+        }
+        let fork = try await runtime.forkWhole(c)
+        let calls = backend.requests.filter { $0.rpc == "thread/fork" }
+        check(calls.count == 1 && calls[0].params == .object(["threadId":"fork-source","deferGoalContinuation":true]),"whole Fork has exactly two RPC parameters and no beforeTurnId")
+        check(fork.title == "Core name" && fork.backendThreadID == "fork-child","whole Fork uses Core's name and backend identity")
+        check(fork.id != c.id && fork.identityIndex != c.identityIndex && !fork.loading,"whole Fork publishes a ready new identity")
+        check(arrivals == 0 && runtime.store.onAdd != nil,"whole Fork reserves admission for its requesting window and restores background arrivals")
+        check(fork.items.map(\.text) == ["Question","Answer"] && fork.historyLoaded && !fork.running && fork.draft.isEmpty,"whole Fork hydrates all completed history without a draft")
+        runtime.receive(backend.event(42,"thread/started",["thread":["id":"fork-child","turns":[turn("stale-active","interrupted",[row("stale-partial","Partial old answer")])]]]))
+        check(fork.items.map(\.text) == ["Question","Answer"] && runtime.readWatermark(threadID:"fork-child") == 50,"late fork creation notifications cannot restore a discarded active tail")
+        check(backend.count("turn/start") == 0 && backend.count("thread/revert") == 0,"terminal whole Fork never starts a turn or reverts history")
+        let count = runtime.store.conversations.count
+        do { _ = try await runtime.forkWhole(c); check(false,"duplicate fork identity must fail") }
+        catch { check(runtime.store.conversations.count == count,"malformed duplicate response publishes no placeholder") }
+        backend.before = { r in
+            if r.rpc == "thread/read" { return source }
+            if r.rpc == "thread/fork" { return ["thread":["id":"incomplete-child","turns":[turn("done","completed",[])]]] }
+            return nil
+        }
+        do { _ = try await runtime.forkWhole(c); check(false,"missing completed rows must fail") }
+        catch { check(runtime.store.conversations.count == count,"matching turn IDs cannot conceal missing completed history rows") }
+        backend.before = { r in
+            if r.rpc == "thread/read" { return source }
+            if r.rpc == "thread/fork" { throw CoreWire.failure("Fixture fork denied") }
+            return nil
+        }
+        do { _ = try await runtime.forkWhole(c); check(false,"Core Fork error must propagate") }
+        catch { check(error.localizedDescription == "Fixture fork denied" && runtime.store.conversations.count == count,"Core Fork error preserves its text and publishes nothing") }
+        backend.requests = []
+        backend.before = { r in
+            if r.rpc == "thread/fork" { return ["thread":["id":"message-child","turns":[]]] }
+            return nil
+        }
+        let messageFork = runtime.fork(c,at:"u1")
+        check(messageFork != nil && messageFork?.loading == true,"message Fork still immediately publishes its loading placeholder")
+        await wait("message Fork completion") { messageFork?.loading == false }
+        let messageCalls = backend.requests.filter { $0.rpc == "thread/fork" }
+        check(messageCalls.count == 1 && messageCalls[0].params == .object(["threadId":"fork-source","beforeTurnId":"done","deferGoalContinuation":true]),"message Fork still supplies beforeTurnId with its unchanged RPC contract")
+        check(messageFork?.draft == "Question","message Fork still copies the selected message into its draft")
+        let mockStore = ConversationStore(), replay = MockReplay(store:mockStore)
+        replay.start(live:false)
+        let mock: any ConversationRuntime = MockConversationRuntime(store:mockStore,replay:replay,animatePlayback:false)
+        let running = mockStore.conversation("F")!, expected = running.items
+        running.running = true; running.activeTurnID = "pending"
+        running.items += [TranscriptItem(id:"pending-u",turnID:"pending",kind:.user,text:"Pending user",status:"completed"),
+                          TranscriptItem(id:"pending-tool",turnID:"pending",kind:.tool(.command),text:"Finished tool",status:"completed"),
+                          TranscriptItem(id:"pending-a",turnID:"pending",kind:.assistant,text:"Partial",status:"running")]
+        let mockFork = try await mock.forkWhole(running)
+        check(mockFork.items == expected,"mock whole Fork excludes every row of the active turn, including completed items")
+        check(mockFork.title == running.title && mockFork.id != running.id && mockFork.identityIndex != running.identityIndex,"mock whole Fork inherits the name and allocates a new ID and planet")
+        check(mockFork.backendThreadID == nil && mockFork.activeTurnID == nil && !mockFork.running,"mock whole Fork has no backend ID or active turn")
+        mockFork.items = []
+        let beforeEmpty = mockStore.conversations.count
+        do { _ = try await mock.forkWhole(mockFork); check(false,"empty mock history must fail") }
+        catch { check(mockStore.conversations.count == beforeEmpty && error.localizedDescription == "No completed history to fork yet","empty mock Fork returns a light error without publishing") }
+        let itemFork = mock.fork(running,at:"F-1")
+        check(itemFork?.title == "Fork of " + running.title && itemFork?.draft == running.items[0].text,"mock message Fork keeps its existing name and draft behavior")
+        mock.shutdown()
     }
     private static func mocks() async throws {
         let oldStore = ConversationStore(), newStore = ConversationStore()

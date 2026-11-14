@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py settings, overlay (overlay: debt #75). Kept, not deleted (#181).
 """M8 group 1: pin committed dependencies and compile Settings/Overlay only in a private checkout."""
 from pathlib import Path
 import argparse

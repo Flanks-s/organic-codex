@@ -280,7 +280,7 @@ class RpcClient:
         except asyncio.TimeoutError as exc:
             raise RpcFailure(-32001, "官方后端响应超时", sent=sent) from exc
         except RpcFailure as exc:
-            if exc.code not in (-32601, -32602) and sent:
+            if sent:
                 exc.sent = True
             raise
         except (OSError, ConnectionError) as exc:

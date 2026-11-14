@@ -39,7 +39,7 @@ import QuartzCore
             let sessions = NativeTranscriptSessions()
             let scene = AutoScene(size: size, store: store, profile: .init(name: "long-selftest", frameInterval: 1/120, mmPerPoint: 0.2, persistenceFrames: 0), scale: 2, transcriptSessions: sessions)
             scene.verificationPresented = true; scene.manualSettle = true; scene.ambient = false
-            var clock = CACurrentMediaTime() + 3600; scene.now = { clock }
+            var clock = VerificationClock.renderOrigin; scene.now = { clock }
             let bench = NormieWorkbench(store: store, sessions: NativeComposerSessions(), current: c.id, transcriptSessions: sessions)
             bench.setTranscriptPresentationActive(false)
             let host = NormieView(frame: CGRect(origin: .zero, size: size))

@@ -50,6 +50,9 @@ extension M10DockVerification {
     static func physicalHeaderCarry(output:URL) throws {
         var rows=[[String:Any]]()
         for scale:CGFloat in [1,2] {for which in [0,1] {for action in ["drop","escape","back-drop","tear-down","tear-up"] {
+            let saved=OrganicFeatureAvailability.current.conversationOrbTear
+            OrganicFeatureAvailability.current.conversationOrbTear=action.hasPrefix("tear") || action == "merge"
+            defer { OrganicFeatureAvailability.current.conversationOrbTear=saved }
             let f=HeaderFixture(scale:scale,members:["A","B"]);defer{f.dispose()}
             let island=f.headers[which],id=island.configuration!.id,down=f.point(island)
             func event(_ kind:NSEvent.EventType,_ p:CGPoint)->NSEvent {

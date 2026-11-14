@@ -4,6 +4,7 @@ import QuartzCore
 extension AutoScene {
 
     func pointer(_ p: CGPoint?) {
+        orbHint.pointer(p)
         prewarmActivity()
         lastPointer = p
         let admitted = p.flatMap { peekNode.coversPointer($0) ? nil : $0 }
@@ -11,7 +12,8 @@ extension AutoScene {
         meHover(drag == nil ? admitted : nil)
         peekNode.pointerShield.reconcile()
         let t = now()
-        runClock(until: t + dock.pointer(p, now: t))
+        let duration = dock.pointer(p, now: t)
+        if duration > 0 { runClock(until: t + duration) }
         updateHoverRegions(p)
     }
 
@@ -35,10 +37,10 @@ extension AutoScene {
         if inside { hoverRegions.insert(region) } else { hoverRegions.remove(region) }
         peekTimer?.cancel(); peekTimer = nil
         guard !isDragging, !dock.isHoldingMe else { return }
-        if inside, let orb, scheme.mode == .auto, peeking != orb, pressedButtons() == 0 {
+        if inside, let orb, !dock.tideOwns(orb), scheme.mode == .auto, peeking != orb, pressedButtons() == 0 {
             let w = DispatchWorkItem { [weak self] in
                 guard let self, self.hoverRegions.contains(region), !self.isDragging, !self.dock.isHoldingMe,
-                      self.scheme.mode == .auto, self.pressedButtons() == 0 else { return }
+                      self.scheme.mode == .auto, !self.dock.tideOwns(orb), self.pressedButtons() == 0 else { return }
                 self.peekOrigin = self.dock.frame(of: orb)
                 self.setPeeking(orb)
             }
@@ -58,6 +60,8 @@ extension AutoScene {
     /// content goes first (0.07 s), the capsule and halo 60 ms later, and what showed 240 ms after that.
     func setPeeking(_ id: String?) {
         guard id != peeking || (id == nil && shownPeek != nil && peekOpen) else { return }
+        if let id,id != orbMenuPeekColumn { orbMenuPeekColumn = nil }
+        if let id,dock.tideHasNotice(id) {dock.retireTide()}
         peeking = id
         peekStage.forEach { $0.cancel() }; peekStage = []
         if let id, conversation(id) != nil, peekGeometry(id) != nil {
@@ -96,6 +100,10 @@ extension AutoScene {
 
     /// The peeked orb, and the halo, capsule, lyrics and row over it (OrganicDockBridge.peekGeometry).
     private func peekGeometry(_ id: String) -> (orb: CGRect, peek: AutoLayout.Peek)? {
+        if orbMenuPeekColumn == id,columns.contains(where:{$0.conversation.id == id}),let bar = dock.frame(of:id) {
+            let orb = CGRect(x:bar.midX-16,y:bar.maxY-32,width:32,height:32)
+            return (orb,layout.peek(over:orb,size:size,satelliteRows:1,satellite:12,metrics:metrics))
+        }
         let n = layout.columns.count
         guard let index = order.dropFirst(n).firstIndex(of: id) else { return nil }
         let k = index - n
@@ -141,7 +149,7 @@ extension AutoScene {
             let start = g.peek.capsule.midX - CGFloat(shown.count - 1) * cell / 2
             for (i, s) in shown.enumerated() { rows[s.id] = start + CGFloat(i) * cell }
         }
-        dock.projectPeek(shown: g == nil ? nil : shownPeek, open: peekOpen, capsule: g?.peek.capsule ?? .zero, rows: rows,
+        dock.projectPeek(shown: g == nil || orbMenuPeekColumn == shownPeek ? nil : shownPeek, open: peekOpen, capsule: g?.peek.capsule ?? .zero, rows: rows,
                          rowY: (g?.peek.rowsTop ?? 0) + 12)
         peekRow = peekOpen ? rows : [:]; peekRowY = (g?.peek.rowsTop ?? 0) + 12
         if let id=shownPeek,let c=conversation(id),let g,peekOpen,!c.satellitesRetired {
@@ -152,10 +160,11 @@ extension AutoScene {
         } else {peekNode.clearSatellites()}
         if let d = contentDuration { dock.peekContent(visible: peekContentVisible, duration: d) }
         if let id = shownPeek, let c = conversation(id), let g {
-            if peekOpen, peekNode.shown != id || contentDuration == nil && !peekContentVisible { peekNode.open(c, geometry: g.peek, showHeader: false) }
+            if peekOpen, peekNode.shown != id || contentDuration == nil && !peekContentVisible { peekNode.open(c, geometry: g.peek, showHeader: orbMenuPeekColumn == id) }
             else if !peekOpen { peekNode.retract() }
         } else if peekNode.shown != nil {
             peekNode.clear()
+            orbMenuPeekColumn = nil
             // The dock held its magnification while the peek showed: it follows the pointer again.
             let t = now()
             runClock(until: t + dock.pointer(lastPointer, now: t))
@@ -172,6 +181,12 @@ extension AutoScene {
             return self.lastPointer
         }
         peekNode.view.click = { [weak self] in _ = self?.peekClick(at: $0) }
+        peekNode.view.orbInput = { [weak self] event in
+            guard let self else { return false }
+            let point = self.dockView.convert(event.locationInWindow, from: nil)
+            guard let id = self.orbInputTarget(at: point), id == self.shownPeek else { return false }
+            return self.orbInput.begin(event,id:id,ordinary:{ [weak self] point in _=self?.peekClick(at:point) })
+        }
         peekNode.view.scroll = { [weak self] in _ = self?.peekScroll($0, at: $1) }
         shield.reconcile(force: true)
         let admitted = shield.pointer().flatMap { peekNode.coversPointer($0) ? nil : $0 }
@@ -201,6 +216,7 @@ extension AutoScene {
         guard shownPeek != nil || peeking != nil else { return }
         peekStage.forEach { $0.cancel() }; peekStage = []
         peeking = nil; shownPeek = nil; peekOpen = false; peekContentVisible = false; peekOrigin = nil
+        orbMenuPeekColumn = nil
         peekNode.dismiss()
         dock.projectPeek(shown: nil, open: false, capsule: .zero, rows: [:], rowY: 0)
         peekNode.pointerShield.reconcile(force: true)

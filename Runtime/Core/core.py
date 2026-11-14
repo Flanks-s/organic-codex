@@ -333,7 +333,7 @@ class Core:
             payload=encode({'result':result}); writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '+str(len(payload)).encode()+b'\r\nConnection: close\r\n\r\n'+payload); await writer.drain()
         except (ConnectionError,asyncio.IncompleteReadError): pass
         except Exception as e:
-            payload=encode({'error':{'code':getattr(e,'code',-32603),'message':str(e),'data':getattr(e,'data',None)}})
+            payload=encode({'error':{'code':getattr(e,'code',-32603),'message':str(e),'data':getattr(e,'data',None),'requestSent':getattr(e,'sent',None)}})
             writer.write(b'HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: '+str(len(payload)).encode()+b'\r\nConnection: close\r\n\r\n'+payload)
             try: await writer.drain()
             except ConnectionError: pass

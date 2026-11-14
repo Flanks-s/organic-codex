@@ -5,6 +5,11 @@ import SwiftUI
 struct OrbIdentity: Equatable {
     var symbol: OrbCelestialBody
     var tint: OrbTint
+    var bodyID: String? = nil
+    var tintID: String? = nil
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.resolvedBodyID == rhs.resolvedBodyID && (lhs.tintID ?? String(describing:lhs.tint)) == (rhs.tintID ?? String(describing:rhs.tint))
+    }
     static func assigned(_ index: Int) -> Self {
         let n = max(0, index), bodies = OrbCelestialBody.allCases, colors = OrbTint.allCases
         let body = bodies[n % bodies.count], round = n / bodies.count

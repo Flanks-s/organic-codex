@@ -89,7 +89,6 @@ import AppKit
     }
     mutating func appearance() {
         heading("Appearance")
-        preference("look.mode","Appearance",choices:[("auto","Auto"),("light","Light"),("dark","Dark")])
         preference("look.text","Text size",choices:[("0.85","85%"),("1","100%"),("1.15","115%"),("1.3","130%"),("1.5","150%")])
         // Numeric preferences are kept numeric for the host's typography adapter.
         rows[rows.count-1].perform={ [session] v in session.preferences.set("look.text",.number(Double(v.settingsText) ?? 1)) }

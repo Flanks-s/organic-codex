@@ -7,14 +7,14 @@ extension M10DockVerification {
         let root=IslandPlane(frame:CGRect(x:0,y:0,width:1080,height:760))
         let scene:AutoScene
         let drag:M104HeaderOrbDragging
-        var time=CACurrentMediaTime()+3600
+        var time=VerificationClock.renderOrigin
         init(scale:CGFloat,members:[String]?=nil,shared:Bool=false) {
             let store=ConversationStore();MockReplay(store:store).start(live:false)
             scene=AutoScene(size:root.bounds.size,store:store,profile:profile,scale:scale,transcriptSessions:shared ? NativeTranscriptSessions():nil)
             if shared {scene.setTranscriptPresentationActive(true)}
             drag=M104HeaderOrbDragging.install(in:scene)
-            scene.now={ [weak self] in self?.time ?? CACurrentMediaTime() }
-            scene.dock.motionTime={ [weak self] in self?.time ?? CACurrentMediaTime() }
+            scene.now={ [weak self] in self?.time ?? VerificationClock.renderOrigin }
+            scene.dock.motionTime={ [weak self] in self?.time ?? VerificationClock.renderOrigin }
             scene.dock.motionProfile=profile;scene.manualSettle=true;scene.ambient=false
             for v in [scene.sceneView,scene.nativePlane,scene.peekNode.view,scene.dockView,scene.overlayPlane] {root.addSubview(v)}
             root.appearance=NSAppearance(named:.darkAqua)
@@ -37,15 +37,34 @@ extension M10DockVerification {
     static func headerDragging(output:URL) async throws {
         var records=[[String:Any]]()
         for scale:CGFloat in [1,2] {for which in [0,1] {
+            let saved=OrganicFeatureAvailability.current.conversationOrbTear
+            OrganicFeatureAvailability.current.conversationOrbTear=false
+            let f=HeaderFixture(scale:scale,members:["A","B"])
+            let h=f.headers[which],p=f.point(h)
+            var callbacks=0;f.scene.onTear={ _ in callbacks+=1 }
+            func event(_ type:NSEvent.EventType,_ point:CGPoint)->NSEvent {
+                NSEvent.mouseEvent(with:type,location:f.scene.dockView.convert(point,to:nil),modifierFlags:[],timestamp:f.time,windowNumber:0,context:nil,eventNumber:1,clickCount:1,pressure:0)!
+            }
+            h.planetButton.mouseDown(with:event(.leftMouseDown,p))
+            h.planetButton.mouseDragged(with:event(.leftMouseDragged,CGPoint(x:p.x+8,y:p.y+140)));f.tick()
+            check(callbacks==0 && !f.scene.isTearing,"default-off top orb stays in this window beyond the former Tear band")
+            h.planetButton.cancelOperation(nil);f.settle();f.dispose()
+            OrganicFeatureAvailability.current.conversationOrbTear=saved
+        }}
+        for scale:CGFloat in [1,2] {for which in [0,1] {
             for action in ["overflow","escape","tear-drop","tear-escape","outside","merge","swap","short","resign","switch"] {
                 var traces=[[String:Any]](),poses=[[CGRect]]()
                 for headerEntry in [false,true] {
                     let tearCase=action.hasPrefix("tear") || action == "merge" || action == "outside"
+                    let saved=OrganicFeatureAvailability.current.conversationOrbTear
+                    OrganicFeatureAvailability.current.conversationOrbTear=tearCase
+                    defer { OrganicFeatureAvailability.current.conversationOrbTear=saved }
                     let f=HeaderFixture(scale:scale,members:tearCase ? ["A","B"]:(action == "overflow" ? ["A","B","C"]:nil));defer{f.dispose()}
                     let c=f.scene.columns[which],id=c.conversation.id,island=c.island!
                     let home=f.scene.dock.items[id]!.glass.frame
                     let grip=CGPoint(x:home.midX,y:home.minY),down=headerEntry ? f.point(island):grip
                     var pointer=down,maxDistance:CGFloat=0
+                    var cancelMembers:[String]?
                     var clicks=0;island.actions.customize={clicks+=1}
                     let original=island.snapshot(scale:scale),members=f.scene.members.map(\.id)
                     var phases=[String](),frames=[CGRect](),tears=[String](),springRows=[[[Double]]]()
@@ -103,6 +122,7 @@ extension M10DockVerification {
                             check(!f.scene.columns.contains{$0.conversation.id==id},"held conversation leaves shown columns")
                             check(f.scene.leaving[id]?.presence.to == 0 && (f.scene.leaving[id]?.presence.duration ?? 0)>0,"column has a complete shrinking presence spring")
                         } else if action == "swap" {for k in 0...24 {move(dx+(8-dx)*CGFloat(k)/24)};end.x=down.x+8}
+                        if ["escape","resign","switch"].contains(action) { cancelMembers=f.scene.members.map(\.id) }
                         if ["escape","tear-escape"].contains(action) {if headerEntry {island.planetButton.cancelOperation(nil)} else {f.scene.cancelDrag()}}
                         else if action == "resign" || action == "switch" {f.scene.cancelDrag()}
                         else {if headerEntry {island.planetButton.mouseUp(with:event(.leftMouseUp,end))} else {_=f.scene.pointerUp(end)}}
@@ -116,7 +136,7 @@ extension M10DockVerification {
                         check(!f.scene.columns.contains{$0.conversation.id==id} && f.scene.dock.items[id]?.role == .orb,"full/brief lands fully contracted as a Dock orb")
                         check(f.scene.current != id,"contracted full passes current to another member")
                     }
-                    if ["escape","resign","switch","tear-drop","tear-escape","outside","short"].contains(action) {check(f.scene.members.map(\.id)==members,"cancel / no reorder restores members")}
+                    if ["escape","resign","switch","tear-drop","tear-escape","outside","short"].contains(action) {check(f.scene.members.map(\.id)==(cancelMembers ?? members),"cancel keeps latest committed members; legacy Tear restores its source")}
                     let trace:[String:Any]=["phases":phases,"reasons":f.scene.switches.compactMap{$0["reason"] as? String},"members":f.scene.members.map(\.id),"current":f.scene.current,"columns":f.scene.columns.map{$0.conversation.id},"role":String(describing:f.scene.dock.items[id]?.role),"tears":tears,"springs":springRows,"destination":destination.scene.members.map(\.id)]
                     traces.append(trace);poses.append(frames)
                     records.append(["kind":"paint","action":action,"which":which,"scale":scale,"header":headerEntry,"maxPointerDistance":maxDistance,"frames":frames.map{[$0.minX,$0.minY,$0.width,$0.height]}])

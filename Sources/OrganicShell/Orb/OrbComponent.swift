@@ -15,6 +15,12 @@ import SwiftUI
     private let backPlacement = CALayer(), frontPlacement = CALayer(), bodyPlacement = CALayer()
     private let backMotion = CALayer(), frontMotion = CALayer(), bodyMotion = CALayer()
     private let glyphGroup = CALayer(), glyph = CAShapeLayer(), initials = CATextLayer(), seedGlyph = CALayer()
+    private let texturedBody = BodyPresentationLeaf()
+    private let phaseBody = OrbPhaseContent()
+    private var bodyVeil: Float = 0
+    private var phaseWindowAttached=false
+    private let meLabel = CATextLayer()
+    private var meLabelMix = 0.0
     private let glyphTrail=ChordTrail()
     private let completionPose=CALayer()
     private var glyphGaussian:ContentGaussianTransition?, badgeGaussian:ContentGaussianTransition?
@@ -66,8 +72,9 @@ import SwiftUI
         satellites.onExposureInvalidated = { [weak self] layer in self?.heldExposure.removeAll { $0.layer === layer } }
         self.glassView.wantsLayer = true
         for view in [back, front] {
-            view.visibilityChanged = { [weak self] in self?.updateSatelliteVisibility(at: CACurrentMediaTime()) }
+            view.visibilityChanged = { [weak self] in self?.updateSatelliteVisibility(at: CACurrentMediaTime()); self?.updateBodyVisibility() }
         }
+        bodyView.visibilityChanged = { [weak self] in self?.updateBodyVisibility() }
         if self.glassView.contentView == nil { self.glassView.contentView = OrbDecorationView(metrics: counters) }
         self.glassView.contentView?.addSubview(bodyView)
         back.layer?.addSublayer(backPlacement); front.layer?.addSublayer(frontPlacement)
@@ -81,6 +88,11 @@ import SwiftUI
         badge.addSublayer(hostBadge.carrier)
         bodyMotion.addSublayer(liquid.layer);bodyMotion.addSublayer(glyphTrail.layer);bodyMotion.addSublayer(glyphGroup)
         glyphGroup.addSublayer(glyph); glyphGroup.addSublayer(initials); glyphGroup.addSublayer(seedGlyph)
+        glyphGroup.addSublayer(texturedBody.layer)
+        phaseBody.attach(to:glyphGroup,above:texturedBody.layer)
+        texturedBody.onPictureChange = { [weak self] in self?.prepareBodyInk() }
+        phaseBody.picture.onPictureChange = { [weak self] _ in self?.prepareBodyInk() }
+        glyphGroup.addSublayer(meLabel); meLabel.isHidden = true; meLabel.alignmentMode = .center
         glyph.fillColor = nil; glyph.lineCap = .round; glyph.lineJoin = .round
         glyph.shadowOpacity = 1; glyph.shadowOffset = .zero
         initials.alignmentMode = .center; initials.truncationMode = .end
@@ -96,6 +108,25 @@ import SwiftUI
     /// Call only on semantic changes (including backing scale and environment), never during hover sampling.
     func configure(_ next: OrbConfiguration) {
         apply(next,appearanceChanged:false)
+    }
+    /// An LL input channel; both labels stay inside the same real glass, with the same placement.
+    func setMeLabelMix(_ amount: Double) {
+        guard case .me = configuration?.content else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true); defer { CATransaction.commit() }
+        meLabelMix = min(1, max(0, amount))
+        initials.opacity = Float(1 - meLabelMix); meLabel.opacity = Float(meLabelMix)
+    }
+    var meBadgeRect: CGRect? {
+        guard configuration?.meBadgeAtCorner == true, configuration?.badge != nil, let path = badge.path else { return nil }
+        return frontView.layer?.convert(path.boundingBoxOfPath, from: badge)
+    }
+    var meSemanticBadge: OrbBadge? { if case .me = configuration?.content { return configuration?.badge }; return nil }
+    var meSemanticUsage: Double? { if case .me = configuration?.content { return configuration?.liquidLevel }; return nil }
+    var meBadgeIsAboveBody: Bool { configuration?.meBadgeAtCorner == true && badgePlacement.superlayer === frontPlacement }
+    var meBadgeEffectiveOpacity: Float {
+        var opacity: Float = 1, current: CALayer? = badge
+        while let layer = current { if layer.isHidden { return 0 }; opacity *= layer.opacity; current = layer.superlayer }
+        return opacity
     }
     func hasSameDragConfiguration(as other:OrbComponent)->Bool {configuration == other.configuration}
     /// Prepare at pointer DOWN, before the hold/drag starts. New component-owned drawing only; never copy
@@ -156,6 +187,7 @@ import SwiftUI
         configuration = next; counters.value.configurations += 1
         drawingSize = next.drawingSize.isFinite ? max(1, next.drawingSize) : 1
         CATransaction.begin(); CATransaction.setDisableActions(true)
+        if old?.meBadgeAtCorner == true && !next.meBadgeAtCorner { frontMotion.transform = CATransform3DIdentity }
         if canvasSize == nil { setCanvasSize(CGSize(width: drawingSize, height: drawingSize)) }
         let high=OrbDisplayEnvironment.shared.options.increaseContrast
         let appearance=NSAppearance(named:next.appearance == .dark ? (high ? .accessibilityHighContrastDarkAqua:.darkAqua):(high ? .accessibilityHighContrastAqua:.aqua))!
@@ -168,7 +200,7 @@ import SwiftUI
             let colors: [CGColor]
             switch next.content {
             case .identity(let identity):
-                tint = identity.tint.color
+                tint = identity.bodyTintColor
                 let deep = (next.liquidLevel ?? 0) >= OrbTuning.deepen
                 colors = [tint.withAlphaComponent(deep ? 0.50 : 0.24).cgColor,
                           tint.withAlphaComponent(deep ? 0.78 : 0.42).cgColor]
@@ -208,7 +240,7 @@ import SwiftUI
                                  motionProfile:exposureEnabled ? satelliteProfile:nil,motionScale:satelliteScale)
         }
         // Semantic preparation only. Host callbacks never allocate images or copy native layer trees.
-        hostGlyph.prepare(glyphGroup,scale:max(1,next.backingScale)*2,topDown:pointerInkPrepared)
+        if case .identity = next.content {} else { hostGlyph.prepare(glyphGroup,scale:max(1,next.backingScale)*2,topDown:pointerInkPrepared) }
         hostBadge.prepare(badgeText,scale:max(1,next.backingScale)*2,topDown:pointerInkPrepared)
         completionInk.reusePreparedInk(from:hostGlyph)
         if let frame { place(frame, contentFrame: contentFrame) }
@@ -230,6 +262,7 @@ import SwiftUI
             badge.removeAllAnimations()
         }
         updatePause(at: now)
+        updateBodyPresentation()
         CATransaction.commit()
     }
 
@@ -253,7 +286,7 @@ import SwiftUI
         let painted=local.offsetBy(dx:frame?.minX ?? now.minX,dy:frame?.minY ?? now.minY)
         // Keep the capped badge plate at the logical planet's pole, rather than stretching its position with
         // the liquid's trailing edge. Its shape and digits remain round at all velocities (ON and A/B OFF).
-        if painted != now {
+        if painted != now, configuration?.meBadgeAtCorner != true {
         let diameter=min(now.width*0.4,18),badgeScale=diameter/max(0.001,badgeDiameter)
         badgePlacement.position=CGPoint(x:(now.minX-painted.minX+now.width*0.86)*drawingSize/max(0.001,painted.width),
                                         y:(now.minY-painted.minY+now.height*0.14)*drawingSize/max(0.001,painted.height))
@@ -264,6 +297,7 @@ import SwiftUI
         hostGlyph.update(now:now,earlier:earlier,parent:painted,parentSize:CGSize(width:drawingSize,height:drawingSize),profile:profile,enabled:on)
         glyphGroup.isHidden=hostGlyph.sample.count>1
         hostGlyph.carrier.opacity=bodyMotion.opacity
+        if configuration?.meBadgeAtCorner == true { placeMeBadge(logical: now, painted: painted); badgeText.isHidden = false; return }
         func badgePose(_ r:CGRect)->CGRect {
             let scale=min(r.width*0.4,18)/max(0.001,badgeDiameter)
             return CGRect(x:r.minX+r.width*0.86+(badgeText.frame.minX-badge.bounds.width/2)*scale,
@@ -287,7 +321,8 @@ import SwiftUI
         CATransaction.begin();CATransaction.setDisableActions(true);defer{CATransaction.commit()}
         pointerInkPrepared=true
         let scale=max(1,configuration.backingScale)*2
-        hostGlyph.prepare(glyphGroup,scale:scale,topDown:true)
+        if case .identity = configuration.content { prepareBodyInk() }
+        else { hostGlyph.prepare(glyphGroup,scale:scale,topDown:true) }
         hostBadge.prepare(badgeText,scale:scale,topDown:true)
     }
 
@@ -334,6 +369,7 @@ import SwiftUI
         CATransaction.begin(); CATransaction.setDisableActions(true)
         for layer in [backPlacement, frontPlacement, bodyPlacement] { layer.opacity = min(1, max(0, opacity)) }
         updateSatelliteVisibility(at: CACurrentMediaTime())
+        updateBodyVisibility()
         CATransaction.commit()
     }
 
@@ -360,8 +396,10 @@ import SwiftUI
         guard !disposed else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         bodyMotion.opacity = 1 - min(1, max(0, amount))
+        bodyVeil = amount
         badgePlacement.opacity = bodyMotion.opacity
         hostGlyph.carrier.opacity = bodyMotion.opacity
+        updateBodyVisibility()
         CATransaction.commit()
     }
 
@@ -372,6 +410,17 @@ import SwiftUI
             layer.position = CGPoint(x: r.midX, y: r.midY)
             layer.transform = CATransform3DMakeScale(r.width/drawingSize, r.height/drawingSize, 1)
         }
+        let center=CGPoint(x:decoration.midX,y:decoration.midY)
+        if case .me = configuration?.content { backPlacement.name="organic.body.light-anchor"; BodyLightRegistry.shared.setAnchor(owner:self,view:backView,point:center) }
+        texturedBody.setGeometry(view:backView,center:center)
+        phaseBody.setLightBin(texturedBody.lightBin)
+        if configuration?.meBadgeAtCorner == true {
+            frontMotion.transform = frontPlacement.transform
+            frontPlacement.transform = CATransform3DIdentity
+            placeMeBadge(logical: decoration, painted: decoration)
+            return
+        }
+        if badgePlacement.superlayer !== frontMotion { badgePlacement.removeFromSuperlayer(); frontMotion.addSublayer(badgePlacement) }
         let diameter = min(local.width*0.4, 18), scale = max(0.0001, diameter/badgeDiameter)
         badgePlacement.position = CGPoint(x: drawingSize*0.86, y: drawingSize*0.14)
         // Counter the parent's magnification so the product's badge stops at 18 pt.
@@ -379,16 +428,64 @@ import SwiftUI
                                                         scale*drawingSize/max(0.0001, local.height), 1)
         badge.lineWidth = max(1, diameter*0.1)/scale
     }
+    private func placeMeBadge(logical: CGRect, painted: CGRect) {
+        if badgePlacement.superlayer !== frontPlacement { badgePlacement.removeFromSuperlayer(); frontPlacement.addSublayer(badgePlacement) }
+        let center = CGPoint(x: logical.maxX + 3 - badgePlacement.bounds.width / 2, y: logical.minY - 3 + 7)
+        badgePlacement.position = frontPlacement.convert(center, from: frontView.layer)
+        badgePlacement.transform = CATransform3DIdentity
+        badge.lineWidth = 0
+    }
 
     func setPresentationActive(_ active: Bool) {
         guard !disposed, self.active != active else { return }
         self.active = active
         CATransaction.begin(); CATransaction.setDisableActions(true)
         updatePause(at: CACurrentMediaTime()); CATransaction.commit()
+        updateBodyVisibility()
     }
+
+    private var bodyIsVisible: Bool {
+        guard !disposed,configuration?.bodyVisible != false,bodyPlacement.opacity>0.001,bodyVeil<0.999 else { return false }
+        var node: NSView?=bodyView
+        while let view=node {
+            if view.isHidden || view.alphaValue<=0.001 { return false }; node=view.superview
+        }
+        if let window=bodyView.window {
+            phaseWindowAttached=true
+            return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+        }
+        if configuration?.bodyPhase != nil,phaseWindowAttached {return false}
+        return true
+    }
+    private func updateBodyPresentation() {
+        guard let c=configuration else { return }
+        guard case .identity(let identity)=c.content else {
+            phaseBody.configure(c,visible:false,active:false)
+            texturedBody.setVisibility(false,keyWindow:false);texturedBody.layer.isHidden=true;return
+        }
+        texturedBody.configure(bodyID:identity.resolvedBodyID,outer:c.bodyOuter ?? c.drawingSize,drawingSize:drawingSize,scale:c.backingScale,unknown:c.bodyUnknown || !c.context.isFinite,visible:bodyIsVisible,keyWindow:bodyView.window?.isKeyWindow ?? c.isKeyWindow)
+        phaseBody.configure(c,visible:bodyIsVisible,active:active,bin:texturedBody.lightBin,samplingOuter:CGFloat(texturedBody.samplingTier))
+        texturedBody.layer.opacity=c.bodyPhase == nil || phaseBody.picture.image == nil ? 1:0
+        if c.bodyPhase == nil {prepareBodyInk()}
+    }
+    private func prepareBodyInk() {
+        phaseBody.setLightBin(texturedBody.lightBin)
+        guard !disposed,let image=phaseBody.picture.image ?? texturedBody.displayedImage else { return }
+        if configuration?.bodyPhase != nil,phaseBody.picture.image != nil {texturedBody.layer.opacity=0}
+        hostGlyph.prepare(image:image,size:CGSize(width:drawingSize,height:drawingSize))
+        completionInk.reusePreparedInk(from:hostGlyph)
+    }
+    private func updateBodyVisibility() {
+        guard case .identity = configuration?.content else { return }
+        phaseBody.setActivity(visible:bodyIsVisible,animate:active && configuration?.isKeyWindow == true && configuration?.reduceMotion != true)
+        texturedBody.layer.opacity=configuration?.bodyPhase == nil || phaseBody.picture.image == nil ? 1:0
+        texturedBody.setVisibility(bodyIsVisible,keyWindow:bodyView.window?.isKeyWindow ?? configuration?.isKeyWindow ?? true)
+    }
+    var bodyWork: [String:Int] { configuration?.bodyPhase == nil ? texturedBody.work:phaseBody.picture.work }
 
     private func updatePause(at now: CFTimeInterval) {
         updateSatelliteVisibility(at: now)
+        satellites.setPhaseActive(active && configuration?.reduceMotion != true)
         let wanted = !active || configuration?.ambient != true || configuration?.reduceMotion == true
         if wanted,glyphGaussian?.plan != nil {
             gaussianNeedsModelSampling=true
@@ -431,7 +528,7 @@ import SwiftUI
         switch c.content {
         case .seed: contentKey = "seed:sparkle"
         case .identity(let i): contentKey = "planet:\(i.symbol.rawValue)"
-        case .me(let text, _): contentKey = "me:\(text)"
+        case .me(let text, _): contentKey = "me:\(text):\(c.meLabel ?? ""):\(c.meLabelVisible)"
         }
         let key = "\(contentKey)|\(drawingSize)|\(c.backingScale)|\(c.appearance)|\(OrbDisplayEnvironment.shared.options)"
         guard drawingKey != key else { return }; drawingKey = key
@@ -445,7 +542,9 @@ import SwiftUI
         glyph.frame = box; initials.frame = box
         glyph.contentsScale = max(1, c.backingScale)
         initials.contentsScale = max(1, c.backingScale)*2
+        meLabel.isHidden = true
         seedGlyph.isHidden = c.content != .seed
+        if case .identity = c.content { texturedBody.layer.isHidden=false } else { texturedBody.layer.isHidden=true }
         switch c.content {
         case .seed:
             glyph.isHidden = true; initials.isHidden = true
@@ -462,18 +561,20 @@ import SwiftUI
             seedGlyph.frame = CGRect(x: ((d-side)/2*scale).rounded()/scale, y: ((d-side)/2*scale).rounded()/scale, width: side, height: side)
             counters.value.glyphPaths += 1
         case .identity(let identity):
-            glyph.isHidden = false; initials.isHidden = true
-            let side = d*0.56
-            counters.value.glyphPaths += 1
-            glyph.path = OrbCelestialGlyph(symbol: identity.symbol).path(in: box.insetBy(dx: (d-side)/2, dy: (d-side)/2)).cgPath
-            glyph.lineWidth = side/24*2.1; glyph.shadowRadius = d*0.02
+            _ = identity
+            glyph.isHidden = true; glyph.path=nil; initials.isHidden = true
         case .me(let text, _):
-            glyph.isHidden = true; initials.isHidden = false
+            glyph.isHidden = true; initials.isHidden = !c.meLabelVisible
+            meLabel.isHidden = !c.meLabelVisible || c.meLabel == nil
             counters.value.textLayouts += 1
             let font = NSFont.systemFont(ofSize: d*0.32, weight: .semibold)
             initials.font = font; initials.fontSize = font.pointSize; initials.string = text
             let h = font.ascender-font.descender
             initials.frame = CGRect(x: 0, y: (d-h)/2, width: d, height: h)
+            meLabel.font = font; meLabel.fontSize = font.pointSize; meLabel.string = c.meLabel
+            meLabel.contentsScale = max(1, c.backingScale)*2; meLabel.frame = initials.frame
+            meLabel.foregroundColor = NSColor.labelColor.cgColor
+            initials.opacity = Float(1 - meLabelMix); meLabel.opacity = Float(meLabelMix)
         }
         counters.value.glowPaths += 1
         glow.frame = box; glow.path = CGPath(ellipseIn: box.insetBy(dx: -d*0.02, dy: -d*0.02), transform: nil)
@@ -483,16 +584,17 @@ import SwiftUI
     private func rebuildBadge(_ c: OrbConfiguration) {
         guard let renderedBadge else { return }
         let text = renderedBadge.symbol.text
-        let key = "\(text)|\(drawingSize)|\(c.backingScale)"
+        let key = "\(text)|\(drawingSize)|\(c.backingScale)|\(c.meBadgeAtCorner)"
         if key != badgeKey {
             badgeKey = key
-            let d = min(drawingSize*0.4, 18)
+            let d = c.meBadgeAtCorner ? 14 : min(drawingSize*0.4, 18)
             badgeDiameter = d
-            let font = NSFont.systemFont(ofSize: d*(text.count > 2 ? 0.48 : 0.62), weight: .bold)
+            let font = NSFont.systemFont(ofSize: c.meBadgeAtCorner ? 8 : d*(text.count > 2 ? 0.48 : 0.62), weight: .bold)
             let rounded = font.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: font.pointSize) } ?? font
             counters.value.textLayouts += 1
-            let width = max(d, (text as NSString).size(withAttributes: [.font: rounded]).width + (text.count > 1 ? d*0.44 : 0))
+            let width = max(d, (text as NSString).size(withAttributes: [.font: rounded]).width + (c.meBadgeAtCorner ? 6 : text.count > 1 ? d*0.44 : 0))
             let box = CGRect(x: 0, y: 0, width: width, height: d)
+            if c.meBadgeAtCorner { badge.transform = CATransform3DIdentity }
             badgePlacement.bounds = box; badge.frame = box
             counters.value.badgePaths += 1
             badge.path = CGPath(roundedRect: box, cornerWidth: d/2, cornerHeight: d/2, transform: nil)
@@ -617,6 +719,7 @@ import SwiftUI
     /// Header-only finite body feedback. Satellite clocks and positions do not tilt.
     func animateHeaderRename() {
         guard configuration?.reduceMotion != true, !disposed else { return }
+        if case .identity = configuration?.content { return }
         let a = CAKeyframeAnimation(keyPath: "transform.rotation.z")
         a.values = [0, -4*Double.pi/180, 2*Double.pi/180, 0]
         a.keyTimes = [0, 0.3333333333, 0.6666666667, 1]; a.duration = 0.18
@@ -653,6 +756,9 @@ import SwiftUI
         if let displayObservation { OrbDisplayEnvironment.shared.removeObserver(displayObservation); self.displayObservation=nil }
         removeAlert()
         satellites.dispose()
+        if configuration?.bodyPhase != nil {hostGlyph.bitmap.contents=nil;completionInk.bitmap.contents=nil}
+        phaseBody.dispose()
+        texturedBody.dispose(); BodyLightRegistry.shared.remove(self)
         discardExposure()
         glyphTrail.layer.removeAllAnimations();glyphTrail.reset()
         backView.removeFromSuperview(); frontView.removeFromSuperview(); bodyView.removeFromSuperview()
@@ -674,7 +780,7 @@ import SwiftUI
     var verificationHostPlanes:[CALayer] {[backPlacement,bodyPlacement,frontPlacement]}
     var verificationHostGlyph:OrbHostInk {hostGlyph}
     var verificationHostBadge:OrbHostInk {hostBadge}
-    #if M10_DOCK_SELFTEST
+    #if M10_DOCK_SELFTEST && !(ORB_SELFTEST || ISLAND_SELFTEST)
     var verificationBadgeLayer:CALayer {badge}
     var verificationGlyphLayer:CALayer {glyphGroup}
     #endif
@@ -703,6 +809,7 @@ import SwiftUI
 private final class OrbDecorationView: NSView {
     private let metrics: OrbMetrics
     var visibilityChanged: (() -> Void)?
+    private var windowObservations: [NSObjectProtocol] = []
     override var isFlipped: Bool { true }
     init(metrics: OrbMetrics) {
         self.metrics = metrics
@@ -718,5 +825,18 @@ private final class OrbDecorationView: NSView {
     override func viewDidHide() { super.viewDidHide(); visibilityChanged?() }
     override func viewDidUnhide() { super.viewDidUnhide(); visibilityChanged?() }
     override func viewDidMoveToSuperview() { super.viewDidMoveToSuperview(); visibilityChanged?() }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        for token in windowObservations { NotificationCenter.default.removeObserver(token) }; windowObservations=[]
+        if let window {
+            for name in [NSWindow.didChangeOcclusionStateNotification,NSWindow.didMiniaturizeNotification,NSWindow.didDeminiaturizeNotification,NSWindow.didBecomeKeyNotification,NSWindow.didResignKeyNotification] {
+                windowObservations.append(NotificationCenter.default.addObserver(forName:name,object:window,queue:.main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.visibilityChanged?() }
+                })
+            }
+        }
+        visibilityChanged?()
+    }
+    isolated deinit { for token in windowObservations { NotificationCenter.default.removeObserver(token) } }
     override func layout() { metrics.value.layoutCalls += 1; super.layout() }
 }

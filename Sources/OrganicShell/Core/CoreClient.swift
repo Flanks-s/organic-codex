@@ -121,6 +121,6 @@ struct CoreClient: CoreTransport, Sendable {
         return CoreError(code: error?["code"]?.intValue,
                          message: error?["message"]?.stringValue ?? "Core HTTP request failed (\(status)).",
                          data: error?["data"] ?? envelope ?? .string(String(decoding: data, as: UTF8.self)),
-                         httpStatus: status)
+                         httpStatus: status, requestSent: error?["requestSent"]?.boolValue)
     }
 }

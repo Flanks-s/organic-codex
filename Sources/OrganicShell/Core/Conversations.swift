@@ -176,6 +176,8 @@ struct FileChange: Identifiable, Equatable, Sendable {
     var activeTurnID: String?
     var notices = ConversationNoticeFeed()
     var orbActivity = ConversationActivity()
+    var phaseFacts = ConversationPhaseFacts()
+    weak var phaseStore: ConversationStore?
     var cwd: String?
     var historyLoaded = false
     var loading = false
@@ -238,12 +240,13 @@ struct FileChange: Identifiable, Equatable, Sendable {
         return i
     }
 
-    var draft = ""
+    private(set) var draftRevision: UInt64 = 0
+    var draft = "" { didSet { if draft != oldValue { draftRevision &+= 1 } } }
     var access: Access = .auto
     /// Settings the last message used, and the ones the next message will use (spec: model picker).
     var settings = ModelSettings()
     var next = ModelSettings()
-    var attachments: [Attachment] = []
+    var attachments: [Attachment] = [] { didSet { if attachments != oldValue { draftRevision &+= 1 } } }
     /// Follow-ups waiting for the running reply to finish (Queue).
     var queued: [QueuedMessage] = []
     /// Dictation is typing into the draft (mock).

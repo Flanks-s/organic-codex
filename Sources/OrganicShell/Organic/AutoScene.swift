@@ -52,6 +52,19 @@ import QuartzCore
     let statusLine = CATextLayer()
     let dock: DockNode
     let clock = SceneClock()
+    lazy var orbInput = OrbInputController(scene: self)
+    lazy var orbMenu = OrbContextMenu(scene: self)
+    lazy var orbFlights = OrbSwitchFlight(scene: self)
+    lazy var orbToast = OrbActionToast()
+    lazy var orbHint = OrbHoverHint(scene: self)
+    lazy var orbTrash = AutoSceneTrash(scene:self)
+    var sunHover: SunHoverController?
+    var orbSwapLearned = false
+    var orbMenuPeekColumn: String?
+    var orbPressOrigin: CGRect?
+    var orbArchivePositions: [String: OrbArchivePosition] = [:]
+    /// Whole-history fork: Core must omit beforeTurnId and return a newly identified conversation.
+    var onForkWhole: ((Conversation, OrbWholeForkRequest, @escaping (Result<Conversation, Error>) -> Void) -> Void)?
 
     let store: ConversationStore
     private var observation: UUID?
@@ -115,6 +128,7 @@ import QuartzCore
     var blockMain = false
     var switches: [[String: Any]] = []
     var onModeEndpointVisibilityChanged:(()->Void)?
+    weak var browserPort: (any BrowserHostPort)?
     var onStatus: (() -> String)?
     /// The scene's clock. Tests replace it with a virtual one and settle by hand.
     var now: () -> Double = { CACurrentMediaTime() }
@@ -125,6 +139,34 @@ import QuartzCore
         self.transcriptSessions = transcriptSessions; transcriptsPresented = transcriptSessions == nil
         dock = DockNode(view: dockView, scale: scale)
         peekNode = PeekNode(size: size, scale: scale)
+        dockView.routeOrbInput = { [weak self] island, event in
+            guard let self, let id = island.configuration?.id else { return false }
+            if event.type == .leftMouseUp, self.orbInput.isPressed { self.orbInput.released(event); return true }
+            if event.type == .leftMouseDragged, self.orbInput.isPressed { self.orbInput.dragged(event); return true }
+            guard event.type == .leftMouseDown || event.type == .rightMouseDown else { return false }
+            return self.orbInput.begin(event, id: id, header: island) { [weak island] _ in island?.planetButton.performClick(nil) }
+        }
+        dockView.routeTideOrbInput = { [weak self] id, event in
+            guard let self,self.members.contains(where:{$0.id == id}) else { return false }
+            if event.type == .leftMouseUp,self.orbInput.isPressed { self.orbInput.released(event); return true }
+            if event.type == .leftMouseDragged,self.orbInput.isPressed { self.orbInput.dragged(event); return true }
+            guard event.type == .leftMouseDown || event.type == .rightMouseDown else { return false }
+            return self.orbInput.begin(event,id:id,ordinary:{ _ in })
+        }
+        dockView.routeTidePlanetInput = { [weak self] id,event,target in
+            guard let self,self.members.contains(where:{$0.id==id}) else {return false}
+            let onClick=target.onPress
+            let observe:((NSEvent)->Void)?=OrbGesturePolicy.action(event) == .ordinary
+                ? { [weak target] event in target?.onPointer?(event) }:nil
+            return self.orbInput.begin(event,id:id,tidePlanet:true,observePointer:observe,ordinary:{ [weak self] _ in
+                if self?.dock.tideHasNotice(id)==true {onClick?()}
+            })
+        }
+        dockView.orbInputContains = { [weak self] point in self?.orbInputTarget(at:point) != nil }
+        dockView.cancelOrbInput = { [weak self] in
+            guard let self,self.orbInput.isPressed else { return false }
+            self.orbInput.cancel(); return true
+        }
         let host = CALayer()
         sceneView.layer = host
         sceneView.wantsLayer = true
@@ -168,6 +210,9 @@ import QuartzCore
         dockView.accessibilityNodes = { [weak self] in self?.dockAccessibilityChildren() ?? [] }
         // Every window's scene watches the one store; arrivals go where the app sends them (f036).
         observation = store.observe { [weak self] c in self?.changed(c) }
+        sunHover = SunHoverController(scene: self)
+        dock.onTrashFrame = { [weak self] in self?.orbTrash.frame($0) }
+        dock.onTrashApplied = { [weak self] in self?.orbTrash.didApplyFrame() }
     }
 
     /// The window changed size (f013): everything lies out again at rest for it. `live` while the user is still
@@ -177,6 +222,7 @@ import QuartzCore
         guard transcriptSessions?.isDisposed != true else { return }
         guard newSize.width > 100, newSize.height > 100 else { return }
         let changed = newSize != size
+        if changed { sunHover?.retire(resumeTide: false); orbInput.cancel(); orbMenu.dismiss(); orbFlights.cancel(); orbHint.cancel() }
         if drag != nil { cancelDrag() }
         if isMoving { settle() }
         size = newSize
@@ -215,12 +261,13 @@ import QuartzCore
         applyCardBands()
         restIslands()
         dock.relayout(layout, metrics: metrics, order: order.compactMap(conversation), full: fullIDs)
+        browserPort?.resized(in: self)
         if scheme.draft, let c = layout.draftColumn, let b = layout.draftBar, let composer = draftComposer {
             draftColumn?.lay(c); dock.showDraftBar(composer, at: b)
         }
         for other in prewarmed.values { unstage(other) }
         prewarmed = [:];lastPrewarmClear="resize"
-        if !live { DispatchQueue.main.async { [weak self] in if changed {self?.fitSplit()};self?.requestPrewarm() } }
+        if !live { dock.resumeSunHoverTide(source: "resize"); DispatchQueue.main.async { [weak self] in if changed {self?.fitSplit()};self?.requestPrewarm() } }
     }
 
     /// `members`: the working set this window opens with, in order (nil: every conversation in the store).
@@ -254,8 +301,19 @@ import QuartzCore
         dock.ambient = ambient
         peekNode.ambient = ambient
         dock.install(layout, metrics: metrics, order: order.compactMap(conversation), full: fullIDs, store: store)
+        browserPort?.installed(in: self)
+        sunHover?.didInstallDock()
         dock.onNeedsFrames = { [weak self] d in guard let self else { return }; self.runClock(until: self.now() + d) }
         dock.onNeedsFramesUntil = { [weak self] end in self?.runClock(until: end) }
+        // Match the existing idle-prewarm quiet period without extending the display deadline.
+        dock.onTideMotion = { [weak self] in guard let self else{return};self.idleMotionUntil=max(self.idleMotionUntil,self.now()+0.25) }
+        dock.onTidePointer = { [weak self] point in self?.pointer(point) }
+        dock.tideCanDismiss = { [weak self] in self?.tideHasForegroundSurface == false }
+        dock.tideContentObstacles = { [weak self] in self?.tideDecisionObstacles ?? [] }
+        dock.onTideReadingRoom = { [weak self] rects in self?.makeTideReadingRoom(rects) }
+        dock.onTideReclaim = { [weak self] id in self?.reclaimTideBrief(id) }
+        dock.onTideAction = { [weak self] id,action in self?.performTideAction(action,for:id) }
+        dock.tideWarmAllowed = { [weak self] in guard let self else{return false};return self.presented && !self.isMoving && !self.modeHandoffActive && self.idlePrewarmTask == nil }
         dock.cancelHeldPress = { [weak self] in guard let self,self.drag != nil else { return false }; self.cancelDrag(); return true }
         clock.attach(to: sceneView)
         bindOverlays()
@@ -296,6 +354,11 @@ import QuartzCore
         return column
     }
     func disposeTranscriptPresentation() {
+        browserPort?.retire(); browserPort = nil
+        orbTrash.close()
+        sunHover?.dispose(); sunHover = nil
+        orbInput.dispose(); orbMenu.dispose(); orbFlights.cancel(); orbToast.dismiss(); orbHint.cancel()
+        dock.retireTide()
         longPress?.cancel(); longPress = nil
         peekTimer?.cancel(); peekTimer = nil
         peekStage.forEach { $0.cancel() }; peekStage = []
@@ -465,15 +528,24 @@ import QuartzCore
 
 extension AutoScene {
     func beginModeHandoff() {
+        sunHover?.retire(resumeTide: false)
+        orbInput.cancel(); orbTrash.suspend(); orbMenu.dismiss(); orbFlights.cancel(); orbToast.dismiss(); orbHint.cancel()
+        dock.freezeTideForMode(fading:modeContentEpochFrozen)
         modeHandoffActive=true;cancelIdlePreparation();prewarmTask?.cancel();prewarmTask=nil;prewarmScheduled=false
     }
     var inModeHandoff:Bool {modeHandoffActive}
     func endModeHandoff() {
+        // The frozen source remains the photo's owner until M11.31 releases its content epoch.
+        if transcriptsPresented {dock.finishTideModeHandoff()} else {dock.retireTide()}
         modeHandoffActive=false
+        dock.resumeSunHoverTide(source: "handoff")
         M10ColumnModeProbe.measure("OrganicAdmitTranscripts") {admitUnmountedTranscripts(columns)}
         if prewarmRequested,transcriptsPresented {requestPrewarm()}
     }
     func suspendModePresentation() {
+        sunHover?.retire()
+        orbInput.cancel(); orbTrash.suspend(); orbMenu.dismiss(); orbFlights.cancel(); orbToast.dismiss(); orbHint.cancel()
+        if !modeContentEpochFrozen {dock.retireTide()}
         if !modeContentEpochFrozen {for column in nodes.values {column.island?.setPulsePresentationRetired(true)}}
         guard transcriptSessions?.isDisposed != true else{return}
         M10ColumnModeProbe.measure("OrganicModeSuspend") {
@@ -622,6 +694,7 @@ extension AutoScene {
                 old.unmountNative(); old.card.removeFromSuperlayer();old.separator.removeFromSuperlayer();old.island?.isHidden=true
             }
             members=plan.members;current=plan.current;scheme=plan.scheme;layout=plan.layout;order=plan.order
+            sunHover?.refreshData()
             transcriptsPresented=true; columns=nextNodes
             for column in columns { column.island?.setPulsePresentationRetired(false) }
             CATransaction.begin();CATransaction.setDisableActions(true);defer{CATransaction.commit()}

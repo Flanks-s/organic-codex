@@ -17,6 +17,7 @@ import QuartzCore
     let menus = NormieMenuBuilder(context: { NormieMenuContext(supported: []) }, perform: { _, _ in })
     let store = ConversationStore()
     var mock: MockReplay?
+    var liveBrowser: LiveBrowserSource?
     /// What sends, stops and creates: the live Core on a normal launch (f001), the mock over `mock` for demos, tests,
     /// timed runs and --mock.
     var runtime: any ConversationRuntime = MockConversationRuntime(store: ConversationStore())
@@ -44,6 +45,7 @@ import QuartzCore
             let replay = MockReplay(store: store, includeSidebarHistory: true)
             replay.start(live: false)
             mock = replay
+            if o.browserOrbMock { _ = replay.setBrowserMockEnabled(true) }
             runtime = MockConversationRuntime(store: store, replay: replay)
             // PARITY_DRAFT (M9 captures): the same words in every conversation's composer, as the product's copy does.
             if let text = ProcessInfo.processInfo.environment["PARITY_DRAFT"] { for c in store.conversations { c.draft = text } }
@@ -79,6 +81,10 @@ import QuartzCore
         // Each Lab moves a real column on a stage of its own (LabStage), never a window's.
         let debug = DebugTools(store: store, mock: mock, initiallyPaused: o.mockPaused, transitionHost: transitionStage, springHost: springStage)
         debugTools = debug
+        if !liveCore {
+            debug.session.onBrowserMockChanged = { [weak self] in self?.synchronizeBrowserOrbWindows() }
+            debug.session.onBrowserScenario = { [weak self] in self?.front?.browserOwner?.playScenario($0) }
+        }
         // The panel's layout, morph and spring values reach every window's scene (DEBUG-MOCK-S4; f009).
         tuningHost.windows = { [weak self] in self?.windows ?? [] }
         tuningBinding = debug.bindTuning(to: tuningHost)
@@ -460,6 +466,7 @@ import QuartzCore
 
     func applicationWillTerminate(_ n: Notification) {
         isTerminating = true
+        liveBrowser?.dispose(); liveBrowser = nil
         save()
         // The live runtime saves its presentation and stops reading; the Core keeps running what it runs.
         // Quitting redraws nothing: its state changes would refresh every workbench on the way out.

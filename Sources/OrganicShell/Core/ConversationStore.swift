@@ -16,6 +16,10 @@ enum ConversationChange: Equatable, Sendable {
     private(set) var projects: [Project] = []
     private(set) var devices: [Device] = []
     var usesLiveCore = false
+    /// New allocation is enabled only after the endpoint's identity transaction commits.
+    var bodyIdentitiesReady = false
+    var bodyIdentityMigrationRequired = false
+    var canSelectBodyIdentity: Bool { !bodyIdentityMigrationRequired || bodyIdentitiesReady }
     private var localProjectPaths = false
     private var projectAliases: [String: String] = [:]
     /// Numeric values drive the liquid; availability is separate so an unknown limit is never "0% used".
@@ -33,8 +37,8 @@ enum ConversationChange: Equatable, Sendable {
         return quotaBothReported ? "\(remaining)% left" : "\(remaining)% left in reported limit"
     }
     /// Usage limits used, 0…1. me's liquid shows the tighter reported limit (spec §10.5).
-    var quotaFiveHour = 0.34 { didSet { showQuota() } }
-    var quotaWeek = 0.58 { didSet { showQuota() } }
+    var quotaFiveHour = 0.34 { didSet { showQuota(); publishAccountUsage() } }
+    var quotaWeek = 0.58 { didSet { showQuota(); publishAccountUsage() } }
     var quotaTightest: Double { max(quotaFiveHourReported ? quotaFiveHour : 0, quotaWeekReported ? quotaWeek : 0) }
     /// The limits in whole percents, for what shows them (me's liquid shows the tighter one): the mock spends a little
     /// of them on every tick, and views reading the exact values were drawn again on every one.
@@ -47,20 +51,61 @@ enum ConversationChange: Equatable, Sendable {
         if shown(quotaFiveHour) != quotaFiveHourShown { quotaFiveHourShown = shown(quotaFiveHour) }
         if shown(quotaWeek) != quotaWeekShown { quotaWeekShown = shown(quotaWeek) }
     }
-    func clearCoreQuota() {
+    private var updatingAccountUsage = false
+    private var usageVersion: UInt64 = 0
+    private var usageIdentity = AccountUsageIdentity.prototype
+    private var quotaPrimaryLimitID: String?, quotaSecondaryLimitID: String?
+    private var usageObservers: [UUID: (AccountUsage) -> Void] = [:]
+    var accountUsageObservationCount: Int { usageObservers.count }
+    var accountUsage: AccountUsage {
+        .init(primary: .init(reported: quotaFiveHourReported, used: quotaFiveHour,
+                             windowMinutes: quotaFiveHourWindowMinutes, resetsAt: quotaFiveHourResetsAt, limitID: quotaPrimaryLimitID),
+              secondary: .init(reported: quotaWeekReported, used: quotaWeek,
+                               windowMinutes: quotaWeekWindowMinutes, resetsAt: quotaWeekResetsAt, limitID: quotaSecondaryLimitID),
+              identity: usageIdentity, version: usageVersion)
+    }
+    func setAccountUsageIdentity(_ identity: AccountUsageIdentity) {
+        usageIdentity = identity; publishAccountUsage()
+    }
+    @discardableResult func observeAccountUsage(deliverInitial: Bool = true,
+                                               _ change: @escaping (AccountUsage) -> Void) -> AccountUsageObservation {
+        let id = UUID(); usageObservers[id] = change
+        if deliverInitial { change(accountUsage) }
+        return AccountUsageObservation { [weak self] in self?.usageObservers[id] = nil }
+    }
+    private func publishAccountUsage() {
+        guard !updatingAccountUsage else { return }
+        usageVersion &+= 1
+        let snapshot = accountUsage
+        // Reentrant cancel removes a later callback immediately; a nested update supersedes this version.
+        for id in Array(usageObservers.keys) {
+            guard usageVersion == snapshot.version else { break }
+            usageObservers[id]?(snapshot)
+        }
+    }
+    func clearCoreQuota(identity: AccountUsageIdentity? = nil) {
+        updatingAccountUsage = true
+        defer { updatingAccountUsage = false; publishAccountUsage() }
+        if let identity { usageIdentity = identity }
+        quotaPrimaryLimitID = nil; quotaSecondaryLimitID = nil
         quotaFiveHourReported = false; quotaWeekReported = false
         quotaFiveHourResetsAt = nil; quotaWeekResetsAt = nil
         quotaFiveHourWindowMinutes = nil; quotaWeekWindowMinutes = nil
         quotaFiveHour = 0; quotaWeek = 0
     }
     func applyCoreRateLimits(_ response: JSONValue) {
+        updatingAccountUsage = true
+        defer { updatingAccountUsage = false; publishAccountUsage() }
         let legacy = response["rateLimits"] ?? response
         let buckets = response["rateLimitsByLimitId"]?.objectValue
         let limitID = legacy["limitId"]?.stringValue
         let matching = limitID.flatMap { buckets?[$0] }
         let snapshot = buckets?["codex"] ?? matching ?? legacy
+        let resolvedLimitID = snapshot["limitId"]?.stringValue ?? (buckets?["codex"] != nil ? "codex" : limitID)
         let primary = snapshot["primary"]
         let secondary = snapshot["secondary"]
+        quotaPrimaryLimitID = primary?["limitId"]?.stringValue ?? resolvedLimitID
+        quotaSecondaryLimitID = secondary?["limitId"]?.stringValue ?? resolvedLimitID
         quotaFiveHourReported = primary?["usedPercent"]?.doubleValue != nil
         quotaWeekReported = secondary?["usedPercent"]?.doubleValue != nil
         quotaFiveHourResetsAt = primary?["resetsAt"]?.doubleValue.map(Date.init(timeIntervalSince1970:))
@@ -78,6 +123,7 @@ enum ConversationChange: Equatable, Sendable {
 
     init(conversations: [Conversation] = [], projects: [Project] = [], devices: [Device] = []) {
         self.conversations = conversations; self.projects = projects; self.devices = devices
+        for c in conversations { c.phaseStore=self }
     }
 
     func project(_ id: String?) -> Project? {
@@ -136,6 +182,11 @@ enum ConversationChange: Equatable, Sendable {
     func backendConversation(_ id: String) -> Conversation? { conversations.first { $0.backendThreadID == id } }
     func nextIdentity() -> Int {
         let used=Set(conversations.map { ConversationIdentity.resolved(index:$0.identityIndex,symbol:$0.identitySymbol,tint:$0.identityTint) })
+        if bodyIdentitiesReady {
+            let start = ConversationBodyIdentity.allocationBase
+            for index in start..<(start + ConversationBodyIdentity.choices.count * 13) where !used.contains(ConversationBodyIdentity.allocated(index)) { return index }
+            return max(start + ConversationBodyIdentity.choices.count * 13, (conversations.map(\.identityIndex).max() ?? start) + 1)
+        }
         for index in 0..<ConversationIdentity.combinationCount where !used.contains(ConversationIdentity.assigned(index)) { return index }
         // The product's 13×13 palette repeats after 169. Stay finite when it is entirely occupied.
         return max(ConversationIdentity.combinationCount,(conversations.map(\.identityIndex).max() ?? -1)+1)
@@ -149,6 +200,31 @@ enum ConversationChange: Equatable, Sendable {
     }
 
     var onChange: ((Conversation) -> Void)?
+    /// Arrival chronology for pending work; a conversation.updated timestamp can advance during a long wait.
+    private var attentionTimes: [String: [String: Double]] = [:]
+    private var reviewedAttentionErrors: [String: String] = [:]
+    func attentionErrorWasReviewed(sourceID: String, key: String) -> Bool { reviewedAttentionErrors[sourceID] == key }
+    func markAttentionErrorReviewed(sourceID: String, key: String) { reviewedAttentionErrors[sourceID] = key }
+    func attentionTime(threadID: String, eventKey: String) -> Double? { attentionTimes[threadID]?[eventKey] }
+    func recordAttentionEvent(_ event: CoreEvent) {
+        let p = event.params
+        guard let tid = p["threadId"]?.stringValue ?? p["thread"]?["id"]?.stringValue else { return }
+        let time = event.time ?? Date().timeIntervalSince1970
+        switch event.method {
+        case "core/approvalRequested":
+            if let id = p["approvalId"]?.stringValue, attentionTimes[tid]?["request:" + id] == nil {
+                attentionTimes[tid, default: [:]]["request:" + id] = time
+            }
+        case "core/approvalResponded", "core/approvalExpired":
+            if let id = p["approvalId"]?.stringValue { attentionTimes[tid]?["request:" + id] = nil }
+        case "error": attentionTimes[tid, default: [:]]["error"] = time
+        case "turn/started": attentionTimes[tid]?["error"] = nil
+        case "turn/completed":
+            if p["turn"]?["status"]?.stringValue == "failed" { attentionTimes[tid, default: [:]]["error"] = time }
+            else { attentionTimes[tid]?["error"] = nil }
+        default: break
+        }
+    }
     private var changeObservers: [UUID: (Conversation, ConversationChange) -> Void] = [:]
     private var observers: [UUID: (Conversation) -> Void] = [:]
     /// Owner-lifetime diagnostics without exposing callbacks or conversation data.
@@ -158,6 +234,7 @@ enum ConversationChange: Equatable, Sendable {
     var onAdd: ((Conversation) -> Void)?
     func add(_ c: Conversation) {
         guard conversation(c.id) == nil else { return }
+        c.phaseStore=self
         conversations.append(c)
         onAdd?(c)
     }
@@ -201,6 +278,7 @@ enum ConversationChange: Equatable, Sendable {
         for callback in Array(observers.values) { callback(c) }
     }
     func apply(_ e: CoreEvent) {
+        recordAttentionEvent(e)
         let p = e.params
         if e.method == "account/rateLimits/updated" {
             applyCoreRateLimits(p)
