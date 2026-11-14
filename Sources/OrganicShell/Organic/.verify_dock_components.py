@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py dock-switches. Kept, not deleted (#181).
 """M10.4 windowless checks against an isolated git-archive HEAD + only Dock-owned files. Persistent debug objects."""
 from pathlib import Path
 import argparse, subprocess, json, hashlib

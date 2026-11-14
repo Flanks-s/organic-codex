@@ -88,6 +88,10 @@ import Darwin
     /// Seal at LF only: the existing bold regex excludes LF, but permits bare CR/U+2028 inside a bold span. Parse
     /// all source line separators for fence state without accidentally sealing such a cross-line bold span.
     private func checkpoint(_ tail: String, sourceStart: Int, displayStart: Int, mapping: [Int], initialFence: Bool) {
+        if !mapping.isEmpty, !mapping.contains(where: { $0 >= 0 }) {
+            // A placeholder has no source glyphs. The first real delta must replace it, not append after it.
+            rawTailStart = 0; displayTailStart = 0; fenceBeforeTail = false; plainTail = false; return
+        }
         let raw = tail as NSString
         var cursor = 0, fence = initialFence, sealedFence = initialFence, nextStart = 0
         while cursor < raw.length {
@@ -105,7 +109,7 @@ import Darwin
     private static func isPlain(_ value: String, allowingLineBreaks: Bool = false) -> Bool {
         !value.unicodeScalars.contains {
             switch $0.value {
-            case 35, 42, 45, 96: return true
+            case 35, 42, 45, 96, 91, 93, 40, 41, 58, 47: return true
             case 10, 13, 0x2028, 0x2029: return !allowingLineBreaks
             default: return false
             }

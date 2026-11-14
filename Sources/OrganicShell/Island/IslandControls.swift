@@ -30,6 +30,9 @@ import AppKit
 @MainActor final class IslandButton: NSControl {
     var invoke:(()->Void)?, doubleClick:(()->Void)?, focus:((Bool)->Void)?
     var beginPointerGesture: ((NSEvent) -> (any IslandOrbDragGesture)?)?
+    var routePointerDown: ((NSEvent) -> Bool)?
+    var cancelRoutedPointer: (() -> Bool)?
+    var routesContextInput: (() -> Bool)?
     private var pointerGesture: (any IslandOrbDragGesture)?
     /// The gesture can outlive a leaving/hidden column. Its local event monitor calls this on every exit.
     func endPointerGesture() { pointerGesture=nil; pressed=false; needsDisplay=true }
@@ -105,6 +108,7 @@ import AppKit
     override func mouseExited(with event:NSEvent) { hovered=false; needsDisplay=true }
     override func mouseDown(with event:NSEvent) {
         guard participates && isEnabled && NativePointerShield.permits(self,localPoint:convert(event.locationInWindow,from:nil)) else { return }
+        if routePointerDown?(event) == true { return }
         if event.clickCount>1, let doubleClick { doubleClick(); return }
         pressed=true; needsDisplay=true
         if let gesture=beginPointerGesture?(event) {
@@ -124,9 +128,20 @@ import AppKit
             }
         } else { pressed=false; performClick(self) }
     }
-    override func mouseDragged(with event:NSEvent) { pointerGesture?.dragged(with:event) }
-    override func mouseUp(with event:NSEvent) { pointerGesture?.released(with:event) }
-    override func cancelOperation(_ sender:Any?) { pointerGesture?.cancel(); endPointerGesture() }
+    override func mouseDragged(with event:NSEvent) { if routePointerDown?(event) != true { pointerGesture?.dragged(with:event) } }
+    override func rightMouseDown(with event:NSEvent) {
+        if routePointerDown?(event) != true { super.rightMouseDown(with:event) }
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        // AppKit asks this before mouseDown for Control-click. Leave routing to the shared input owner.
+        if event.modifierFlags.contains(.control), routesContextInput?() == true { return nil }
+        return super.menu(for:event)
+    }
+    override func mouseUp(with event:NSEvent) { if routePointerDown?(event) != true { pointerGesture?.released(with:event) } }
+    override func cancelOperation(_ sender:Any?) {
+        if cancelRoutedPointer?() != true { pointerGesture?.cancel() }
+        endPointerGesture()
+    }
     override func performClick(_ sender:Any?) { if participates && isEnabled && !isHiddenOrHasHiddenAncestor { invoke?() } }
     override func accessibilityPerformPress() -> Bool {
         guard participates && isEnabled && !isHiddenOrHasHiddenAncestor else { return false }; performClick(self); return true

@@ -12,8 +12,8 @@ enum ConversationIdentity {
         return .init(symbol:symbols[body],tint:tints[round == 0 ? body:(body+(round%13)*5)%13])
     }
     static func resolved(index:Int,symbol:String?,tint:String?)->Key {
-        let base=assigned(index)
-        return .init(symbol:symbol.flatMap { symbols.contains($0) ? $0:nil } ?? base.symbol,
-                     tint:tint.flatMap { tints.contains($0) ? $0:nil } ?? base.tint)
+        let base=index >= ConversationBodyIdentity.allocationBase ? ConversationBodyIdentity.allocated(index) : assigned(index)
+        return .init(symbol:symbol.flatMap { (symbols + ConversationBodyIdentity.choices).contains($0) ? $0:nil } ?? base.symbol,
+                     tint:tint.flatMap { tints.contains($0) || ConversationBodyIdentity.choices.contains(String($0.dropFirst(5))) && $0.hasPrefix("body.") ? $0:nil } ?? base.tint)
     }
 }

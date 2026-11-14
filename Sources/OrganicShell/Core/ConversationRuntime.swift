@@ -1,5 +1,12 @@
 import Foundation
 
+/// Whole-orb forks use the backend's end-of-history boundary, never a message boundary.
+struct OrbWholeForkRequest {
+    let threadID: String
+    let method = "thread/fork"
+    var params: [String:JSONValue] { ["threadId":.string(threadID),"deferGoalContinuation":true] }
+}
+
 /// The operations used by Organic's existing native UI. Presentation and window geometry stay in the shell.
 @MainActor protocol ConversationRuntime: AnyObject {
     var store: ConversationStore { get }
@@ -24,6 +31,7 @@ import Foundation
     func attach(_ c: Conversation)
     func removeAttachment(_ a: Attachment, from c: Conversation)
     func fork(_ c: Conversation, at itemID: String) -> Conversation?
+    func forkWhole(_ c: Conversation) async throws -> Conversation
     func compactNow(_ c: Conversation)
     func commit(_ c: Conversation, message: String)
     func revert(_ card: TranscriptItem, in c: Conversation)
@@ -33,8 +41,25 @@ import Foundation
     func sendVoice(_ c: Conversation)
 }
 
+extension Conversation {
+    /// Exclude the entire active turn, including its already completed tool and user rows.
+    var completedForkItems: [TranscriptItem] {
+        let active = activeTurnID ?? items.first(where: { $0.running })?.turnID ?? (running ? items.last?.turnID : nil)
+        guard let active, let boundary = items.firstIndex(where: { $0.turnID == active }) else { return items }
+        return Array(items.prefix(boundary))
+    }
+}
+
 extension ConversationRuntime {
     func shutdown() {}
+    /// The requesting window owns whole-Fork admission. Background arrival handling
+    /// must not admit it into another window or choose a column before its Dock callback.
+    func registerWholeFork(_ fork: Conversation) {
+        let arrival = store.onAdd
+        store.onAdd = nil
+        store.add(fork)
+        store.onAdd = arrival
+    }
     func createUnsentConversation(title: String, projectID: String?, deviceID: String = "mac") -> Conversation {
         let c = Conversation(id: UUID().uuidString, identityIndex: store.nextIdentity(), title: title, projectID: projectID, deviceID: deviceID, updated: Date(), contextUsed: 0)
         c.cwd = store.project(projectID)?.path; c.next = store.newChatSettings; c.settings = c.next

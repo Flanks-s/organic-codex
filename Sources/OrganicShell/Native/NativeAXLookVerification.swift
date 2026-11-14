@@ -59,7 +59,7 @@ import AppKit
         let editor=composer.textView,undo=editor.undoManager,selection=user.body.selectedRange()
         let hidden=NativeTranscript(conversation:c);hidden.frame=transcript.frame;hidden.refresh();hidden.isHidden=true
         let hiddenCount=hidden.rowConfigurationCount(itemID:"user")
-        var look=NativeAppearance.Look();look.requestedMode="light";look.textScale=1.3;look.clearGlass=true;look.background=NSColor(srgbRed:0.08,green:0.11,blue:0.16,alpha:1);look.foreground=NSColor(srgbRed:0.9,green:0.82,blue:0.7,alpha:1);look.accent = .systemPink;look.code.fontID="menlo";look.code.pointSize=16;look.code.text = .systemCyan;look.code.added = .systemGreen;look.code.removed = .systemRed
+        var look=NativeAppearance.Look();look.textScale=1.3;look.clearGlass=true;look.background=NSColor(srgbRed:0.08,green:0.11,blue:0.16,alpha:1);look.foreground=NSColor(srgbRed:0.9,green:0.82,blue:0.7,alpha:1);look.accent = .systemPink;look.code.fontID="menlo";look.code.pointSize=16;look.code.text = .systemCyan;look.code.added = .systemGreen;look.code.removed = .systemRed
         let change=NativeAppearance.apply(look)
         check(change.redrawSnapshots && change.geometryChanged && change.effectiveMode=="dark" && change.clearGlass,"f132 resolved host change reports geometry, captures and dark-only mode")
         check(descendants(transcript).contains{$0 === user} && user.body.selectedRange()==selection,"f084 appearance keeps row/text identity and selection")

@@ -252,9 +252,8 @@ import AppKit
         let insights=source.filter{$0.kind == .info && $0.detail.hasSuffix(" · prototype")}.map{r in var r=r;let detail=r.detail;r.detail="";r.visual.rightText=String(detail.dropLast(12));return r};section("Insights",insights)
     }
     private mutating func appearance(){
-        var modes=item("look.mode","Appearance","",height:83)!;modes.visual.style = .modes;modes.visual.cardArt="modes"
         var size=item("look.text","Text size","",height:39)!;size.visual.style = .slider
-        section(nil,[modes,size])
+        section(nil,[size])
         var themes=get("look.theme")!;themes.visual.style = .themeStrip;themes.visual.height=97
         var all=plain("m9.themes.all",session.draft("m9.themes.all") == "yes" ? "Show Less":"Show All (29)");all.kind = .button;all.perform={ [session] _ in session.setDraft("m9.themes.all",session.draft("m9.themes.all") == "yes" ? "":"yes");session.changed() };themes.visual.showsAll=session.draft("m9.themes.all") == "yes"
         section("Window Theme",[themes],actions:[all])

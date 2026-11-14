@@ -1,0 +1,10 @@
+selftest
+island-layer SELFTEST_COLUMN_WORK=1 SELFTEST_ISLAND_LAYER_ONLY=1
+long-conversation SELFTEST_LONG_CONVERSATION=1
+window-lifetime SELFTEST_WINDOW_LIFETIME=1
+no-window SELFTEST_NO_WINDOW=1
+m11-1-check !zsh tools/m11/m11-1-check.sh "$out/m11-1-check"
+column-work SELFTEST_COLUMN_WORK=1
+m10-columns SELFTEST_M10_COLUMNS=1
+m10-columns-reduced SELFTEST_M10_COLUMNS=1 CI_DISPLAY=reduce-motion,reduce-transparency
+core !python3 tools/m11/core-4954-check.py "$out/core" --cache .core-gate

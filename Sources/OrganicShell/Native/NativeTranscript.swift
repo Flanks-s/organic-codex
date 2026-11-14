@@ -107,6 +107,7 @@ struct NativeFlightSource {
         // A second freeze captures the prefix actually on screen, never the unpresented store tail.
         if modeEpochModel == nil {modeEpochModel=snapshot ?? ModeContentEpoch.copy(modeContentRenderedValue);modeCatchupFollowsEnd=shouldFollowEnd && isAtEnd}
         modeEpochFrozen=true;modeContentInputBlocked=true
+        syncReferenceInteractions()
         modeScrollGeneration+=1
         document.wantsLayer=true
         // Freeze the displayed compensation rather than snapping a new warm/cold epoch to its model endpoint.
@@ -122,6 +123,7 @@ struct NativeFlightSource {
     }
     func endModeContentEpoch() {
         guard modeEpochFrozen else {return};modeEpochFrozen=false;modeContentInputBlocked=false;modeCatchupGeneration+=1
+        defer { syncReferenceInteractions() }
         prepareModeFollowResumption()
         let frozenShift=(document.layer?.value(forKeyPath:"transform.translation.y") as? NSNumber)?.doubleValue ?? 0
         let settling=applyModeScrollCompensation(frozenShift)
@@ -308,6 +310,27 @@ struct NativeFlightSource {
     var onApproval: ((Approval, ApprovalAction) -> Void)? { didSet { refresh(preservingOffset: true) } }
     var onAnswer: ((UserInputRequest, [String: [String]]) -> Void)? { didSet { refresh(preservingOffset: true) } }
     var onReviewChanges: ((TranscriptItem) -> Void)?
+    var onReference: ((TranscriptReferenceRequest) -> Void)? { didSet { syncReferenceInteractions() } }
+    var onReferenceHostState: ((Bool) -> Void)?
+    private var referencesAdmitted: Bool { onReference != nil && !isDisposed && !modeEpochFrozen && !modeContentInputBlocked && isPresentationVisible }
+    func refreshReferenceAdmission() { syncReferenceInteractions() }
+    private func syncReferenceInteractions() {
+        onReferenceHostState?(referencesAdmitted)
+        for row in rows.values { wireReferences(row) }
+    }
+    private func wireReferences(_ row: NativeTranscriptRow) {
+        guard referencesAdmitted else { row.onReference = nil; return }
+        let expected = row.item
+        row.onReference = { [weak self, weak row] target, range in
+            guard let self, let row, self.referencesAdmitted, row.item == expected,
+                  NativeInteractionSurface.permits(row), NSMaxRange(range) <= row.sourceOffsets.count,
+                  let start = row.sourceOffsets[range.location..<NSMaxRange(range)].first(where: { $0 >= 0 }),
+                  let reference = TranscriptContentIndex.parse(expected.text).first(where: {
+                      $0.target == target && NSLocationInRange(start, $0.labelRange)
+                  }) else { return }
+            self.onReference?(.init(source: .init(itemID: expected.id, range: reference.range, target: target)))
+        }
+    }
     var onRevertChanges: ((TranscriptItem) -> Void)? { didSet { refresh(preservingOffset: true) } }
 
     init(conversation: Conversation, store: ConversationStore? = nil) {
@@ -450,6 +473,7 @@ struct NativeFlightSource {
     /// nil follows only if already near the end; true freezes the current viewport during a flight.
     override func presentationVisibilityDidChange(){
         guard !isDisposed else { return }
+        syncReferenceInteractions()
         if !isPresentationVisible { refinementTask?.cancel(); refinementTask = nil; return }
         if refreshDeferred { refreshDeferred = false; refresh() }
         else { scheduleHeightRefinement() }
@@ -460,6 +484,7 @@ struct NativeFlightSource {
         if let observation{store?.removeObserver(observation);self.observation=nil}
         if let scrollObservation{NotificationCenter.default.removeObserver(scrollObservation);self.scrollObservation=nil}
         if let pinnedObservation{NotificationCenter.default.removeObserver(pinnedObservation);self.pinnedObservation=nil}
+        onReference = nil; onReferenceHostState?(false); onReferenceHostState = nil
         onEditMessage=nil;onForkMessage=nil;onUserMessageAction=nil;onApproval=nil;onApprovalValue=nil;onAnswer=nil;onReviewChanges=nil;onRevertChanges=nil;messageDraftTarget=nil
         for view in document.subviews{view.isHidden=true;view.removeFromSuperview()};for card in externalCards.values{card.isHidden=true;card.removeFromSuperview()};externalCards=[:];retainedDecisionCards=[:];cards=[:];rows=[:];rowPool=[];entries=[];entryPositions=[:];order=[];document.update([])
     }
@@ -478,6 +503,7 @@ struct NativeFlightSource {
         }
     }
     func clearPresentationCallbacks() {
+        onReference = nil; onReferenceHostState?(false); onReferenceHostState = nil
         configurePresentation {
             messageDraftTarget = nil; onUserMessageAction = nil; onEditMessage = nil; onForkMessage = nil
             onApproval = nil; onApprovalValue = nil; onAnswer = nil; onReviewChanges = nil; onRevertChanges = nil
@@ -793,6 +819,7 @@ struct NativeFlightSource {
             }
         }
         preparedKeys = retained
+        for row in rows.values { row.reconcileReferenceVisibility() }
         updateLatest()
     }
     private func mountEntry(_ index: Int, preparedOverride: NativeTranscriptPreparedRow? = nil, reconfigure: Bool = true) {
@@ -822,6 +849,7 @@ struct NativeFlightSource {
             let prepared = preparedOverride ?? measureEntry(index, retainingText: true)
             row.configure(shownItem(entry), sourceItem: item, index: itemIndex, items: renderConversation.items, width: lastWidth,
                 expanded: entry.expanded, codeStyle: codeStyle, prepared: prepared, fallbackTimestamp: entry.firstSeen)
+            wireReferences(row)
             configurationCounts[item.id, default: 0] += row.configurationCount - before
             row.applyFlightHidden(hiddenFlightParts[item.id] ?? [], textHidden: hiddenText.contains(item.id))
             row.applyHiddenSourceRanges(hiddenTextRanges[item.id] ?? [])

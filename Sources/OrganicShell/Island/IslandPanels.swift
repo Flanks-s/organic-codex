@@ -76,17 +76,16 @@ extension HeaderIslandConfiguration {
                                         reduceMotion:Bool=false,ambient:Bool=true,isKeyWindow:Bool=true,scale:CGFloat=2,
                                         identitySymbol:String?=nil,identityTint:String?=nil) -> Self {
         var input=Self(id:c.id,title:c.title)
-        input.identity = .assigned(c.identityIndex)
-        if let symbol=OrbCelestialBody.allCases.first(where:{ String(describing:$0) == (identitySymbol ?? c.identitySymbol) }) { input.identity.symbol=symbol }
-        if let tint=OrbTint.allCases.first(where:{ String(describing:$0) == (identityTint ?? c.identityTint) }) { input.identity.tint=tint }
+        input.identity = BodyIdentityAdapter.identity(index: c.identityIndex, symbol: identitySymbol ?? c.identitySymbol, tint: identityTint ?? c.identityTint)
         input.variant=variant; input.columnWidth=columnWidth; input.band=band
         input.activitySerial=c.orbActivity.serial
-        input.signals.error=c.error.map { $0 == .stopped ? .stopped:.running }
+        input.bodyPhase=conversationPhaseEvent(c)
+        input.signals.error=(c.phaseFacts.isRetrying ? ErrorState.running:c.error).map { $0 == .stopped ? .stopped:.running }
         input.signals.approvals=c.approvals.count; input.signals.question=c.question != nil || c.userInput != nil
         input.signals.completions=c.completions; input.signals.running=c.running; input.signals.stopping=c.stopping; input.signals.stops=c.stops
         input.signals.files=c.changes.count; input.signals.added=c.changes.reduce(0) { $0+$1.added }; input.signals.removed=c.changes.reduce(0) { $0+$1.removed }
         input.signals.context = (c.isLiveConversation || c.backendThreadID != nil) && !c.contextUsageReported ? nil:c.contextShown; input.signals.compactions=c.compactions
-        input.signals.satellites=c.satellites.map { .init(id:$0.id,face:$0.face,pace:c.pace,done:$0.done,finishedOrder:$0.finishedOrder) }
+        input.signals.satellites=c.satellites.map { .init(id:$0.id,face:$0.face,pace:c.pace,done:$0.done,finishedOrder:$0.finishedOrder,bodyPhase:satellitePhaseEvent($0,parent:c)) }
         input.satellitesRetired=c.satellitesRetired; input.contextDescription=c.contextDescription; input.contextLimit=c.contextLimit.map(String.init)
         input.canCompact = !c.running && !c.sending && !c.loading
         input.reduceMotion=reduceMotion; input.ambient=ambient; input.isKeyWindow=isKeyWindow; input.scale=scale

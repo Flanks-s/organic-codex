@@ -157,7 +157,7 @@ import QuartzCore
                 group.shouldRasterize = true; group.rasterizationScale = scale
             }
             let renderer = OffscreenRenderer(size: root.bounds.size, host: root, scale: scale)
-            let frame = renderer.render(at: CACurrentMediaTime() + 3600)
+            let frame = renderer.render(at: VerificationClock.renderOrigin)
             if mixed { check(renderer.tileDiff(reference, frame).value < 0.1, "M9 glyph coverage does not dim at the endpoint crossfade midpoint / \(scale)x") }
             else { reference = frame }
         }
@@ -171,7 +171,7 @@ import QuartzCore
         let glyphs = CALayer(); glyphs.anchorPoint = .zero; glyphs.contentsScale = scale
         glyphs.contents = line.sourceImage; glyphs.frame = line.source; root.addSublayer(glyphs)
         let renderer = OffscreenRenderer(size: root.bounds.size, host: root, scale: scale)
-        let start = CACurrentMediaTime() + 3600, duration = 0.8
+        let start = VerificationClock.renderOrigin, duration = 0.8
         let timeline = Timeline(began: 0, duration: duration, rate: 120)
         let values = timeline.map { NSValue(caTransform3D: CATransform3DMakeScale(0.9986 + 0.0014 * $0 / duration, 0.9986 + 0.0014 * $0 / duration, 1)) }
         timeline.track(glyphs, "transform", values)?.start(at: start)
@@ -198,7 +198,7 @@ import QuartzCore
         let store = ConversationStore(conversations: fixtures, projects: MockSeed.projects, devices: MockSeed.devices)
         let profile = DisplayProfile(name: "M9", frameInterval: 1 / 60, mmPerPoint: 0.27, persistenceFrames: 0)
         let scene = AutoScene(size: CGSize(width: 1280, height: 820), store: store, profile: profile, scale: scale)
-        var clock = CACurrentMediaTime() + 3600
+        var clock = VerificationClock.renderOrigin
         scene.now = { clock }; scene.manualSettle = true; scene.restOnSnapshot = true; scene.ambient = false; scene.install()
         let renderer = OffscreenRenderer(size: CGSize(width: 1280, height: 820), host: scene.sceneView.layer!, scale: scale)
         func finish() { clock = scene.transitionEnd + 0.05; scene.settle(); clock += 0.2 }

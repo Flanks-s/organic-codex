@@ -23,7 +23,7 @@ import AppKit
         requestEpoch += 1; let requestID = requestEpoch; finish(result: nil)
         guard requestEpoch == requestID else { return }
         let id = UUID(); generation = id
-        let size = CGSize(width: 424, height: 374)
+        let size = CGSize(width: 424, height: 470)
         let h = factory(.init(title: "Customize Chat", size: size, minimumSize: size, resizable: false)) { [weak self] in
             guard let self, self.generation == id else { return }; self.finish(result: nil, windowAlreadyClosed: true)
         }

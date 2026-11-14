@@ -153,10 +153,14 @@ import QuartzCore
             scene.onSubmit={_,_,done in done(.accepted);return true}
             store.onAdd={ [weak scene] c in scene?.admit(c,reason:"island-layer-first-send") }
             scene.newChat();settle();scene.warmNewChatIsland()
+            let seed=scene.draftColumn
             let composer=scene.composers.draft().composer;composer.setText("Offline first send");_=composer.submit()
-            // First send retains the old seed for 50 ms on the main queue. A virtual scene clock cannot retire it.
-            let seedDeadline=Date().addingTimeInterval(0.08)
-            while Date()<seedDeadline {_=RunLoop.main.run(mode:.default,before:seedDeadline)}
+            // First send retires the seed on the main queue; wait for removal because the timer may run late.
+            let seedDeadline=Date().addingTimeInterval(5)
+            if ProcessInfo.processInfo.environment["SELFTEST_ISLAND_LAYER_NO_SEED_WAIT"] != "1" {
+                while seed != nil && seed?.superview != nil && Date()<seedDeadline {_=RunLoop.main.run(mode:.default,before:seedDeadline)}
+            }
+            check(seed != nil && seed?.superview == nil,"first-send seed retired before the probes \(tag)")
             settle();checkpoint("new-chat-send")
             scene.resize(to:CGSize(width:1500,height:860),live:true);settle();checkpoint("resize")
             scene.enterFocused(scene.current,reason:"island-layer-focus");settle()

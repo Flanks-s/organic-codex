@@ -3,7 +3,6 @@ import AppKit
 /// Resolved host contract, independent of Settings so Native still compiles on its own.
 @MainActor enum NativeAppearance {
     struct Look:Equatable {
-        var requestedMode="dark"
         var accent:NSColor?,background:NSColor?,foreground:NSColor?,wash:NSColor?
         var clearGlass=false
         var textScale:CGFloat=1

@@ -48,7 +48,17 @@ import AppKit
     final class Container: NSView {
         override var acceptsFirstResponder:Bool {true}
         var blocksContentInput:(()->Bool)?
-        override func hitTest(_ point:NSPoint)->NSView? {blocksContentInput?() == true ? self:super.hitTest(point)}
+        var inactiveBody:(()->NSView?)?
+        override func hitTest(_ point:NSPoint)->NSView? {
+            if blocksContentInput?() == true {return self}
+            let hit=super.hitTest(point)
+            // NSSplitViewController's empty wrapper stays above Organic after its body rejects input.
+            if let body=inactiveBody?(),hit === body {
+                let local=convert(point,from:superview)
+                for child in subviews.reversed() where child !== body {if let candidate=child.hitTest(local) {return candidate}}
+            }
+            return hit
+        }
         override var isFlipped: Bool { true }
     }
 
@@ -59,6 +69,7 @@ import AppKit
     let scene: AutoScene
     private(set) var mode: Mode
     var onModeChange: ((Mode) -> Void)?
+    var onBrowserModeWillChange: ((Mode) -> Void)?
     /// Hide / Show Sidebar's flights, over everything.
     let flight = ModeFlight()
     private let sidebarExposure = M10SidebarExposure()
@@ -95,6 +106,8 @@ import AppKit
     private var contentWorkCosts:[[String:Any]]=[]
     private var contentFadeLatencies:[[String:Any]]=[]
     private var contentInvalidations:[String:Int]=[:]
+    private let departureSurfaces=ModeDepartureSurfaces()
+    var modeDepartureScreenStates:[[String:Any]] {departureSurfaces.screenStates}
     private var contentKeyTime=0.0
     private var contentInputEntered:Double?
     private var contentFirstSubmitMS:[Double]=[]
@@ -450,6 +463,7 @@ import AppKit
         let root = Container(frame: organic.frame)
         view = root
         root.blocksContentInput={ [weak self] in self?.modeContentInputBlocked == true }
+        root.inactiveBody={ [weak self] in guard let self,ModeFlight.orreryEnabled,self.admittedMode == .organic else{return nil};return self.split.view }
         workbench.onModeSearchFocus={ [weak self] in
             guard let self,self.modeContentInputBlocked,self.mode == .normie else {return false}
             self.contentWantsSearch=true;self.contentSearchPredecessor=self.view.window?.firstResponder
@@ -633,6 +647,7 @@ import AppKit
             guard scene.composers.modeContentCanHandoff else {return}
             if let editor=window.firstResponder as? NSTextView,editor.hasMarkedText() {return}
         }
+        onBrowserModeWillChange?(next)
         // A held Dock node goes home first, as a held header does (beginPreparedSwitch): its release would land in another mode.
         let turnsOrrery = animated && ModeFlight.orreryEnabled && flight.running && !Motion.reduce && !normieNativeStaged
             && flight.headingToOrganic != (next == .organic)
@@ -2828,6 +2843,11 @@ extension WindowShell {
         // An active picture is immutable, including during resize. Never replace it with a mixed snapshot.
         if !contentOpening && contentSession == nil && !contentEpochCompletionPending {contentCaptureGeneration &+= 1;contentCaptureTask?.cancel();contentCaptureTask=nil;contentCapturing=false;releaseContentEpoch();scheduleContentPicture(reason:reason)}
     }
+    /// A warm capture is expendable; a mode opening or an admitted flight still owns its input shield.
+    func prepareForContentInput() {
+        guard contentEpochHeld,contentCapturing,!contentOpening,contentSession == nil else {return}
+        invalidateContentPicture(reason:"input")
+    }
     private func holdContentEpoch() {
         guard !contentEpochHeld else {return};contentEpochHeld=true;contentEpochRevision=contentRevision()
         let began=CACurrentMediaTime();defer {recordContentWork("epoch.freeze",began:began)}
@@ -2839,6 +2859,7 @@ extension WindowShell {
         workbench.detail.freezeModeLayout(true)
     }
     private func releaseContentEpoch() {
+        if !contentOpening,contentSession == nil {departureSurfaces.finish()}
         guard contentEpochHeld else {return};contentEpochHeld=false;contentEpochRevision=nil
         workbench.transcriptSessions.modeContentMountLocked=false
         workbench.transcriptSessions.endModeContentEpoch()
@@ -2876,6 +2897,8 @@ extension WindowShell {
         let task=DispatchWorkItem { [weak self] in
             guard let self,self.contentCaptureGeneration == generation else {return};self.contentCaptureTask=nil
             guard self.contentSession == nil,!self.contentOpening,!self.flight.running,self.contentStoreIsQuiet else {return}
+            // A tracking control or marked-text editor may consume its remaining input inside AppKit.
+            guard self.nativeHandoffAllowed() else {self.scheduleContentPicture(reason:"input.busy");return}
             self.captureContentPicture(cold:false) { [weak self] photo,key in
                 guard let self else {return};self.contentWarm=photo;self.contentWarmKey=photo == nil ? nil:key
             }
@@ -2885,10 +2908,13 @@ extension WindowShell {
     }
     private func contentExclusions()->[NSView] {
         var excluded:[NSView]=[flight.view,sourcePlate,contentPicture,workbench.sidebar.view,scene.dockView]
+        excluded += departureSurfaces.exclusions
         if let host=turnSidebar.verificationSafeNativeHost {excluded.append(host)}
         if let material=workbench.detail.modeComposerMaterial {excluded.append(material)}
         for column in scene.columns {if let island=column.island {excluded.append(island)}}
+        let excludedRoots=Set(excluded.map(ObjectIdentifier.init))
         func scrollers(_ node:NSView) {
+            guard !node.isHidden,!excludedRoots.contains(ObjectIdentifier(node)) else {return}
             if node is NSScroller {excluded.append(node);return}
             node.subviews.forEach(scrollers)
         }
@@ -2926,6 +2952,13 @@ extension WindowShell {
         let captureAppearance=view.effectiveAppearance.name,displayRevision=NativeDisplayOptions.shared.revision,nativeRevision=NativeAppearance.revision
         let scrolls=workbench.transcriptSessions.transcripts.filter {!$0.value.isHiddenOrHasHiddenAncestor && $0.value.presentationActive}.mapValues { $0.scrollOffset }
         let terminalKey=workbench.detail.terminalPane.motionContentKey
+        func inputsMatch()->Bool {
+            self.contentSession == nil && self.view.bounds.size == size && self.view.effectiveAppearance.name == captureAppearance &&
+                NativeDisplayOptions.shared.revision == displayRevision && NativeAppearance.revision == nativeRevision &&
+                self.workbench.transcriptSessions.transcripts.filter({!$0.value.isHiddenOrHasHiddenAncestor && $0.value.presentationActive}).mapValues({$0.scrollOffset}) == scrolls &&
+                self.workbench.detail.terminalPane.motionContentKey == terminalKey &&
+                (cold || (self.contentRevision() == revision && self.flightPictureKey() == key))
+        }
         trace?.record("ModePhotoCapture",.begin,detail:"path=\(cold ? "cold":"warm") resolution=\(scale) size=\(size) revision=\(revision)")
         // WindowServer material is not a bitmap. Freeze its ink independently and retain a matching
         // process-owned material surface above the opaque source bitmap for the picture's lifetime.
@@ -2948,7 +2981,7 @@ extension WindowShell {
         var slices:[Double]=[],sliceTimes:[Double]=[],sliceIntervals:[Double]=[],sliceBudgets:[Double]=[],maximumPaintSeconds=0.0015
         func step() {
             guard self.contentCaptureGeneration == generation else {return}
-            if self.contentSession != nil || self.view.bounds.size != size || self.view.effectiveAppearance.name != captureAppearance || NativeDisplayOptions.shared.revision != displayRevision || NativeAppearance.revision != nativeRevision || self.workbench.transcriptSessions.transcripts.filter({!$0.value.isHiddenOrHasHiddenAncestor && $0.value.presentationActive}).mapValues({$0.scrollOffset}) != scrolls || self.workbench.detail.terminalPane.motionContentKey != terminalKey || (!cold && (self.contentRevision() != revision || self.flightPictureKey() != key)) {
+            if !inputsMatch() {
                 self.contentCapturing=false
                 if !self.contentOpening {self.releaseContentEpoch()}
                 trace?.record("ModePhotoCapture",.end,detail:"cancelled size=\(self.view.bounds.size != size) appearance=\(self.view.effectiveAppearance.name != captureAppearance) terminal=\(self.workbench.detail.terminalPane.motionContentKey != terminalKey) sourceMode=\(source) requested=\(self.mode.rawValue)")
@@ -2985,14 +3018,19 @@ extension WindowShell {
                 #endif
                 guard self.contentCaptureGeneration == generation else {return}
                 guard let image=body,self.view.bounds.size == size,self.view.effectiveAppearance.name == captureAppearance,
-                      NativeDisplayOptions.shared.revision == displayRevision,NativeAppearance.revision == nativeRevision else {
+                      NativeDisplayOptions.shared.revision == displayRevision,NativeAppearance.revision == nativeRevision,
+                      cold || inputsMatch() else {
                     self.contentCapturing=false;if !self.contentOpening {self.releaseContentEpoch()};completion(nil,key);return
                 }
                 let photo=ModeWarmPicture(mode:source,revision:revision,image:image,size:size,scale:scale,captureMS:(CACurrentMediaTime()-began)*1000,maximumSliceMS:maximumSlice,selection:selected,materials:zip(materialJobs,inks).compactMap {$0.0.finish(ink:$0.1)})
                 self.contentCapturing=false
                 self.contentCaptureCosts.append(["mode":source,"scale":scale,"wallMS":photo.captureMS,"maximumSliceMS":maximumSlice,"bytes":photo.bytes,"cold":cold,"slicesMS":slices,"sliceTimes":sliceTimes,"sliceIntervals":sliceIntervals,"sliceBudgetsMS":sliceBudgets])
                 trace?.record("ModePhotoCapture",.end,detail:"resolution=\(scale) bytes=\(photo.bytes) wallMS=\(photo.captureMS) maximumSliceMS=\(maximumSlice) slices=\(slices.count)")
-                if !cold {self.releaseContentEpoch()}
+                if !cold {
+                    self.releaseContentEpoch()
+                    // Releasing may synchronously replay native changes and invalidate this generation.
+                    guard self.contentCaptureGeneration == generation,self.flightPictureKey() == key else {completion(nil,key);return}
+                }
                 completion(photo,key)
             }
         }
@@ -3104,6 +3142,7 @@ extension WindowShell {
         contentSelectionPlan=nil;contentSelectionTarget=nil;contentSelectionPreparing=false
         contentEpochCompletionPending=false
         contentOpening=true;contentFrameTime=0;contentDeferredSelection=nil;mode=next;pendingMode=next
+        if old == .organic {scene.dock.beginTideDeparture(using:departureSurfaces,in:scene.nativePlane,at:contentKeyTime)}
         admissionOrganicTarget=next == .organic ? prepared?.organicTarget.flatMap {$0.key.selected == workbench.selectedConversation?.id ? $0:nil}:nil
         // Submit flight before any capture or native mount work. Its server clock remains independent.
         contentFlight(next,prepared:prepared)

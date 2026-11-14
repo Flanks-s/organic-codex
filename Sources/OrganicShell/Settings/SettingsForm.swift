@@ -47,7 +47,7 @@ import AppKit
             if r.kind == .toggle{b.setButtonType(.switch);b.setAccessibilityRole(.checkBox)}
             b.run={ [weak self] in guard let self else{return};self.spec.perform?(self.spec.kind == .toggle ? .bool(!(self.spec.value.boolValue ?? false)):.null) };return b
         case .choice:
-            let c:SettingsChoice=[SettingsRowVisual.Style.cards,.modes].contains(r.visual.style) ? SettingsCardChoices():SettingsChoice()
+            let c:SettingsChoice=r.visual.style == .cards ? SettingsCardChoices():SettingsChoice()
             c.choose={ [weak self] v in self?.spec.perform?(.string(v)) };return c
         case .date:let d=SettingsDatePicker();d.changed={ [weak self] v in self?.spec.perform?(.number(v.timeIntervalSince1970)) };return d
         case .field:
@@ -125,7 +125,7 @@ import AppKit
         switch spec.kind{case .choice:return 41.25;case .toggle:return 36.5;case .shortcut:return 39.5;case .button:return 40;default:return 36}
     }
     private func controlWidth(_ c:NSView)->CGFloat{
-        if let cards=c as? SettingsCardChoices{return CGFloat(cards.choices.count)*80-(cards.art == "modes" ? 14:10)}
+        if let cards=c as? SettingsCardChoices{return CGFloat(cards.choices.count)*80-10}
         if c is SettingsCounter{return 132}
         if c is SettingsTextSlider{return 194.5}
         if c is SettingsAccentChoices{return 233}
@@ -170,8 +170,8 @@ import AppKit
             // own intrinsic text centre; these corrections move ink only, never the group's row heights.
             let plainTile=spec.detail.isEmpty && !spec.visual.tile.isEmpty && spec.visual.tileSize == 26
             let tileOffset:CGFloat=plainTile ? (spec.kind == .toggle ? 0.5:spec.kind == .choice ? 2.5:2):0
-            let textOffset:CGFloat=tileOffset+(style == .cards || style == .modes ? 1:style == .slider ? 0.5:spec.visual.chevron && spec.kind == .button && spec.detail.isEmpty ? 2:style == .accent ? -8.25:spec.visual.group.hasPrefix("m9.") && ![SettingsRowVisual.Style.cards,.modes,.search,.toolbar].contains(style) ? (spec.kind == .toggle && spec.detail.isEmpty ? 1.5:spec.kind == .choice && spec.detail.isEmpty ? -0.75:spec.detail.isEmpty ? 0:1):0)
-            place(titleLabel,CGRect(x:leading,y:(style == .cards || style == .modes ? 9:spec.detail.isEmpty ? (h-20)/2:9)+textOffset,width:labelWidth,height:18))
+            let textOffset:CGFloat=tileOffset+(style == .cards ? 1:style == .slider ? 0.5:spec.visual.chevron && spec.kind == .button && spec.detail.isEmpty ? 2:style == .accent ? -8.25:spec.visual.group.hasPrefix("m9.") && ![SettingsRowVisual.Style.cards,.search,.toolbar].contains(style) ? (spec.kind == .toggle && spec.detail.isEmpty ? 1.5:spec.kind == .choice && spec.detail.isEmpty ? -0.75:spec.detail.isEmpty ? 0:1):0)
+            place(titleLabel,CGRect(x:leading,y:(style == .cards ? 9:spec.detail.isEmpty ? (h-20)/2:9)+textOffset,width:labelWidth,height:18))
             place(detailLabel,CGRect(x:leading+(spec.visual.cardArt.hasPrefix("status.") ? 11:0),y:27+textOffset,width:labelWidth-(spec.visual.cardArt.hasPrefix("status.") ? 11:0),height:max(14,h-32)))
             if spec.visual.cardArt == "summary"{titleLabel.font = .systemFont(ofSize:11);titleLabel.textColor = .tertiaryLabelColor;detailLabel.font = .systemFont(ofSize:17,weight:.bold);detailLabel.textColor = .labelColor;detailLabel.maximumNumberOfLines=2;place(titleLabel,CGRect(x:8,y:13,width:w-18,height:15));place(detailLabel,CGRect(x:8,y:32,width:w-18,height:24))}
             if spec.visual.cardArt == "pair" {titleLabel.font = .systemFont(ofSize:34,weight:.semibold);titleLabel.alignment = .center;place(titleLabel,CGRect(x:0,y:8,width:w,height:48));detailLabel.isHidden=true}
@@ -180,11 +180,11 @@ import AppKit
                 if spec.kind == .button,spec.visual.chevron{(control as? SettingsButton)?.chromeless=true;place(control,bounds)}
                 else if spec.visual.cardArt == "checkbox"{place(control,CGRect(x:10,y:(h-14)/2,width:14,height:14))}
                 else if spec.visual.cardArt == "instructions"{titleLabel.isHidden=true;detailLabel.isHidden=true;place(control,bounds.insetBy(dx:10,dy:10))}
-                else if [SettingsRow.Kind.editor,.chart,.code,.progress].contains(spec.kind) && ![SettingsRowVisual.Style.cards,.modes].contains(style){place(control,CGRect(x:10,y:spec.detail.isEmpty ? 36:52,width:w-20,height:max(1,h-(spec.detail.isEmpty ? 46:62))))}
+                else if [SettingsRow.Kind.editor,.chart,.code,.progress].contains(spec.kind) && style != .cards{place(control,CGRect(x:10,y:spec.detail.isEmpty ? 36:52,width:w-20,height:max(1,h-(spec.detail.isEmpty ? 46:62))))}
                 else if style == .rule {titleLabel.isHidden=true;detailLabel.isHidden=true;place(control,CGRect(x:42,y:9,width:min(230,w-180),height:24))}
                 else if style == .search || style == .toolbar {titleLabel.isHidden=true;detailLabel.isHidden=true;place(control,CGRect(x:36,y:(h-24)/2,width:max(1,w-54-aux),height:24))}
-                else {let ch:CGFloat=[SettingsRowVisual.Style.cards,.modes].contains(style) ? 65:control is SettingsTextSlider ? 25:control is SettingsAccentChoices ? 40:control is SettingsSegments ? 24:control is SettingsButton && spec.kind == .toggle ? 18:spec.kind == .shortcut ? 22:spec.visual.footer ? 20:control is SettingsChoice || (control as? SettingsButton)?.swatch != nil ? 22:24
-                    place(control,CGRect(x:spec.visual.centered ? (w-cw)/2:w-10-cw-aux-(spec.visual.chevron ? 14:0),y:(style == .cards || style == .modes ? 10:spec.detail.isEmpty ? (h-ch)/2:spec.kind == .toggle ? 9:8)+(style == .accent ? 3:0)-((control as? SettingsButton)?.formBodyButton == true && !plainTile ? 2:0),width:cw,height:ch))}
+                else {let ch:CGFloat=style == .cards ? 65:control is SettingsTextSlider ? 25:control is SettingsAccentChoices ? 40:control is SettingsSegments ? 24:control is SettingsButton && spec.kind == .toggle ? 18:spec.kind == .shortcut ? 22:spec.visual.footer ? 20:control is SettingsChoice || (control as? SettingsButton)?.swatch != nil ? 22:24
+                    place(control,CGRect(x:spec.visual.centered ? (w-cw)/2:w-10-cw-aux-(spec.visual.chevron ? 14:0),y:(style == .cards ? 10:spec.detail.isEmpty ? (h-ch)/2:spec.kind == .toggle ? 9:8)+(style == .accent ? 3:0)-((control as? SettingsButton)?.formBodyButton == true && !plainTile ? 2:0),width:cw,height:ch))}
                 if let scroll=control as? NSScrollView,let editor=scroll.documentView as? SettingsEditor{editor.minSize=NSSize(width:0,height:scroll.contentSize.height);editor.maxSize=NSSize(width:10_000,height:100_000);editor.frame.size=NSSize(width:scroll.contentSize.width,height:max(scroll.contentSize.height,editor.frame.height));editor.textContainer?.containerSize=NSSize(width:scroll.contentSize.width,height:100_000)}
             }
         }

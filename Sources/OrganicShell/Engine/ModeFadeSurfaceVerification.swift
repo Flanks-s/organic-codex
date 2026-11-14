@@ -18,7 +18,7 @@ import QuartzCore
             let dock=ModeFlight.Plane(frame:host.bounds);dock.wantsLayer=true;dock.layer!.isGeometryFlipped=true
             let ink=CALayer();ink.frame=barRect;ink.backgroundColor=NSColor(white:0.85,alpha:1).cgColor;dock.layer!.addSublayer(ink);host.addSublayer(dock.layer!)
             let photo=ModeWarmPicture(mode:"normie",revision:"R0",image:image,size:size,scale:1,captureMS:0,maximumSliceMS:0)
-            let base=CACurrentMediaTime()+3600,session=ModeContentSession(photo:photo,target:"organic",time:base,trace:nil)
+            let base=VerificationClock.renderOrigin,session=ModeContentSession(photo:photo,target:"organic",time:base,trace:nil)
             let mask=ModeContentDockExposure()
             if masked {mask.apply(to:dock,session:session,time:base)}
             session.animate(picture,at:base,photoOnTop:true)

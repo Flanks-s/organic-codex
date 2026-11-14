@@ -15,12 +15,15 @@ import QuartzCore
     private struct HeldAnimation {
         let layer: CALayer, key: String, animation: CAAnimation
     }
-    private final class Pair {
+    @MainActor private final class Pair {
         let backClock = CALayer(), frontClock = CALayer()
         let backDot = CALayer(), frontDot = CALayer()
         let backPose=CALayer(),frontPose=CALayer()
         let backInk=CAReplicatorLayer(),frontInk=CAReplicatorLayer()
         let backFace = CATextLayer(), frontFace = CATextLayer()
+        let phase=BodyPhasePresentation(),frontPhase=CALayer()
+        var phaseAnimate=true
+        var hasPhase=false
         var drawingKey = ""
         var geometrySize: CGFloat = 0
         var index = -1
@@ -41,10 +44,19 @@ import QuartzCore
             backDot.addSublayer(backInk);frontDot.addSublayer(frontInk)
             backInk.addSublayer(backFace);frontInk.addSublayer(frontFace)
             backInk.instanceCount=1;frontInk.instanceCount=1
+            phase.layer.name="organic.body.phase.satellite.back";frontPhase.name="organic.body.phase.satellite.front"
+            backDot.addSublayer(phase.layer);frontDot.addSublayer(frontPhase)
+            frontPhase.actions=["contents":NSNull(),"hidden":NSNull(),"bounds":NSNull(),"position":NSNull()]
+            phase.onPictureChange={ [weak self] image in
+                guard let self else {return}
+                self.frontPhase.contents=image;self.backFace.isHidden=true;self.frontFace.isHidden=true
+                self.backDot.backgroundColor=nil;self.frontDot.backgroundColor=nil
+            }
         }
     }
     private var pairs: [String: Pair] = [:]
     private var visible = true
+    private var phaseActive = true
     private let metrics: OrbMetrics
     var onExposureInvalidated:((CALayer)->Void)?
     init(metrics: OrbMetrics) { self.metrics = metrics }
@@ -57,7 +69,7 @@ import QuartzCore
         let rows = rowTargets(satellites, size: size)
         let ids = Set(satellites.map(\.id))
         for id in Array(pairs.keys) where !ids.contains(id) {
-            pairs[id]?.backClock.removeFromSuperlayer(); pairs[id]?.frontClock.removeFromSuperlayer(); pairs[id] = nil
+            pairs[id]?.phase.dispose();pairs[id]?.backClock.removeFromSuperlayer(); pairs[id]?.frontClock.removeFromSuperlayer(); pairs[id] = nil
         }
         // First occurrence wins for malformed duplicate input; never create two clocks for the same ID.
         var seen: Set<String> = []
@@ -84,7 +96,7 @@ import QuartzCore
             let d = max(1, diameter ?? shape?.diameter ?? size * OrbTuning.satelliteSize)
             let opaque=OrbDisplayEnvironment.shared.options.opaqueSurfaces
             let accent=accent ?? NSColor.controlAccentColor
-            let key = "\(satellite.face)|\(satellite.done)|\(size)|\(scale)|\(d)|\(opaque)|\(NSAppearance.currentDrawing().name.rawValue)|\(accent.usingColorSpace(.sRGB)?.description ?? "")"
+            let key = "phase:\(satellite.bodyPhase != nil)|\(satellite.face)|\(satellite.done)|\(size)|\(scale)|\(d)|\(opaque)|\(NSAppearance.currentDrawing().name.rawValue)|\(accent.usingColorSpace(.sRGB)?.description ?? "")"
             if pair.drawingKey != key {
                 pair.drawingKey = key
                 for (dot, face) in [(pair.backDot, pair.backFace), (pair.frontDot, pair.frontFace)] {
@@ -100,6 +112,17 @@ import QuartzCore
                     face.frame = CGRect(x: 0, y: (d-h)/2, width: d, height: h)
                 }
             }
+            pair.hasPhase=satellite.bodyPhase != nil;pair.phaseAnimate = !reduceMotion
+            if pair.hasPhase {
+                pair.phase.layer.frame=pair.backDot.bounds;pair.frontPhase.frame=pair.frontDot.bounds
+                pair.frontPhase.contentsScale=scale;pair.frontPhase.isHidden=false
+                if pair.phase.image != nil {
+                    pair.backFace.isHidden=true;pair.frontFace.isHidden=true
+                    pair.backDot.backgroundColor=nil;pair.frontDot.backgroundColor=nil
+                }
+                pair.phase.configure(event:satellite.bodyPhase,bodyID:"moon",outer:d,scale:scale>=1.5 ? 2:1,
+                    bare:true,visible:visible && pair.admitted,animate:!reduceMotion && phaseActive)
+            } else {pair.phase.dispose();pair.frontPhase.isHidden=true;pair.backFace.isHidden=false;pair.frontFace.isHidden=false}
             let geometryChanged = pair.geometrySize != size || pair.index != index || pair.shape != shape
             for dot in [pair.backDot,pair.frontDot] {
                 dot.shadowOpacity=opaque || mode == .orbit ? 0:(NSAppearance.currentDrawing().bestMatch(from:[.darkAqua,.aqua]) == .darkAqua ? 0.26:0.14)
@@ -224,6 +247,11 @@ import QuartzCore
         for pair in pairs.values { updateVisibility(pair, at: now) }
     }
 
+    func setPhaseActive(_ value:Bool) {
+        guard phaseActive != value else {return};phaseActive=value
+        for pair in pairs.values {pair.phase.setActivity(visible:visible && !pair.hidden,animate:value && pair.phaseAnimate)}
+    }
+
     private func retirementCompletion(for pair: Pair) -> RetirementCompletion {
         RetirementCompletion { [weak self, weak pair] in
             guard let self, let pair, pair.retired else { return }
@@ -266,6 +294,7 @@ import QuartzCore
 
     private func updateVisibility(_ pair: Pair, at now: CFTimeInterval) {
         let retiring = pair.retirementEnd.map { pair.backClock.convertTime(now, from: nil) < $0 } ?? false
+        pair.phase.setActivity(visible:visible && pair.admitted && (!pair.retired || retiring),animate:pair.phaseAnimate && phaseActive)
         if visible && pair.admitted && (!pair.retired || retiring) { restore(pair, at: now) }
         else { hide(pair) }
     }
@@ -302,6 +331,7 @@ import QuartzCore
 
     func dispose() {
         for pair in pairs.values {
+            pair.phase.dispose()
             pair.retirementCompletion = nil
             hide(pair); pair.held.removeAll()
             pair.backClock.removeFromSuperlayer(); pair.frontClock.removeFromSuperlayer()

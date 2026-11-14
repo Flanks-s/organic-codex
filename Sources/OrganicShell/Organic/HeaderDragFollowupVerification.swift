@@ -33,6 +33,9 @@ extension M10DockVerification {
         }}}
         for scale:CGFloat in [1,2] {for split in [false,true] {for which in 0..<(split ? 2:1) {
             for action in ["back","out","escape","resign","tear-back","tear-escape","merge","short"] {
+            let saved=OrganicFeatureAvailability.current.conversationOrbTear
+            OrganicFeatureAvailability.current.conversationOrbTear=action.hasPrefix("tear") || action == "merge"
+            defer { OrganicFeatureAvailability.current.conversationOrbTear=saved }
                 var traces=[[String:Any]]()
                 for top in [false,true] {
                     let f=HeaderFixture(scale:scale,members:["A","B","C"]);defer{f.dispose()}

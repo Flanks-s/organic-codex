@@ -16,6 +16,9 @@ import QuartzCore
         var profile = DisplayProfile(name: "offscreen", frameInterval: 1 / hz, mmPerPoint: 0.27, persistenceFrames: 0)
         profile.frameInterval = 1 / hz
         let scene = AutoScene(size: size, store: store, profile: profile, scale: 1)
+        let origin = VerificationClock.renderOrigin
+        scene.now = { origin }
+        scene.manualSettle = true
         scene.restOnSnapshot = true
         scene.ambient = false
         scene.install()
@@ -67,12 +70,12 @@ import QuartzCore
               "first card:", scene.columns.first.map { "\($0.card.frame) hidden=\($0.card.isHidden) opacity=\($0.card.opacity) super=\($0.card.superlayer != nil)" } ?? "-",
               "host super:", host.superlayer != nil, "host bounds:", host.bounds, "scene frame:", scene.scene.frame)
         // The renderer's first frame comes out empty; render one to discard.
-        _ = shot(CACurrentMediaTime(), "warmup")
-        _ = shot(CACurrentMediaTime(), "rest-before")
+        _ = shot(origin, "warmup")
+        _ = shot(origin, "rest-before")
         scene.switchTo(target, reason: "offscreen")
         CATransaction.flush()
         guard let last = scene.lastSwitch, let duration = last["durationSeconds"] as? Double else { return }
-        let began = CACurrentMediaTime() - (last["compileMs"] as? Double ?? 0) / 1000
+        let began = origin
         var frames: [CGImage] = []
         let count = Int(ceil(duration * hz)) + 1
         for k in 0...count { frames.append(shot(began + Double(k) / hz, String(format: "frame-%02d", k))) }

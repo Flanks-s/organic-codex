@@ -163,12 +163,13 @@ import UniformTypeIdentifiers
         let menu = sidebar.menu(for: menuIndex)!
         check(menu.items.map(\.title) == ["Pin", "Rename…", "Customize Chat…", "Symbol", "Color", "", "Archive"], "M9 sidebar context menu matches the product order")
         let symbols = menu.items.first { $0.title == "Symbol" }!.submenu!, colors = menu.items.first { $0.title == "Color" }!.submenu!
-        check(symbols.items.count == 13 && colors.items.count == 13 && symbols.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) } && colors.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) }, "M9 identity menus include all thirteen symbols/swatches")
+        check(symbols.items.count == BodyIdentityAdapter.choices.count && colors.items.count == OrbTint.allCases.count && symbols.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) } && colors.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) }, "M9 identity menus include every available body and tint")
         (menu.items.first { $0.title == "Customize Chat…" } as! NormieMenuItem).fire()
         check(customized == ["B"] && model.current == "A", "M9 row Customize keeps the clicked conversation instead of stealing current")
         let originalSymbol = store.conversation("B")!.identitySymbol, originalTint = store.conversation("B")!.identityTint
+        let originalIdentities=Dictionary(uniqueKeysWithValues:store.conversations.map { ($0.id,[$0.identitySymbol,$0.identityTint]) })
         (symbols.items[2] as! NormieMenuItem).fire(); (colors.items[2] as! NormieMenuItem).fire()
-        check(store.conversation("B")!.identitySymbol == "earth" && store.conversation("B")!.identityTint == "ocean" && store.conversation("A")!.identitySymbol == nil, "M9 symbol/color mutate only the clicked local identity")
+        check(store.conversation("B")!.identitySymbol == BodyIdentityAdapter.choices[2] && store.conversation("B")!.identityTint == String(describing:OrbTint.allCases[2]) && store.conversations.filter { $0.id != "B" }.allSatisfy { [$0.identitySymbol,$0.identityTint] == originalIdentities[$0.id] }, "M9 symbol/color mutate only the clicked local identity")
         store.conversation("B")!.identitySymbol = originalSymbol; store.conversation("B")!.identityTint = originalTint
         let renamed = sidebar.menu(for: menuIndex)!
         check(renamed.items.first { $0.title == "Symbol" }!.submenu!.items.filter { $0.state == .on }.count == 1, "M9 current identity has one checked symbol")

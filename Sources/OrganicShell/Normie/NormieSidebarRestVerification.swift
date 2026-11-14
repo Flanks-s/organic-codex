@@ -16,6 +16,10 @@ import ImageIO
         var geometry: [[String: Any]] = [], metrics: [[String: Any]] = []
         var checks = 0, failures: [String] = []
         func check(_ condition: Bool, _ label: String) { checks += 1; if !condition { failures.append(label) } }
+        // Approved sidebar reference: b2e5cf5 + M11.45 R3, MockSeed.library() (C is Earth).
+        // Source job m1145-run-261111-220534-has: zsh tools/idle61/check.sh "$OUT/idle" suite.
+        // Replace only the left 480 pixels of normie-product-2x.png with rest-fixture-new.png;
+        // keep the original approval crops at x >= 724. NORMIE_REST_REFERENCE selects this external PNG.
         let referencePath = ProcessInfo.processInfo.environment["NORMIE_REST_REFERENCE"] ?? "runs/parity-m9ef-105708/normie-product.png"
         let reference = CGImageSourceCreateWithURL(URL(fileURLWithPath: referencePath) as CFURL, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }.map(Pixels.init)
         check(reference != nil, "The original 2560×1640 product capture is available (NORMIE_REST_REFERENCE)")
@@ -58,6 +62,25 @@ import ImageIO
             check(zip(boxA,boxB).allSatisfy { abs($0-$1) <= 1 }, "\(name): ink bounds within one backing pixel")
             check(error < (name.hasSuffix(" identity") ? 0.04 : 0.012), "\(name): normalized coverage error \(error)")
         }
+        // DECISIONS #187: independent frozen sRGB identity crop from fc9a9e7, MockSeed.library(), Earth, 2x.
+        // Source job m1145-mut-run-261112-054246-ijl:
+        // M1145_ROUND=r6 python3 tools/m1145/bounded-job.py zsh tools/m1145/r6-calibrate.zsh.
+        // Two source renders have identical SHA256 c3405abb61bd35c105513e8bbb017c9ac6cd9127b124dde82d2241c139645aba.
+        // Measured repeat alpha/color differences are both zero. Both thresholds are zero, without margin.
+        // Frozen crop SHA256: caf883027dedd00ef722c9576a551a74bf93386f9000dec94310efd8ad4a782d.
+        // The original approval/sidebar reference and every non-identity comparison remain unchanged.
+        func compareTexturedIdentity(_ image:CGImage,rect:CGRect,name:String) {
+            let path=ProcessInfo.processInfo.environment["NORMIE_REST_IDENTITY_REFERENCE"] ?? "tools/idle61/reference/rest-identity-earth-2x.png"
+            guard let source=CGImageSourceCreateWithURL(URL(fileURLWithPath:path) as CFURL,nil),
+                  let frozen=CGImageSourceCreateImageAtIndex(source,0,nil) else {
+                check(false,"\(name): frozen texture identity reference available");return
+            }
+            let difference=RestIdentityMetrics.compare(.init(image),rect:rect,to:.init(frozen),origin:CGPoint(x:-rect.minX,y:-rect.minY))
+            metrics.append(["name":name,"kind":"textured-identity","alphaCoverageError":difference.alphaCoverage,
+                "maximumColorError":difference.maximumColor,"alphaThreshold":0,"colorThreshold":0,"reference":path])
+            check(difference.alphaCoverage==0,"\(name): textured alpha coverage error \(difference.alphaCoverage)")
+            check(difference.maximumColor==0,"\(name): textured color error \(difference.maximumColor)")
+        }
         func write(_ image: CGImage, _ name: String) throws {
             let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!
             try data.write(to: out.appendingPathComponent(name + ".png"))
@@ -90,7 +113,7 @@ import ImageIO
                     let titleEnd: CGFloat = key == "project:rs" || key == "project:ai" ? 263 : 414
                     compare(bitmap, rect:CGRect(x:90,y:12,width:titleEnd-90,height:42), at:CGPoint(x:0,y:rows[key]!*2), name:key+" title")
                     if !c.isChat { compare(bitmap, rect:CGRect(x:48,y:8,width:42,height:48), at:CGPoint(x:0,y:rows[key]!*2), name:key+" folder",kind:"folder") }
-                    else { compare(bitmap, rect:CGRect(x:48,y:10,width:40,height:46), at:CGPoint(x:0,y:rows[key]!*2), name:key+" identity",kind:"folder") }
+                    else { compareTexturedIdentity(NativeViewBitmap.capture(root,scale:scale),rect:CGRect(x:48,y:rows[key]!*2+10,width:40,height:46),name:key+" identity") }
                     if ["project:fn","project:plt"].contains(key) { check(c.disclosure.frame.minY == 8, "\(key) collapsed chevron optical vertical anchor") }
                     if ["project:rs","project:ai"].contains(key) {
                         check(c.deviceMark.frame == CGRect(x:216.5,y:11.5,width:7,height:7), "\(key) device dot matches text optical midline")

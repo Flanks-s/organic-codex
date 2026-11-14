@@ -24,8 +24,10 @@ enum CoreWire {
     static func failure(_ message: String) -> CoreError { .init(code: nil, message: message, data: nil, httpStatus: nil) }
     static func isAmbiguous(_ error: Error) -> Bool {
         guard let core = error as? CoreError else { return true }
-        if let status = core.httpStatus, (200..<300).contains(status), core.code == nil { return true }
-        return (core.httpStatus ?? 0) >= 500 || core.message.localizedCaseInsensitiveContains("timeout") || core.message.localizedCaseInsensitiveContains("timed out")
+        // Only explicit rejection codes prove the mutation was refused. HTTP 400,
+        // a localized message or a missing sent flag cannot prove non-execution.
+        guard let code = core.code else { return true }
+        return ![-32600, -32601, -32602, -32010, 400, 409].contains(code)
     }
 }
 protocol CoreRuntimeClock: Sendable { func sleep(seconds: TimeInterval) async throws }

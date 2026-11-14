@@ -6,6 +6,14 @@ import Foundation
     var connectionStatus = "Connecting to Organic Core…" { didSet { onStateChange?() } }
     var isConnected = false { didSet { onStateChange?() } }
     var account: JSONValue = .null
+    private var accountEpoch: UInt64 = 0
+    private var accountReadSequence: UInt64 = 0
+    private var limitsRevision: UInt64 = 0
+    private var accountRefreshTask: Task<Void, Never>?
+    private var accountRefreshOwner: UInt64 = 0
+    private var accountUsageDirty = true
+    private var accountRefreshStopped = false
+    var onAccountUsageChange: (() -> Void)?
     var lastError: String? { didSet { onStateChange?() } }
     var isShown: (ConversationID) -> Bool = { _ in false }
     var onRedEvent: (Conversation) -> Void = { _ in }
@@ -107,7 +115,9 @@ import Foundation
         let reset = (serverInstance != nil && instance != nil && instance != serverInstance) || (health["lastEventId"]?.intValue ?? previousHigh) < previousHigh
         if let instance { serverInstance = instance }
         if reset {
+            invalidateAccountUsage(reload: true)
             readEpoch += 1; bufferedEvents = [:]
+            store.resetPhaseTransportEpoch()
             cursor = 0; threadWatermarks = [:]; hydratedThreads = []; replayItemBaselines = [:]
             completedTurns = []; terminalSnapshotTurns = []; terminalStatuses = [:]; knownLoadedThreads = []; normallyCompletedQueueTurns = []; historyCursors = [:]; historyExhausted = []
             for c in store.conversations { c.historyLoaded = false; if let tid = c.backendThreadID { resumeNeeded.insert(tid) } }
@@ -122,12 +132,14 @@ import Foundation
         self.presentation = presentation ?? LocalPresentationState(store: store, scope: scope)
         store.usesLiveCore = true
         for c in store.conversations { c.branch = ""; c.isLiveConversation = true }
-        ModelCatalog.models = []; store.newChatSettings.modelID = ""; store.clearCoreQuota()
+        ModelCatalog.models = []; store.newChatSettings.modelID = ""; invalidateAccountUsage()
         store.updateDevices([Device(id: "mac", name: "Core Host", kind: .server, online: false)])
     }
 
     /// Capture the event high-water mark before hydration; start() replays everything after it.
     func load() async throws {
+        stopAccountUsageRefresh()
+        invalidateAccountUsage()
         restorePresentation()
         let health = try await checkedHealth()
         _ = noteServer(health)
@@ -167,11 +179,11 @@ import Foundation
         }
         // A removed model remains visible by ID; changing it requires a user's choice.
         for c in store.conversations where c.next.modelID.isEmpty { c.next = store.newChatSettings }
-        account = try await client.rpc("account/read")
-        do { applyLimits(try await client.rpc("account/rateLimits/read")) } catch { store.clearCoreQuota(); lastError = error.localizedDescription }
         reconcilePending(health)
         store.updateDevices([Device(id: "mac", name: (service?.isLocalBackend ?? false) ? "This Mac" : "Core Host", kind: (service?.isLocalBackend ?? false) ? .mac : .server, online: true)])
         loaded = true; isConnected = true; connectionStatus = "Connected to Organic Core"
+        accountRefreshStopped = false
+        requestAccountUsageRefresh()
         for c in store.conversations {
             store.changed(c)
             if c.backendThreadID != nil && (c.sendOutcomeUnknown || !c.queued.isEmpty) { try await read(c, includeSatellites: false) }
@@ -204,6 +216,7 @@ import Foundation
 
     func start() {
         guard stream == nil else { return }
+        accountRefreshStopped = false
         stream = Task { [weak self] in
             var attempt = 0
             while !Task.isCancelled {
@@ -225,8 +238,10 @@ import Foundation
                         }
                     }
                     if reconnecting || reset {
+                        requestAccountUsageRefresh()
                         for c in store.conversations where isShown(c.id) && c.backendThreadID != nil { try await read(c) }
                     }
+                    requestAccountUsageRefresh()
                     // Global stream: Core's thread filter would omit account/authorization/capability events.
                     let streamEpoch = readEpoch
                     for try await event in client.events(since: cursor) {
@@ -234,9 +249,11 @@ import Foundation
                         guard streamEpoch == readEpoch else { break }
                         receive(event); attempt = 0
                     }
+                    stopAccountUsageRefresh(); invalidateAccountUsage()
                     isConnected = false; store.setOnline("mac", false); connectionStatus = "Reconnecting to Organic Core…"
                 } catch {
                     if Task.isCancelled { return }
+                    stopAccountUsageRefresh(); invalidateAccountUsage()
                     isConnected = false; store.setOnline("mac", false); lastError = error.localizedDescription
                     connectionStatus = "Reconnecting: \(error.localizedDescription)"
                 }
@@ -248,6 +265,8 @@ import Foundation
 
     func shutdown() {
         stream?.cancel(); stream = nil
+        accountRefreshStopped = true; stopAccountUsageRefresh()
+        invalidateAccountUsage()
         // Do not cancel an in-flight write and report it failed. A late receipt can still reconcile it.
         do { try presentation.save() } catch { lastError = error.localizedDescription }
         isConnected = false; connectionStatus = "Disconnected"
@@ -314,9 +333,10 @@ import Foundation
         if let thread = result["thread"] {
             EventReducer.hydrate(thread, into: c)
             for turn in thread["turns"]?.arrayValue ?? [] {
-                for item in turn["items"]?.arrayValue ?? [] { acknowledge(item, turnID: turn["id"]?.stringValue) }
+                for item in turn["items"]?.arrayValue ?? [] { acknowledge(item, threadID: tid, turnID: turn["id"]?.stringValue) }
             }
         }
+        for event in bufferedEvents[tid] ?? [] { replay.applyMetadata(event, through: high) }
         replay.merge(into: c, snapshot: result["thread"])
         reconcilePending(health, only: c)
         replayItemBaselines[tid] = replay.authoritativeItemIDs
@@ -353,14 +373,11 @@ import Foundation
     func receive(_ event: CoreEvent) {
         guard event.id > cursor else { return }
         cursor = event.id; onEvent?(event)
-        if event.method == "account/rateLimits/updated" { applyLimits(event.params); onStateChange?(); return }
+        store.recordAttentionEvent(event)
+        if event.method == "account/rateLimits/updated" { applyLimits(event.params); return }
         if event.method == "account/updated" {
-            store.clearCoreQuota()
-            Task { [weak self] in
-                guard let self else { return }
-                do { applyLimits(try await client.rpc("account/rateLimits/read")) }
-                catch { lastError = error.localizedDescription }
-            }
+            invalidateAccountUsage(reload: true)
+            return
         }
         let tid = event.params["threadId"]?.stringValue ?? event.params["thread"]?["id"]?.stringValue
         guard let tid else { return }
@@ -388,7 +405,7 @@ import Foundation
         if let turnID, terminalStatuses[turnID] != nil, event.method == "item/started" || event.params["delta"] != nil { return }
         let change = EventReducer.applyReportingChange(event, to: c)
         if event.method == "turn/started", let active = c.activeTurnID { advanceEligibleQueue(in: c, to: active) }
-        if let item = event.params["item"] { acknowledge(item, turnID: event.params["turnId"]?.stringValue) }
+        if let item = event.params["item"] { acknowledge(item, threadID: c.backendThreadID, turnID: event.params["turnId"]?.stringValue) }
         if event.method == "turn/completed" { finish(event, in: c, refresh: true) }
         if event.method == "error" { onRedEvent(c) }
         for parent in store.conversations {
@@ -431,7 +448,7 @@ import Foundation
         if refresh { Task { [weak self] in do { try await self?.read(c) } catch { self?.report(error, in: c) } } }
     }
 
-    private func acknowledge(_ item: JSONValue, turnID: String? = nil) {
+    private func acknowledge(_ item: JSONValue, threadID: String?, turnID: String? = nil) {
         guard item["type"]?.stringValue == "userMessage", let rawID = item["clientId"]?.stringValue else { return }
         let id = UUID(uuidString: rawID)?.uuidString ?? rawID
         let located: (Conversation, QueuedMessage)?
@@ -439,7 +456,7 @@ import Foundation
         else if let c = store.conversations.first(where: { $0.queued.contains { $0.id == id } }),
                 let message = c.queued.first(where: { $0.id == id }) { located = (c, message) }
         else { located = nil }
-        guard let (c, message) = located else { return }
+        guard let (c, message) = located, c.backendThreadID == threadID else { return }
         let fromQueue = queuedDispatches.contains(id) || c.queued.contains { $0.id == id }
         // Transport bookkeeping cannot depend on c.sending: composer completion is allowed to change it.
         if let uuid = UUID(uuidString: id), operations[uuid] != nil { acknowledged.insert(id) }
@@ -462,7 +479,78 @@ import Foundation
     }
 
     private func applyLimits(_ value: JSONValue) {
+        limitsRevision &+= 1
         store.applyCoreRateLimits(value)
+        onStateChange?()
+        onAccountUsageChange?()
+    }
+
+    /// Also called before reconnect/load: late reads from the old account cannot restore its name or limits.
+    func invalidateAccountUsage(reload: Bool = false) {
+        accountEpoch &+= 1; limitsRevision &+= 1; account = .null
+        accountUsageDirty = true
+        store.clearCoreQuota(identity: .unknown)
+        onStateChange?(); onAccountUsageChange?()
+        if reload { stopAccountUsageRefresh(); requestAccountUsageRefresh() }
+    }
+
+    private func stopAccountUsageRefresh() {
+        accountRefreshOwner &+= 1
+        accountRefreshTask?.cancel(); accountRefreshTask = nil
+    }
+
+    /// Account reads never stand in front of stream subscription or thread hydration.
+    private func requestAccountUsageRefresh() {
+        guard isConnected, !accountRefreshStopped, accountUsageDirty, accountRefreshTask == nil else { return }
+        accountRefreshOwner &+= 1
+        let owner = accountRefreshOwner
+        accountRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if owner == accountRefreshOwner { accountRefreshTask = nil } }
+            var attempt = 0
+            while !Task.isCancelled, owner == accountRefreshOwner, !accountRefreshStopped, isConnected, accountUsageDirty {
+                _ = await refreshAccountUsage()
+                guard !Task.isCancelled, owner == accountRefreshOwner, accountUsageDirty else { return }
+                do { try await clock.sleep(seconds: reconnectPolicy.delay(attempt: attempt)) } catch { return }
+                attempt += 1
+            }
+        }
+    }
+
+    /// Separate from thread hydration and the workbench fan-out. No window subscribes in M11.39 A.
+    @discardableResult func refreshAccountUsage() async -> (any Error)? {
+        accountReadSequence &+= 1
+        let request = accountReadSequence
+        var epoch = accountEpoch, revision = limitsRevision
+        var readAccount = false
+        do {
+            let value = try await client.rpc("account/read")
+            guard epoch == accountEpoch, request == accountReadSequence else { return nil }
+            if account != .null && account != value {
+                invalidateAccountUsage()
+                epoch = accountEpoch; revision = limitsRevision
+            }
+            account = value; readAccount = true
+            let identity = AccountUsageIdentity(accountRead: value)
+            if identity.source == .unknown {
+                store.clearCoreQuota(identity: .unknown); accountUsageDirty = false
+                onStateChange?(); onAccountUsageChange?(); return nil
+            }
+            store.setAccountUsageIdentity(identity)
+            let limits = try await client.rpc("account/rateLimits/read")
+            guard epoch == accountEpoch, request == accountReadSequence else { return nil }
+            if revision == limitsRevision { applyLimits(limits) }
+            accountUsageDirty = false
+        } catch {
+            guard epoch == accountEpoch, request == accountReadSequence else { return nil }
+            if !readAccount { invalidateAccountUsage() }
+            else if revision == limitsRevision {
+                store.clearCoreQuota(); onStateChange?(); onAccountUsageChange?()
+            }
+            lastError = error.localizedDescription
+            return error
+        }
+        return nil
     }
 
     private func message(_ s: CoreSubmission) -> QueuedMessage {
@@ -542,6 +630,7 @@ import Foundation
             }
         }
         c.sending = true; c.operationError = nil
+        var recoveryRevision = c.draftRevision
         outbound[message.id] = (c.id, message)
         persistDraft(c)
         let operationID = UUID(uuidString: message.id) ?? UUID()
@@ -578,7 +667,11 @@ import Foundation
                     input.append(part)
                     if fromQueue, let q = c.queued.firstIndex(where: { $0.id == message.id }),
                        let i = c.queued[q].attachments.firstIndex(where: { $0.id == attachment.id }) { c.queued[q].attachments[i].input = part }
-                    else if !fromQueue, let i = c.attachments.firstIndex(where: { $0.id == attachment.id }) { c.attachments[i].input = part }
+                    else if !fromQueue, let i = c.attachments.firstIndex(where: { $0.id == attachment.id }) {
+                        let unchanged = c.draftRevision == recoveryRevision
+                        c.attachments[i].input = part
+                        if unchanged { recoveryRevision = c.draftRevision }
+                    }
                 }
                 var params: [String: JSONValue] = ["threadId": .string(thread), "input": .array(input), "clientUserMessageId": .string(message.id)]
                 let steering = followUp == .steer && !fromQueue
@@ -597,7 +690,14 @@ import Foundation
                 // A write is attempted exactly once. Transport ambiguity blocks further sends until explicit refresh.
                 let result: JSONValue
                 do { result = try await client.rpc(steering ? "turn/steer" : "turn/start", params: params) }
-                catch { if isAmbiguous(error) && !acknowledged.contains(message.id) { c.sendOutcomeUnknown = true }; throw error }
+                catch {
+                    if isAmbiguous(error) && !acknowledged.contains(message.id) {
+                        c.sendOutcomeUnknown = true
+                        // Read-only reconciliation by the original clientId; never retry the write.
+                        try? await read(c, includeSatellites: false)
+                    }
+                    throw error
+                }
                 if acknowledged.remove(message.id) != nil { return } // SSE settled this write; a later HTTP result cannot overwrite a newer submission.
                 let responseTurnID = result["turn"]?["id"]?.stringValue ?? result["turnId"]?.stringValue
                 guard responseTurnID != nil else {
@@ -636,9 +736,12 @@ import Foundation
                 if fromQueue {
                     if let index = c.queued.firstIndex(where: { $0.id == message.id }) { c.queued[index].deliveryError = error.localizedDescription }
                     else { var retained = message; retained.deliveryError = error.localizedDescription; c.queued.insert(retained, at: 0) }
-                } else {
+                } else if !c.sendOutcomeUnknown, c.draftRevision == recoveryRevision {
                     if c.draft.isEmpty { c.draft = message.text }
                     for a in message.attachments where !c.attachments.contains(where: { $0.id == a.id }) { c.attachments.append(a) }
+                } else if !c.sendOutcomeUnknown {
+                    var retained = message; retained.deliveryError = error.localizedDescription
+                    c.queued.insert(retained, at: 0)
                 }
                 report(error, in: c); persistDraft(c)
                 if let id = UUID(uuidString: message.id) { complete(id, result: result) }
@@ -795,6 +898,7 @@ import Foundation
                 capabilities = try await client.request(path: "/capabilities")
                 try await read(c)
                 isConnected = true; store.setOnline("mac", true); connectionStatus = "Connected to Organic Core"
+                requestAccountUsageRefresh()
                 // Absence of a receipt is not proof of failure; read() reconciles any actual clientId receipt.
                 if !c.sendOutcomeUnknown { c.operationError = nil }
                 // read() used a newer health watermark; do not overwrite its pending approvals with this earlier health.
@@ -858,6 +962,88 @@ import Foundation
                 resumeNeeded.insert(id); fork.loading = false
             } catch { fork.loading = false; fork.sendOutcomeUnknown = true; report(error, in: fork) }
         }
+        return fork
+    }
+    func forkWhole(_ c: Conversation) async throws -> Conversation {
+        guard store.conversation(c.id) === c, !c.archived,
+              let tid = c.backendThreadID, !tid.isEmpty,
+              !c.historyLoaded || !c.completedForkItems.isEmpty else { throw failure("No completed history to fork yet") }
+        let epoch = readEpoch
+        let terminal = ["completed", "failed", "interrupted"]
+        func turns(in thread: JSONValue) throws -> [JSONValue] {
+            guard let turns = thread["turns"]?.arrayValue else { throw failure("Core did not return fork history.") }
+            var turnIDs: Set<String> = [], itemIDs: Set<String> = []
+            for turn in turns {
+                guard let id = turn["id"]?.stringValue, !id.isEmpty, turnIDs.insert(id).inserted,
+                      let items = turn["items"]?.arrayValue else { throw failure("Core returned invalid fork history.") }
+                for item in items {
+                    guard let id = item["id"]?.stringValue, !id.isEmpty, itemIDs.insert(id).inserted else { throw failure("Core returned invalid fork history.") }
+                }
+            }
+            return turns
+        }
+        // Snapshot a completed boundary before creating anything. App Server 0.166 freezes
+        // an active tail as interrupted, so its default fork alone is not a completed prefix.
+        let source = try await client.rpc("thread/read", params: ["threadId":.string(tid),"includeTurns":true])
+        guard let sourceThread = source["thread"], sourceThread["id"]?.stringValue == tid else { throw failure("Core did not return the source thread.") }
+        let completed = try turns(in:sourceThread).prefix { terminal.contains($0["status"]?.stringValue ?? "") }
+        let completedIDs = completed.compactMap { $0["id"]?.stringValue }
+        guard completed.contains(where: { $0["items"]?.arrayValue?.isEmpty == false }) else { throw failure("No completed history to fork yet") }
+        let request = OrbWholeForkRequest(threadID: tid)
+        pendingCreations += 1
+        var createdID: String?
+        defer {
+            // The final snapshot supersedes creation notifications buffered during fork/revert.
+            // Never let an earlier partial snapshot reinsert the discarded tail or a failed child.
+            if let createdID {
+                orphanEvents.removeAll { ($0.params["threadId"]?.stringValue ?? $0.params["thread"]?["id"]?.stringValue) == createdID }
+            }
+            pendingCreations -= 1; flushOrphans()
+        }
+        let result = try await client.rpc(request.method, params: request.params)
+        guard var thread = result["thread"], let id = thread["id"]?.stringValue, !id.isEmpty,
+              id != tid, store.backendConversation(id) == nil,
+              thread["archived"]?.boolValue != true else { throw failure("Core did not return a valid forked thread.") }
+        createdID = id
+        let forkTurns = try turns(in:thread)
+        guard forkTurns.prefix(completedIDs.count).compactMap({ $0["id"]?.stringValue }) == completedIDs else { throw failure("Core returned a different fork history boundary.") }
+        let excess = forkTurns.count-completedIDs.count
+        if excess > 0 {
+            // Revert only the new child. The source is read-only throughout this operation.
+            let boundary = forkTurns[completedIDs.count]["id"]!.stringValue!
+            let trimmed = try await client.rpc("thread/revert", params: ["threadId":.string(id),"beforeTurnId":.string(boundary)])
+            guard trimmed["thread"]?["id"]?.stringValue == id else { throw failure("Core did not confirm the fork history boundary.") }
+            // Revert returns metadata with empty turns; read back the retained durable history.
+            let retained = try await client.rpc("thread/read", params: ["threadId":.string(id),"includeTurns":true])
+            guard let updated = retained["thread"], updated["id"]?.stringValue == id else { throw failure("Core did not return the retained fork history.") }
+            thread = updated
+        }
+        let finalTurns = try turns(in:thread)
+        guard finalTurns.compactMap({ $0["id"]?.stringValue }) == completedIDs,
+              finalTurns.allSatisfy({ terminal.contains($0["status"]?.stringValue ?? "") }),
+              thread["archived"]?.boolValue != true else { throw failure("Core returned incomplete fork history.") }
+        for (retained, original) in zip(finalTurns, completed) {
+            let retainedIDs = retained["items"]!.arrayValue!.compactMap { $0["id"]?.stringValue }
+            let originalIDs = original["items"]!.arrayValue!.compactMap { $0["id"]?.stringValue }
+            guard retainedIDs == originalIDs else { throw failure("Core returned incomplete fork history.") }
+        }
+        let health = try await checkedHealth()
+        guard epoch == readEpoch, let high = health["lastEventId"]?.intValue, high >= 0,
+              serverInstance == nil || health["instanceId"]?.stringValue == serverInstance else { throw failure("Core changed while the fork was loading. Refresh history before retrying.") }
+        // Allocate and publish only after validation. A failed RPC never creates a placeholder orb.
+        let title = thread["name"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+            ?? thread["preview"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 } ?? "Chat \(id.suffix(8))"
+        let fork = Conversation(id: UUID().uuidString, identityIndex: store.nextIdentity(), title: title,
+                                projectID: c.projectID, deviceID: c.deviceID, updated: Date(), contextUsed: 0)
+        fork.backendThreadID = id; fork.isLiveConversation = true; fork.branch = ""
+        fork.cwd = c.cwd; fork.settings = c.settings; fork.next = c.next; fork.access = c.access
+        EventReducer.hydrate(thread, into: fork)
+        // Ignore creation/history notifications queued before this authoritative snapshot.
+        // In particular, a late thread/started must not restore the reverted active tail.
+        threadWatermarks[id] = high; hydratedThreads.insert(id)
+        replayItemBaselines[id] = Set(fork.items.map(\.id))
+        resumeNeeded.insert(id)
+        registerWholeFork(fork); persistDraft(fork)
         return fork
     }
     func compactNow(_ c: Conversation) {
@@ -958,11 +1144,70 @@ import Foundation
             await refreshChanges(c)
         }
     }
-    /// `path` inside the repository at `root`, both with symlinks resolved (/tmp is /private/tmp); nil when outside.
+    /// Physically resolves both sides' longest existing prefixes with realpath, so deleted files still map into their repository.
+    /// Returns nil when outside or when the path cannot be classified; relative input stays unchanged.
     static func repositoryRelative(_ path: String, root: String) -> String? {
         guard path.hasPrefix("/") else { return path }
-        func resolved(_ p: String) -> String { URL(fileURLWithPath: p).resolvingSymlinksInPath().standardizedFileURL.path }
-        let file = resolved(path), base = resolved(root)
+        func existing(_ p: String) -> (path: String?, error: Int32) {
+            p.withCString { pointer in
+                let buffer = realpath(pointer, nil)
+                let error = errno
+                guard let buffer else { return (nil, error) }
+                defer { free(buffer) }
+                return (String(cString: buffer), 0)
+            }
+        }
+        func missing(_ p: String, error: Int32) -> Bool {
+            // Only absent entries can be appended lexically. A dangling symlink, permission
+            // failure or non-directory prefix must not turn into an apparently inside path.
+            guard error == ENOENT else { return false }
+            return p.withCString { pointer in
+                var entry = stat()
+                let status = lstat(pointer, &entry)
+                let error = errno
+                return status != 0 && error == ENOENT
+            }
+        }
+        func resolved(_ p: String) -> String? {
+            guard !p.utf8.contains(0) else { return nil }
+            let absolute = p.hasPrefix("/") ? p : FileManager.default.currentDirectoryPath + "/" + p
+            var prefix = absolute.split(separator: "/").map(String.init)
+            var tail: [String] = []
+            var base: String
+            // Keep dot-dot intact until realpath has resolved the longest existing prefix.
+            while true {
+                let candidate = "/" + prefix.joined(separator: "/")
+                let result = existing(candidate)
+                if let physical = result.path { base = physical; break }
+                guard missing(candidate, error: result.error), let last = prefix.popLast() else { return nil }
+                tail.append(last)
+            }
+            var absent: [String] = []
+            for component in tail.reversed() {
+                if component == "." { continue }
+                if component == ".." {
+                    if !absent.isEmpty { absent.removeLast() }
+                    else {
+                        guard let parent = existing(base + "/..").path else { return nil }
+                        base = parent
+                    }
+                } else if !absent.isEmpty {
+                    absent.append(component)
+                } else {
+                    // After dot-dot cancels the missing tail, the next component can be
+                    // an existing symlink again, including one that leaves the repository.
+                    let candidate = base + "/" + component
+                    let result = existing(candidate)
+                    if let physical = result.path { base = physical }
+                    else {
+                        guard missing(candidate, error: result.error) else { return nil }
+                        absent.append(component)
+                    }
+                }
+            }
+            return absent.isEmpty ? base : (base == "/" ? "" : base) + "/" + absent.joined(separator: "/")
+        }
+        guard let file = resolved(path), let base = resolved(root) else { return nil }
         guard file.hasPrefix(base + "/") else { return nil }
         return String(file.dropFirst(base.count + 1))
     }

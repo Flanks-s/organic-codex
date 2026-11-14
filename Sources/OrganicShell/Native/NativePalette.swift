@@ -132,6 +132,22 @@ import AppKit
 /// Transcript-only read-only TextKit surface. Keep the older NativeReadOnlyTextView API intact for other clients.
 @MainActor final class NativeTranscriptTextView: NSTextView {
     private(set) var isTrackingSelection = false
+    override var writablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        super.writablePasteboardTypes + [DragAttachmentPayload.quoteType]
+    }
+    /// NSTextView keeps its existing plain-text/RTF writer and native drag gesture.
+    override func writeSelection(to pasteboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        guard type == DragAttachmentPayload.quoteType else { return super.writeSelection(to: pasteboard, type: type) }
+        guard NativeInteractionSurface.permits(self) else { return false }
+        var parent = superview
+        while let view = parent {
+            if let row = view as? NativeTranscriptRow {
+                return DragAttachmentPayload.writeQuotes(row.dragAttachmentQuotes(), to: pasteboard)
+            }
+            parent = view.superview
+        }
+        return false
+    }
     override func mouseDown(with event: NSEvent) {
         isTrackingSelection = true
         defer { isTrackingSelection = false }

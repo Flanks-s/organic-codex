@@ -33,7 +33,7 @@ import QuartzCore
                 prep.append((CACurrentMediaTime()-start)*1000)
                 ink.bounds=label.bounds;ink.position=CGPoint(x:label.bounds.midX,y:label.bounds.midY)
                 let r=OffscreenRenderer(size:CGSize(width:340,height:205),host:root,scale:scale);renderer=r
-                let began=CACurrentMediaTime()+3600
+                let began=VerificationClock.renderOrigin
                 // Full visible old/new replacement: one layer per content, complementary alpha.
                 let old=CALayer();old.frame=ink.frame
                 if mode == "gauss" {for tile in tiles {let l=CALayer();l.anchorPoint = .zero;l.frame=tile.rect;l.contents=tile.image;l.contentsScale=scale;old.addSublayer(l)};oldPose.addSublayer(old);root.addSublayer(oldPose)}
@@ -122,7 +122,7 @@ import QuartzCore
     static func pausedOrbGaussian() {
         let orb=OrbComponent(id:"paused-gaussian");var c=OrbConfiguration(content:.identity(.assigned(2)),drawingSize:56)
         c.ambient=false;orb.configure(c);orb.setFrame(CGRect(x:0,y:0,width:44,height:44))
-        let captures=orb.verificationHostGlyph.captures+orb.verificationHostBadge.captures,start=CACurrentMediaTime()+3600
+        let captures=orb.verificationHostGlyph.captures+orb.verificationHostBadge.captures,start=VerificationClock.modelOrigin
         orb.setGlyphGaussianVisible(true,at:start,initiallyVisible:false)
         var mutations:[Double]=[]
         for k in 0...6 {let begin=CACurrentMediaTime();orb.settleGlyphGaussian(at:start+Double(k)/60);mutations.append((CACurrentMediaTime()-begin)*1000)
@@ -145,7 +145,7 @@ import QuartzCore
     static func interruptedNames() {
         for offset in [0.003,0.017,0.037,0.071,0.097] {
             let v=HeaderIsland();v.contentZoomStyle = .gauss;v.motionExposure.enabled=true
-            var time=CACurrentMediaTime()+3600;v.now={time}
+            var time=VerificationClock.modelOrigin;v.now={time}
             v.configure(.init(id:"interrupted",title:"A changing island",ambient:false))
             v.setExpanded(true);time+=offset;v.sampleMotion(at:time)
             let before=v.contentGaussianPoses.reduce(0){$0+$1.opacity}
@@ -161,7 +161,7 @@ import QuartzCore
         let seed=Array(MockSeed.make().prefix(2)),store=ConversationStore(conversations:Array(MockSeed.make().prefix(2)))
         for mode in ["off","accum","gauss"] {
             let view=DockNode.Passage(frame:CGRect(x:0,y:0,width:1000,height:150));view.wantsLayer=true
-            let dock=DockNode(view:view,scale:2);var time=CACurrentMediaTime()+3600
+            let dock=DockNode(view:view,scale:2);var time=VerificationClock.modelOrigin
             dock.motionTime={time};dock.ambient=false;dock.motionProfile=M10DockMotion.dell
             dock.motionEnabled=mode != "off";dock.contentZoomStyle=mode == "gauss" ? .gauss:.accum
             var layout=AutoLayout();layout.me=CGRect(x:16,y:80,width:40,height:40)
@@ -201,7 +201,7 @@ import QuartzCore
         let root=NSView(frame:CGRect(x:0,y:0,width:1080,height:140));root.wantsLayer=true
         let composer=NativeComposer(frame:CGRect(x:30,y:50,width:650,height:48));composer.targetWidth=650
         root.addSubview(composer);composer.setText("A native composer · 字形");composer.layoutSubtreeIfNeeded()
-        let manager=M10DockComposer(in:root),start=CACurrentMediaTime()+3600
+        let manager=M10DockComposer(in:root),start=VerificationClock.renderOrigin
         let prepared=CACurrentMediaTime();manager.prepare(composer);let cpu=(CACurrentMediaTime()-prepared)*1000,captures=manager.captures
         let before=NativeViewBitmap.capture(root,scale:2)
         let submission=CACurrentMediaTime();manager.setGaussianVisible(composer,true,at:start,initiallyVisible:false)
@@ -236,7 +236,7 @@ import QuartzCore
     static func nativeEndpoints() {
         for scale:CGFloat in [1,2] {
             let a=HeaderIsland(),b=HeaderIsland();a.contentZoomStyle = .accum;b.contentZoomStyle = .gauss
-            var time=CACurrentMediaTime()+3600
+            var time=VerificationClock.renderOrigin
             for v in [a,b] {v.now={time};v.motionExposure.enabled=true;v.motionProfile=M10DockMotion.dell
                 v.configure(.init(id:"endpoint",title:"Native endpoint",ambient:false,scale:scale))}
             let before=a.snapshot(scale:scale)
@@ -254,7 +254,7 @@ import QuartzCore
     static func nativeWiring(){
         HeaderIsland.forceMotionTexturesForVerification=true
         defer{HeaderIsland.forceMotionTexturesForVerification=false}
-        let island=HeaderIsland();var time=CACurrentMediaTime()+3600
+        let island=HeaderIsland();var time=VerificationClock.modelOrigin
         island.now={time};island.motionProfile=M10DockMotion.dell;island.motionExposure.enabled=true
         island.configure(.init(id:"gaussian",title:"A native island",ambient:false))
         let captures=island.motionGlyphMaterial.captureCount

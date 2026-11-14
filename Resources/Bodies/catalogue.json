@@ -1,0 +1,1052 @@
+{
+  "version": 1,
+  "boardSHA256": "0ac7b3c99ede639983aaabe04b75cb12b1b4e1d13040aac0c2a3219df1242d8f",
+  "conversationChoices": [
+    "mercury",
+    "venus",
+    "mars",
+    "jupiter",
+    "saturn",
+    "uranus",
+    "neptune",
+    "pluto",
+    "ceres",
+    "pallas",
+    "juno",
+    "vesta",
+    "astraea",
+    "hygiea",
+    "chiron",
+    "pholus",
+    "nessus",
+    "orcus",
+    "haumea",
+    "quaoar",
+    "makemake",
+    "gonggong",
+    "eris",
+    "sedna"
+  ],
+  "bodies": [
+    {
+      "id": "sun",
+      "name": "Sun",
+      "tone": "",
+      "colorHex": "#ffcf6b",
+      "glyph": "\u2609",
+      "glyphPath": null,
+      "texture": "sun",
+      "clouds": null,
+      "role": "LL",
+      "tilt": 7,
+      "elevation": 8,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": true,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "mercury",
+      "name": "Mercury",
+      "tone": "Silver",
+      "colorHex": "#bdb7b0",
+      "glyph": "\u263f\ufe0e",
+      "glyphPath": null,
+      "texture": "mercury",
+      "clouds": null,
+      "role": null,
+      "tilt": 0,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0.1,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "venus",
+      "name": "Venus",
+      "tone": "Peach",
+      "colorHex": "#f0b98a",
+      "glyph": "\u2640\ufe0e",
+      "glyphPath": null,
+      "texture": "venus_atmosphere",
+      "clouds": null,
+      "role": null,
+      "tilt": 3,
+      "elevation": 14,
+      "rotation": -2,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": [
+        244,
+        196,
+        140
+      ],
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "earth",
+      "name": "Earth",
+      "tone": "Sky Blue",
+      "colorHex": "#5db4f0",
+      "glyph": "\u2295",
+      "glyphPath": null,
+      "texture": "earth_day",
+      "clouds": "earth_clouds",
+      "role": "Browser",
+      "tilt": 23.4,
+      "elevation": 16,
+      "rotation": 1,
+      "initialTurn": 0.62,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": [
+        110,
+        170,
+        255
+      ],
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "moon",
+      "name": "Moon",
+      "tone": "",
+      "colorHex": "#c9c9c4",
+      "glyph": "\u263d\ufe0e",
+      "glyphPath": null,
+      "texture": "moon",
+      "clouds": null,
+      "role": "Satellites \u00b7 Sidechat",
+      "tilt": 6.7,
+      "elevation": 6,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 6,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "mars",
+      "name": "Mars",
+      "tone": "Coral",
+      "colorHex": "#f2734d",
+      "glyph": "\u2642\ufe0e",
+      "glyphPath": null,
+      "texture": "mars",
+      "clouds": null,
+      "role": null,
+      "tilt": 25,
+      "elevation": 16,
+      "rotation": 1,
+      "initialTurn": 0.82,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "jupiter",
+      "name": "Jupiter",
+      "tone": "Caramel",
+      "colorHex": "#e2a86e",
+      "glyph": "\u2643",
+      "glyphPath": null,
+      "texture": "jupiter",
+      "clouds": null,
+      "role": null,
+      "tilt": 3.1,
+      "elevation": 10,
+      "rotation": 0.6,
+      "initialTurn": 0.4,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "saturn",
+      "name": "Saturn",
+      "tone": "Gold",
+      "colorHex": "#e8c45a",
+      "glyph": "\u2644",
+      "glyphPath": null,
+      "texture": "saturn",
+      "clouds": null,
+      "role": null,
+      "tilt": 26.7,
+      "elevation": 24,
+      "rotation": 0.6,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": true,
+      "procedure": null
+    },
+    {
+      "id": "uranus",
+      "name": "Uranus",
+      "tone": "Turquoise",
+      "colorHex": "#7ed6c8",
+      "glyph": "\u2645",
+      "glyphPath": null,
+      "texture": "uranus",
+      "clouds": null,
+      "role": null,
+      "tilt": 98,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "neptune",
+      "name": "Neptune",
+      "tone": "Cornflower",
+      "colorHex": "#7f9bf5",
+      "glyph": "\u2646",
+      "glyphPath": null,
+      "texture": "neptune",
+      "clouds": null,
+      "role": null,
+      "tilt": 28,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0.3,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "pluto",
+      "name": "Pluto",
+      "tone": "Lavender",
+      "colorHex": "#c39bf0",
+      "glyph": "\u2647",
+      "glyphPath": null,
+      "texture": "pluto",
+      "clouds": null,
+      "role": null,
+      "tilt": 0,
+      "elevation": 35,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 35,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "ceres",
+      "name": "Ceres",
+      "tone": "Sage",
+      "colorHex": "#a8c48a",
+      "glyph": "\u26b3",
+      "glyphPath": null,
+      "texture": "ceres_fictional",
+      "clouds": null,
+      "role": null,
+      "tilt": 4,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "pallas",
+      "name": "Pallas",
+      "tone": "Olive",
+      "colorHex": "#b6b85e",
+      "glyph": "\u26b4",
+      "glyphPath": null,
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 84,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          138,
+          140,
+          146
+        ],
+        "c1": [
+          104,
+          107,
+          114
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 70,
+        "craterSizes": [
+          0.05,
+          0.2
+        ],
+        "seed": 3,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "juno",
+      "name": "Juno",
+      "tone": "Teal",
+      "colorHex": "#46b3c2",
+      "glyph": "\u26b5",
+      "glyphPath": null,
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 50,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          170,
+          156,
+          136
+        ],
+        "c1": [
+          138,
+          125,
+          107
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 26,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 5,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "vesta",
+      "name": "Vesta",
+      "tone": "Rose",
+      "colorHex": "#ef8fa6",
+      "glyph": "\u26b6",
+      "glyphPath": null,
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 29,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          168,
+          158,
+          146
+        ],
+        "c1": [
+          128,
+          118,
+          106
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 18,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 7,
+        "basin": true,
+        "grooves": true,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "astraea",
+      "name": "Astraea",
+      "tone": "Pearl",
+      "colorHex": "#dcd5ec",
+      "glyph": "",
+      "glyphPath": "M14.9 3.9H12.3L8.8 15.9H5M10.9 5a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0M13.1 15.55a1.58 1.58 0 1 1-3.16 0a1.58 1.58 0 1 1 3.16 0",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 12,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          178,
+          166,
+          148
+        ],
+        "c1": [
+          146,
+          134,
+          117
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 16,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 11,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "hygiea",
+      "name": "Hygiea",
+      "tone": "Mint",
+      "colorHex": "#79d9a0",
+      "glyph": "",
+      "glyphPath": "M10 3V16.8M7.9 2.9A5.1 2.6 0 1 0 12.1 2.9M5.84 10.6a4.16 1.95 0 1 0 8.32 0a4.16 1.95 0 1 0-8.32 0M6.37 15a3.63 1.77 0 1 0 7.26 0a3.63 1.77 0 1 0-7.26 0",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 10,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          96,
+          97,
+          100
+        ],
+        "c1": [
+          76,
+          77,
+          80
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 12,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 13,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "chiron",
+      "name": "Chiron",
+      "tone": "Steel",
+      "colorHex": "#93a8c4",
+      "glyph": "\u26b7",
+      "glyphPath": null,
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 18,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          112,
+          110,
+          107
+        ],
+        "c1": [
+          90,
+          88,
+          86
+        ],
+        "scale": 3,
+        "contrast": 0.5,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 17,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "pholus",
+      "name": "Pholus",
+      "tone": "Brick",
+      "colorHex": "#c4553f",
+      "glyph": "",
+      "glyphPath": "M9.7 12.3V2.96H11.5A2.62 2.62 0 0 1 11.5 8.2H9.7M6.01 14.58a3.72 2.28 0 1 0 7.44 0a3.72 2.28 0 1 0-7.44 0",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 22,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          166,
+          88,
+          62
+        ],
+        "c1": [
+          128,
+          64,
+          46
+        ],
+        "scale": 3,
+        "contrast": 0.5,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 19,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "nessus",
+      "name": "Nessus",
+      "tone": "Plum",
+      "colorHex": "#c07fc0",
+      "glyph": "",
+      "glyphPath": "M9.78 12.1V2.9L13.87 8.6V2.9M6.07 14.47a3.69 2.39 0 1 0 7.38 0a3.69 2.39 0 1 0-7.38 0",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 14,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          156,
+          102,
+          82
+        ],
+        "c1": [
+          122,
+          78,
+          62
+        ],
+        "scale": 3,
+        "contrast": 0.5,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 23,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "orcus",
+      "name": "Orcus",
+      "tone": "Smoke",
+      "colorHex": "#a6a6b6",
+      "glyph": "",
+      "glyphPath": "M2.96 9.89a6.97 6.97 0 1 0 13.94 0a6.97 6.97 0 1 0-13.94 0M8.67 10.83A1.95 1.95 0 1 1 12 9.45V12.83H16.25M8.67 10.83L12.79 16.24",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 16,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          156,
+          162,
+          168
+        ],
+        "c1": [
+          122,
+          128,
+          134
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 29,
+        "basin": false,
+        "grooves": false,
+        "patchColor": [
+          196,
+          202,
+          208
+        ],
+        "patchScale": 2.6,
+        "patchThreshold": 0.56,
+        "patchAlpha": 0.7
+      }
+    },
+    {
+      "id": "haumea",
+      "name": "Haumea",
+      "tone": "Frost",
+      "colorHex": "#cfe6f2",
+      "glyph": "",
+      "glyphPath": "M11.64 4.6a1.64 1.64 0 1 1-3.28 0a1.64 1.64 0 1 1 3.28 0M11.64 11.73a1.64 1.64 0 1 1-3.28 0a1.64 1.64 0 1 1 3.28 0M4.6 8.14H15.4M6.04 8.14C6.04 13.4 5.5 16.2 3 16.85M13.96 8.14C13.96 13.4 14.5 16.2 17 16.85",
+      "texture": "haumea_fictional",
+      "clouds": null,
+      "role": null,
+      "tilt": 10,
+      "elevation": 28,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        0.8,
+        0.52
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "quaoar",
+      "name": "Quaoar",
+      "tone": "Indigo",
+      "colorHex": "#8a7be8",
+      "glyph": "",
+      "glyphPath": "M13.94 12.53L16.6 9.87L9.96 3.23L3.32 9.87L9.96 16.5L11.86 14.6M9.5 9.5L13.94 12.53L16.9 16.9L11.86 14.6Z",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 14,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          156,
+          108,
+          84
+        ],
+        "c1": [
+          124,
+          84,
+          64
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 31,
+        "basin": false,
+        "grooves": false,
+        "patchColor": [
+          176,
+          132,
+          104
+        ],
+        "patchScale": 2.4,
+        "patchThreshold": 0.58,
+        "patchAlpha": 0.5
+      }
+    },
+    {
+      "id": "makemake",
+      "name": "Makemake",
+      "tone": "Clay",
+      "colorHex": "#cc8b68",
+      "glyph": "",
+      "glyphPath": "M10 16.85V3.05M6.4 10.25A3.6 3.6 0 0 1 6.4 3.05H13.6A3.6 3.6 0 0 1 13.6 10.25M7.95 6.55a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0M15.2 6.55a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 10,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          198,
+          156,
+          124
+        ],
+        "c1": [
+          166,
+          124,
+          94
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 37,
+        "basin": false,
+        "grooves": false,
+        "patchColor": [
+          226,
+          208,
+          186
+        ],
+        "patchScale": 2.2,
+        "patchThreshold": 0.57,
+        "patchAlpha": 0.75
+      }
+    },
+    {
+      "id": "gonggong",
+      "name": "Gonggong",
+      "tone": "Jade",
+      "colorHex": "#4fc298",
+      "glyph": "",
+      "glyphPath": "M7.43 2.96V9.93M12.39 2.96V14.63M3 6H16.8M3 9.93H16.8M5.6 12.35C3.1 12.35 2.55 16.85 5.5 16.85C7.5 16.85 9.9 14.9 12.6 13.3M12.35 14.63a2.2 2.24 0 1 0 4.4 0a2.2 2.24 0 1 0-4.4 0",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 20,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          176,
+          86,
+          64
+        ],
+        "c1": [
+          140,
+          66,
+          50
+        ],
+        "scale": 2.2,
+        "contrast": 0.5,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 41,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    },
+    {
+      "id": "eris",
+      "name": "Eris",
+      "tone": "Ivory",
+      "colorHex": "#ece6d3",
+      "glyph": "",
+      "glyphPath": "M10 2.9V16.9M3 2.9A7 7 0 0 1 3 16.9M17 2.9A7 7 0 0 0 17 16.9",
+      "texture": "eris_fictional",
+      "clouds": null,
+      "role": null,
+      "tilt": 18,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": null
+    },
+    {
+      "id": "sedna",
+      "name": "Sedna",
+      "tone": "Ruby",
+      "colorHex": "#e8607e",
+      "glyph": "",
+      "glyphPath": "M12.45 5.84H5.5A1.4 1.4 0 1 1 6.9 4.35V5.84M9.82 2.9V8.5H11.6A3.75 3.75 0 0 1 15.35 12.25V16.85",
+      "texture": null,
+      "clouds": null,
+      "role": null,
+      "tilt": 12,
+      "elevation": 14,
+      "rotation": 1,
+      "initialTurn": 0,
+      "rockDegrees": 0,
+      "axes": [
+        1,
+        1,
+        1
+      ],
+      "atmosphere": null,
+      "emits": false,
+      "ring": false,
+      "procedure": {
+        "c0": [
+          182,
+          72,
+          62
+        ],
+        "c1": [
+          146,
+          54,
+          50
+        ],
+        "scale": 2.2,
+        "contrast": 0.35,
+        "craters": 0,
+        "craterSizes": [
+          0.04,
+          0.14
+        ],
+        "seed": 43,
+        "basin": false,
+        "grooves": false,
+        "patchColor": null,
+        "patchScale": 1,
+        "patchThreshold": 0,
+        "patchAlpha": 0
+      }
+    }
+  ]
+}

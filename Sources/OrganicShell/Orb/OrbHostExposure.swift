@@ -13,13 +13,19 @@ import QuartzCore
     var verificationRect:CGRect {rect}
     #endif
     init(){carrier.addSublayer(trail.layer);trail.layer.addSublayer(bitmap);carrier.isHidden=true}
+    /// Reuse an already decoded body image; rendering a bitmap layer again would reverse its rows.
+    func prepare(image: CGImage, size: CGSize) {
+        guard size.width>0,size.height>0 else { return }
+        bitmap.contents=image; bitmap.contentsScale=CGFloat(image.width)/size.width
+        rect=CGRect(origin:.zero,size:size); self.size=size
+        ReplicaContainerAudit.register(bitmap,material:.glyph,note:"Orb shared static body image; independent alpha bitmap")
+    }
     func prepare(_ source:CALayer,scale:CGFloat,topDown:Bool=false){
         let box=source.bounds,w=Int(ceil(box.width*scale)),h=Int(ceil(box.height*scale))
         guard w>0,h>0,let c=CGContext(data:nil,width:w,height:h,bitsPerComponent:8,bytesPerRow:w*4,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue) else{return}
         c.scaleBy(x:scale,y:scale)
-        // These paths use the host's top-down geometry. render(in:) has no flipped NSView ancestor;
-        // bake top-down rows so both the tight crop and the CGImage agree with the native plane.
-        if topDown {c.translateBy(x:0,y:box.height);c.scaleBy(x:1,y:-1)}
+        // Mounted sources inherit ancestor parity; pickup also requests top-down rows before mounting.
+        if topDown || source.contentsAreFlipped() {c.translateBy(x:0,y:box.height);c.scaleBy(x:1,y:-1)}
         let hidden=source.isHidden,opacity=source.opacity;source.isHidden=false;source.opacity=1;source.render(in:c);source.isHidden=hidden;source.opacity=opacity
         let p=c.data!.assumingMemoryBound(to:UInt8.self)
         var x0=w,y0=h,x1=0,y1=0

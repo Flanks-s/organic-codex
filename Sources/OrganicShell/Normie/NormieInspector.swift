@@ -12,7 +12,8 @@ import AppKit
 @MainActor final class NormieInspectorController: NSViewController {
     /// Standalone inspectors render synchronously by default. A collapsed workbench withdraws presentation only.
     var presentationActive = true { didSet {
-        if !presentationActive{motion.settle()}
+        if isViewLoaded { NormieSidebarSpinner.setPresented(presentationActive, in: view) }
+        if !presentationActive{motion.settle();referenceContent?.revoke()}
         if presentationActive && !oldValue { shownValue = c.map { value(for: $0) }; render() }
     } }
     private(set) var renderCount = 0
@@ -41,7 +42,26 @@ import AppKit
         value.canCompact = actions.compact != nil; value.canOpenSubAgent = actions.subAgent != nil
         return value
     }
-    enum Tab { case status, changes }
+    enum Tab { case status, changes, sources, file }
+    private let referenceIndex = TranscriptContentIndex()
+    private var referenceSource: SourceLocator?
+    private var referenceResult = TranscriptReferencePreview(state: .unavailable)
+    private var referenceRevision = -1
+    private var referenceIndexReady = false
+    private var referenceObservation: UUID?
+    private var referenceReturnTab: Tab = .status
+    private var referenceReturnOffset = CGPoint.zero
+    private var referenceSourcesOffset = CGPoint.zero
+    private var referenceFileFromSources = false
+    var onReference: ((Conversation, TranscriptReferenceRequest) -> Void)?
+    var onReferenceDismiss: (() -> Void)?
+    var onSourcesRequest: (() -> Void)?
+    private var referenceContent: NormieReferenceContent?
+    var referenceInputActive = true { didSet {
+        guard referenceInputActive != oldValue else { return }
+        if !referenceInputActive { referenceContent?.revoke() }
+        else if tab == .sources || tab == .file { render() }
+    } }
     let store: ConversationStore, actions: NormieActions
     private let inlineChanges: Bool
     let scrollView = NSScrollView()
@@ -61,7 +81,17 @@ import AppKit
     init(store: ConversationStore, actions: NormieActions, inlineChanges: Bool = false) {
         self.store = store; self.actions = actions; self.inlineChanges = inlineChanges
         super.init(nibName: nil, bundle: nil)
+        referenceObservation = store.observeChanges { [weak self] c, change in
+            guard let self, self.c === c else { return }
+            guard self.referenceIndexReady, self.referenceInputActive,
+                  let id = change.itemID, let index = c.transcriptItemIndex(id) else {
+                self.referenceIndexReady = false; return
+            }
+            self.referenceIndex.updateSource(c.items[index]); self.referenceRevision = c.revision
+            if self.tab == .sources { self.render() }
+        }
     }
+    isolated deinit { if let referenceObservation { store.removeObserver(referenceObservation) } }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
     private func applyNativeAppearance(){
         applyingAppearance=true;codeStyle = .nativeCurrent;applyingAppearance=false
@@ -103,11 +133,17 @@ import AppKit
     func show(_ conversation: Conversation?) {
         let changed = c !== conversation
         if changed {
+            referenceContent?.revoke()
+            referenceIndex.removeAll(); referenceIndexReady = false; referenceSource = nil; referenceRevision = -1
+            referenceSourcesOffset = .zero; referenceFileFromSources = false
             motion.settle()
             openFiles = []; commitOpen = false; tab = .status; review = nil
             scrollView.contentView.scroll(to: .zero)
         }
         c = conversation
+        if !changed, (tab == .sources || tab == .file), referenceRevision != conversation?.revision {
+            referenceRevision = conversation?.revision ?? -1; render()
+        }
         guard presentationActive else { shownValue = nil; return }
         let value = conversation.map { self.value(for: $0) }
         if changed || shownValue != value {
@@ -115,21 +151,42 @@ import AppKit
             shownValue = value; render(animated:planChanged && !commitOpen ? .snappy25:nil)
         }
     }
-    func showChanges() { tab = .changes; render(animated:.snappy20) }
-    func showStatus() { tab = .status; render(animated:.snappy20) }
+    func showChanges() { if tab == .sources || tab == .file { onReferenceDismiss?() }; tab = .changes; render(animated:.snappy20) }
+    func showStatus() { if tab == .sources || tab == .file { onReferenceDismiss?() }; tab = .status; render(animated:.snappy20) }
+    private func enterReferences(_ destination: Tab) {
+        if tab == .status || tab == .changes { referenceReturnTab = tab; referenceReturnOffset = scrollView.contentView.bounds.origin }
+        if destination == .file, tab != .file {
+            referenceFileFromSources = tab == .sources
+            if tab == .sources { referenceSourcesOffset = referenceContent?.readingOffset ?? .zero }
+        }
+        tab = destination; referenceRevision = c?.revision ?? -1
+    }
+    func showSources() { onReferenceDismiss?(); enterReferences(.sources); render() }
+    private func requestSources() { if let onSourcesRequest { onSourcesRequest() } else { showSources() } }
+    func showReference(_ source: SourceLocator, result: TranscriptReferencePreview) {
+        enterReferences(.file); referenceSource = source; referenceResult = result; render()
+    }
+    private func returnFromReferences() {
+        if tab == .file, referenceFileFromSources { showSources(); return }
+        onReferenceDismiss?()
+        tab = referenceReturnTab; render(); scrollView.contentView.scroll(to: referenceReturnOffset)
+    }
     func toggleFile(_ path: String) { if !openFiles.insert(path).inserted { openFiles.remove(path) }; render(animated:.snappy20) }
     func isFileExpanded(_ path: String) -> Bool { openFiles.contains(path) }
     private func render(animated:NormieDetailItemMotion.Kind?=nil) {
         guard presentationActive, isViewLoaded, !rendering else { return }; rendering = true; defer { rendering = false }
         renderCount += 1
+        if tab == .sources, let referenceContent, referenceContent.isSourceList { referenceSourcesOffset = referenceContent.readingOffset }
+        referenceContent?.revoke(); referenceContent = nil
         let before=motion.before(document,animated:animated)
         defer{motion.after(document,before:before,kind:animated)}
         var occurrence:[String:Int]=[:]
         func identify(_ v:NSView,_ key:String){let n=occurrence[key,default:0];occurrence[key]=n+1;v.identifier=NSUserInterfaceItemIdentifier(key+"/"+String(n))}
         let offset = scrollView.contentView.bounds.origin
-        let retainedField = commitOpen ? commitField : nil
+        let referenceTab = tab == .sources || tab == .file
+        let retainedField = commitOpen && !referenceTab ? commitField : nil
         document.subviews.filter { $0 !== retainedField }.forEach { $0.removeFromSuperview() }
-        commitField = retainedField
+        if !referenceTab { commitField = retainedField }
         let width = max(160, renderWidth), outer: CGFloat = 14
         var inset = outer, inner = width-2*outer
         var y: CGFloat = 18
@@ -174,7 +231,29 @@ import AppKit
         }
         func spinner(at point: CGPoint) {
             let spin = NormieSidebarSpinner(); spin.style = .spinning; spin.controlSize = .mini
-            identify(spin,"spinner"); document.addSubview(spin); document.place(spin,CGRect(origin:point,size:CGSize(width:16,height:16))); spin.startAnimation(nil)
+            spin.presented = presentationActive; spin.running = true
+            identify(spin,"spinner"); document.addSubview(spin); document.place(spin,CGRect(origin:point,size:CGSize(width:16,height:16)))
+        }
+        if let c, tab == .sources || tab == .file {
+            text(tab == .sources ? "Sources" : "File Target", size: 15, weight: .semibold)
+            button("‹ Back") { [weak self] in self?.returnFromReferences() }
+            if tab == .file { button("Sources") { [weak self] in self?.requestSources() } }
+            let content: NormieReferenceContent
+            if tab == .file, let source = referenceSource { content = NormieReferenceContent(source: source, result: referenceResult) }
+            else {
+                let sources = referenceIndexReady ? referenceIndex.indexedSources : referenceIndex.sources(in: c.items)
+                referenceIndexReady = true; content = NormieReferenceContent(sources: sources)
+            }
+            content.onOpen = { [weak self, weak c] source in
+                guard let self, let c, self.c === c, self.referenceInputActive, self.presentationActive else { return }; self.onReference?(c, .init(source: source))
+            }
+            referenceContent = content
+            if !referenceInputActive { content.revoke() }
+            document.addSubview(content)
+            content.frame = CGRect(x: outer, y: y, width: width - 2 * outer, height: max(360, view.bounds.height - y - 20))
+            if tab == .sources { content.restoreReadingOffset(referenceSourcesOffset) }
+            document.frame = CGRect(x: 0, y: 0, width: width, height: content.frame.maxY + 20)
+            return
         }
         text(inlineChanges || tab == .status ? "Status":"Changes", size: 15, weight: .semibold); y -= 6
         text(c?.title ?? "New Chat", size: 11, color: NativePalette.secondaryLabel); y -= 10
@@ -189,6 +268,7 @@ import AppKit
             scrollView.contentView.scroll(to: .zero); return
         }
         if tab == .changes && !inlineChanges { button("‹ Status") { [weak self] in self?.showStatus() } }
+        button("Sources", symbol: "link") { [weak self] in self?.requestSources() }
         heading("Git")
         let added = c.changes.reduce(0) { $0+$1.added }, removed = c.changes.reduce(0) { $0+$1.removed }
         let changes = NormieInspectorChangesButton()
@@ -449,7 +529,7 @@ import AppKit
         task = satellite.title ?? (satellite.threadID != nil ? "Sub-agent":SheetSubAgentCopy.task(index))
         setAccessibilityLabel(title+", "+task); setAccessibilityValue(done ? "Done":"Running")
         toolTip = "Open \(title)"; progress.isHidden = done; mark.isHidden = !done
-        if !done { progress.startAnimation(nil) }; needsLayout = true; needsDisplay = true
+        progress.running = !done; needsLayout = true; needsDisplay = true
     }
     override func layout() {
         super.layout()

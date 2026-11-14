@@ -55,6 +55,30 @@ extension AppController {
     func start() {
         Self.current = self
         Task { @MainActor in
+            if self.spec.contains("trash-wiring") {
+                let driver = TrashWiringRun(app: self.app, window: self.window, io: .init(
+                    prepare: {
+                        self.pointerWindow = self.window
+                        for w in self.app.windows { w.scene.pressedButtons = { [weak self] in self?.held == true ? 1 : 0 } }
+                    },
+                    press: { await self.press($0) }, carry: { await self.carry(to: $0, over: $1) },
+                    release: { self.release() },
+                    mouse: { type, p in
+                        self.pointer = p; self.markPointer()
+                        self.post(type, at: p, pressure: type == .leftMouseUp || type == .rightMouseUp || type == .mouseMoved ? 0 : 1)
+                    },
+                    key: { self.key($0, $1, $2) }, pointer: { self.pointer },
+                    activate: { self.activate() }, sleep: { await self.sleep($0) },
+                    sync: { await self.syncFlash() }, log: { self.log($0, $1) }))
+                let summary = await driver.run()
+                self.log("done", ["spec": "trash-wiring", "ran": summary.ran, "skipped": summary.skipped,
+                                  "findings": summary.findings, "checks": summary.checks, "seconds": summary.seconds])
+                let tail = min(15, max(0, Double(ProcessInfo.processInfo.environment["INPUT_TAIL"] ?? "") ?? 1))
+                await self.sleep(tail)
+                // As with trash-proto, WinRec2 must finish before --quit-after ends a recorded app.
+                if self.app.o.quitAfter == nil { NSApp.terminate(nil) }
+                return
+            }
             self.undoLeftReduce()
             await self.sleep(1.0)
             // INPUT_AGE_MINUTES: the mock's conversations as long as after that many minutes of play, as in a session left open.
@@ -77,6 +101,11 @@ extension AppController {
             if self.spec.contains("keep-app") { await self.keepApp(); return }
             if self.spec.contains("keep-app-live") { await self.keepAppLive(); return }
             if self.spec.contains("dock-hover") { await self.dockHover(); NSApp.terminate(nil); return }
+            // M11.37 r1: the native trash prototype on a stage over the window (TrashProtoRun). No terminate: --quit-after
+            // ends the app after the recording, which never finalizes if the app goes first.
+            if self.spec.contains("trash-proto") {
+                await TrashProtoRun(window: self.window.window, output: self.app.o.output, log: { self.log($0, $1) }).run(); return
+            }
             // INPUT_NO_WATCH=1: idle-cost runs. The stray-transcript watcher is a 120 Hz timer that wakes the main run loop
             // (11-06: it inflated idle app CPU and fed the mode-preparation observer on every pass).
             if ProcessInfo.processInfo.environment["INPUT_NO_WATCH"] != "1" {
@@ -739,6 +768,18 @@ extension AppController {
                               hover: { self.post(.mouseMoved, at: $0 ?? CGPoint(x: -100, y: -100), pressure: 0) },
                               click: { await self.press($0); self.release(); await self.sleep(0.02) }, escape: { self.escape() }).run(spec)
         }
+        // A Tide run must keep key through cleanup. p-tide-app-switch resigns on purpose and p-tide-close closes the window,
+        // so only those two may lose it.
+        let tideKeyToken = spec.contains(where: { $0.hasPrefix("p-tide") }) && !spec.contains("p-tide-app-switch")
+            && !spec.contains("p-tide-close") ? beginKeyLossWatch(during: "tide") : nil
+        // M11.34 Tide (TideDriver, written by Sol): mock-only events into the store; filters its own p-tide-* specs.
+        await TideDriver(app: app, window: window, log: { self.log($0, $1) }, sleep: { await self.sleep($0) },
+                         hover: { self.post(.mouseMoved, at: $0 ?? CGPoint(x: -100, y: -100), pressure: 0) },
+                         click: { await self.press($0); self.release(); await self.sleep(0.02) }, escape: { self.escape() }).run(spec)
+        endKeyLossWatch(tideKeyToken)
+        // p-tide-close closes the window: nothing after it has a window to drive. The r7 and r8 close runs trapped in
+        // columnsInTurn on the MBA (11-06), and a window.isVisible guard there did not catch it.
+        if spec.contains("p-tide-close") { return }
         if spec.contains("reorder-drag") { await reorderDrag() }
         if spec.contains("flight-wheel") { await flightWheel() }
         if spec.contains("picker-wheel") { await pickerWheel() }
@@ -788,6 +829,10 @@ extension AppController {
         if spec.contains("dock-jumps") { await dockJumps() }
         if spec.contains("me-drag") { await meDrag() }
         if spec.contains("me-hold") { await meHold() }
+        // M11.36 orb switch and orb menu (decision #132): mock only, the scene stops at once without a mock.
+        if spec.contains("orb-switch") { await orbSwitch() }
+        // M11.39 LL hover (decision #136): mock only, the scene stops at once without a mock.
+        if spec.contains("sun-hover") { await sunHoverScene() }
         if spec.contains("long-wheel") { await wheelTrials() }
         if spec.contains("long-early") { await earlyWheelTrials() }
         if spec.contains("long-goal") { await goalFlightTrials() }
@@ -1231,6 +1276,32 @@ extension AppController {
     }
     private func endKeyLossWatch(_ token: NSObjectProtocol?) { if let token { NotificationCenter.default.removeObserver(token) } }
 
+    /// M11.47 follow-up (Advisor 056fee0): one real satellite retire-hide for Opus, without the Debug menu. A sub-agent
+    /// satellite goes onto the current column's conversation, stays 3 s, then the turn completes: the header holds the
+    /// finished moon about 2 s and hides it at its next turn to the back. Mock only.
+    private func orbitRetire() async {
+        let id = scene.current
+        guard let mock = app.mock else { log("orbit-retire skipped", ["reason": "no mock"]); return }
+        // Ambient motion stops 8 s after the last input (OrganicWindow.updateAmbient), which froze the moons through the
+        // whole retire window on 11-07. Unless ORBIT_RETIRE_NUDGE=0, a pointer move outside the dock every 2 s keeps the
+        // window "in use", as a person moving the mouse would; it lands on no control, so nothing hovers.
+        let nudge = ProcessInfo.processInfo.environment["ORBIT_RETIRE_NUDGE"] != "0"
+        var nudges = 0
+        func hold(_ seconds: Double) async {
+            guard nudge else { await sleep(seconds); return }
+            var left = seconds
+            while left > 0 {
+                post(.mouseMoved, at: CGPoint(x: -100, y: -100), pressure: 0); nudges += 1
+                let step = min(2.0, left); await sleep(step); left -= step
+            }
+        }
+        log("orbit-retire add", ["id": id, "ok": mock.inject(.addSatellite, into: id), "nudge": nudge])
+        await hold(3.0)
+        log("orbit-retire complete", ["id": id, "ok": mock.inject(.complete, into: id)])
+        await hold(Double(ProcessInfo.processInfo.environment["ORBIT_RETIRE_HOLD"] ?? "") ?? 8.0)
+        log("orbit-retire end", ["nudges": nudges])
+    }
+
     /// M11.31 observer-only gate (Advisor 11-07): the beforeWaiting observer's cost with a moving pointer, not only timer
     /// wakes. mouseMoved at 120 Hz back and forth along the header islands' orbs, the Dock orbs and the bar, for
     /// POINTER_SWEEP_SECONDS (default 16), 0.5 s per leg; each step also goes through the window's hover path, since posted
@@ -1259,32 +1330,6 @@ extension AppController {
         }
         hover(nil)
         log("pointer-sweep end", ["posted": posted, "legs": legs, "seconds": CACurrentMediaTime() - began])
-    }
-
-    /// M11.47 follow-up (Advisor 056fee0): one real satellite retire-hide for Opus, without the Debug menu. A sub-agent
-    /// satellite goes onto the current column's conversation, stays 3 s, then the turn completes: the header holds the
-    /// finished moon about 2 s and hides it at its next turn to the back. Mock only.
-    private func orbitRetire() async {
-        let id = scene.current
-        guard let mock = app.mock else { log("orbit-retire skipped", ["reason": "no mock"]); return }
-        // Ambient motion stops 8 s after the last input (OrganicWindow.updateAmbient), which froze the moons through the
-        // whole retire window on 11-07. Unless ORBIT_RETIRE_NUDGE=0, a pointer move outside the dock every 2 s keeps the
-        // window "in use", as a person moving the mouse would; it lands on no control, so nothing hovers.
-        let nudge = ProcessInfo.processInfo.environment["ORBIT_RETIRE_NUDGE"] != "0"
-        var nudges = 0
-        func hold(_ seconds: Double) async {
-            guard nudge else { await sleep(seconds); return }
-            var left = seconds
-            while left > 0 {
-                post(.mouseMoved, at: CGPoint(x: -100, y: -100), pressure: 0); nudges += 1
-                let step = min(2.0, left); await sleep(step); left -= step
-            }
-        }
-        log("orbit-retire add", ["id": id, "ok": mock.inject(.addSatellite, into: id), "nudge": nudge])
-        await hold(3.0)
-        log("orbit-retire complete", ["id": id, "ok": mock.inject(.complete, into: id)])
-        await hold(Double(ProcessInfo.processInfo.environment["ORBIT_RETIRE_HOLD"] ?? "") ?? 8.0)
-        log("orbit-retire end", ["nudges": nudges])
     }
 
     /// What takes the key window or the app's activation, with the step it happened in: 14 Focused paths ran without a key window and
@@ -1577,15 +1622,649 @@ extension AppController {
         await sleep(0.5)
     }
 
+    // MARK: M11.36 orb switch (orb-switch, Claude for lane A 11-09, decision #132)
+    //
+    // Option-click, right-click, Control-click and the keyboard on the orb menu, all through the real RootView /
+    // HeaderIsland entries by posted events. Mock only: input-run.sh always passes --mock, and the scene stops at once
+    // if there is no mock, because Rename, Archive and Fork change a person's Codex threads.
+    private var orbChecks: [[String: Any]] = []
+
+    private func orbCheck(_ name: String, _ pass: Bool, _ extra: [String: Any] = [:]) {
+        var e = extra; e["name"] = name; e["pass"] = pass
+        orbChecks.append(e)
+        log("orb-switch check", e.merging(["state": state()]) { a, _ in a })
+    }
+
+    private func orbMenuState() -> [String: Any] {
+        let s = scene.orbMenu.state
+        return ["open": s.isOpen, "submenu": s.submenu, "selected": s.selected ?? -1, "selectedColumn": s.selectedColumn ?? -1,
+                "columns": s.columns.map { "\($0.id)\($0.checked ? "*" : "")" }]
+    }
+
+    private func dockOrbIDs() -> [String] { scene.order.filter { scene.dock.items[$0]?.role == .orb } }
+    private func columnIDs() -> [String] { scene.columns.map { $0.conversation.id } }
+    /// Where the orb is now, as the product poses it (flight, Peek header or Dock slot; Sol's OrbInputVerification
+    /// aims the same way). The r3 runs aimed at the Dock item's glass frame and missed D by 56 pt.
+    private func dockOrbPoint(_ id: String) -> CGPoint? {
+        guard scene.dock.items[id]?.role == .orb, let r = scene.orbPose(id) else { return nil }
+        let p = CGPoint(x: r.midX, y: r.midY)
+        aim(id, p, ["pose": rectList(r), "glass": rectList(scene.dock.items[id]?.glass.frame ?? .zero)])
+        return p
+    }
+    /// The header planet a person sees and clicks: its planet button. The r3 runs aimed at draggableOrbRect (the orb
+    /// glass view's frame, converted as if it were in island coordinates), and both brief-header clicks hit nothing.
+    private func headerOrbPoint(_ id: String) -> CGPoint? {
+        guard let i = scene.columns.first(where: { $0.conversation.id == id })?.island, !i.isHiddenOrHasHiddenAncestor else { return nil }
+        let b = scene.dock.view.convert(i.planetButton.bounds, from: i.planetButton)
+        let p = CGPoint(x: b.midX, y: b.midY)
+        aim(id, p, ["button": rectList(b), "draggable": rectList(scene.dock.view.convert(i.draggableOrbRect, from: i)), "canDragOrb": i.canDragOrb])
+        return p
+    }
+    private func rectList(_ r: CGRect) -> [Double] { [Double(r.minX), Double(r.minY), Double(r.width), Double(r.height)] }
+    /// Diagnostics: what the product's own orb hit test and AppKit's hit test find at the point about to be clicked.
+    private func aim(_ id: String, _ p: CGPoint, _ extra: [String: Any]) {
+        let w = window.window, q = toWindow(p)
+        let hit = w.contentView.flatMap { $0.hitTest(q) }.map { String(describing: type(of: $0)) } ?? "nil"
+        var e = extra; e["id"] = id; e["target"] = scene.orbInputTarget(at: p) ?? "nil"; e["hitView"] = hit; e["at"] = [Double(p.x), Double(p.y)]
+        log("orb-switch aim", e)
+    }
+    /// A left click with modifier keys held from mouse-down to mouse-up (the gesture policy reads them at mouse-down).
+    private func modifiedClick(_ p: CGPoint, _ flags: NSEvent.ModifierFlags) async {
+        hover(p); pointer = p; markPointer()
+        postMouse(.leftMouseDown, at: p, flags: flags); await sleep(0.06)
+        if !flags.isEmpty {
+            log("orb-switch pressed", ["flags": Int(flags.rawValue), "orbPressed": scene.orbInput.isPressed,
+                                       "menuOpen": scene.orbMenu.state.isOpen, "dragging": scene.isDragging])
+        }
+        postMouse(.leftMouseUp, at: p, pressure: 0, flags: flags); await sleep(0.05)
+    }
+    /// INPUT_ORB_CG=1: a modified click is built as a CGEvent with its flags and handed to AppKit through
+    /// NSEvent(cgEvent:), as `wheel` does, instead of the NSEvent factory (the r3 run on 11-09: Option and Control
+    /// clicks from the factory changed nothing, while the same clicks without modifiers worked). Never posted to the
+    /// system: the real pointer and the user's input stay untouched.
+    private func postMouse(_ type: NSEvent.EventType, at p: CGPoint, pressure: Float = 1, flags: NSEvent.ModifierFlags) {
+        guard ProcessInfo.processInfo.environment["INPUT_ORB_CG"] == "1", !flags.isEmpty else { post(type, at: p, pressure: pressure, flags: flags); return }
+        let kinds: [NSEvent.EventType: (CGEventType, CGMouseButton)] = [
+            .leftMouseDown: (.leftMouseDown, .left), .leftMouseUp: (.leftMouseUp, .left),
+            .rightMouseDown: (.rightMouseDown, .right), .rightMouseUp: (.rightMouseUp, .right)]
+        guard let kind = kinds[type] else { post(type, at: p, pressure: pressure, flags: flags); return }
+        let (cgType, button) = kind
+        let w = (pointerWindow ?? window).window, q = toWindow(p)
+        let screen = w.convertPoint(toScreen: q), top = NSScreen.screens.first?.frame.maxY ?? 0
+        guard let e = CGEvent(mouseEventSource: nil, mouseType: cgType, mouseCursorPosition: CGPoint(x: screen.x, y: top - screen.y), mouseButton: button) else {
+            log("orb-switch post-failed", ["type": Int(type.rawValue), "flags": Int(flags.rawValue), "route": "cg"]); return
+        }
+        var f: CGEventFlags = []
+        if flags.contains(.option) { f.insert(.maskAlternate) }
+        if flags.contains(.control) { f.insert(.maskControl) }
+        if flags.contains(.command) { f.insert(.maskCommand) }
+        if flags.contains(.shift) { f.insert(.maskShift) }
+        e.flags = f
+        e.setIntegerValueField(.mouseEventClickState, value: 1)
+        e.setDoubleValueField(.mouseEventPressure, value: Double(pressure))
+        e.setIntegerValueField(CGEventField(rawValue: 51)!, value: Int64(w.windowNumber))
+        setEventWindowLocation(e, CGPoint(x: q.x, y: w.frame.height - q.y))
+        guard let ns = NSEvent(cgEvent: e) else { log("orb-switch post-failed", ["type": Int(type.rawValue), "route": "nsevent"]); return }
+        NSApp.postEvent(ns, atStart: false)
+    }
+    private func rightClick(_ p: CGPoint, hold: Double = 0.06) async {
+        hover(p); pointer = p; markPointer()
+        post(.rightMouseDown, at: p); await sleep(hold)
+        post(.rightMouseUp, at: p, pressure: 0); await sleep(0.05)
+    }
+    private func arrow(_ code: UInt16) {
+        let chars: [UInt16: Int] = [123: NSLeftArrowFunctionKey, 124: NSRightArrowFunctionKey, 125: NSDownArrowFunctionKey, 126: NSUpArrowFunctionKey]
+        key(code, chars[code].flatMap { UnicodeScalar($0) }.map { String(Character($0)) } ?? "", [.function, .numericPad])
+    }
+    private func returnKey() { key(36, "\r") }
+    /// The centre of a main-menu row, in scene points (OrbContextMenu.rowRect: separators after Peek, Customize and Fork).
+    private func menuRowPoint(_ action: OrbMenuAction) -> CGPoint {
+        let m = scene.orbMenu.main.frame, row = action.rawValue
+        let separators = [3, 5, 7].filter { row >= $0 }.count
+        let local = CGPoint(x: 5 + 113, y: 38 + CGFloat(row * 24 + separators * 9) + 12)
+        return scene.dock.view.convert(CGPoint(x: m.minX + local.x, y: m.minY + local.y), from: scene.orbMenu)
+    }
+    /// The rows Down reaches from nothing, once around the menu: what a person can pick with the keyboard. Read from
+    /// the menu's own selection rather than from OrbMenuAction, so it holds however the menu decides a row is disabled.
+    private func keyboardRows() async -> [Int] {
+        var seen: [Int] = []
+        for _ in 0...OrbMenuAction.allCases.count {
+            arrow(125); await sleep(0.08)
+            guard let s = scene.orbMenu.state.selected, !seen.contains(s) else { break }
+            seen.append(s)
+        }
+        return seen
+    }
+    private func settleOrbs() async {
+        await sleep(0.3)
+        for _ in 0..<40 where scene.isMoving { await sleep(0.05) }
+        await sleep(0.4)
+    }
+
+    private func orbSwitch() async {
+        guard app.mock != nil else { log("orb-switch abort", ["reason": "no mock: this scene never runs on a live Core"]); return }
+        requireKey("orb-switch")
+        // Diagnostics (11-09 r3 run): every mouse button event the app dispatches during the scene, with its flags.
+        let probe = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp]) { [weak self] e in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let flags = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                self.log("orb-switch event", ["type": Int(e.type.rawValue), "flags": Int(flags.rawValue), "option": flags.contains(.option),
+                                              "control": flags.contains(.control), "ours": e.window === self.window.window,
+                                              "at": [Double(e.locationInWindow.x), Double(e.locationInWindow.y)]])
+            }
+            return e
+        }
+        defer { if let probe { NSEvent.removeMonitor(probe) } }
+        if scene.isFocused { scene.leaveFocused(reason: "input-run"); await sleep(1.6) }
+        await settleOrbs()
+        log("orb-switch begin", ["columns": columnIDs(), "dockOrbs": dockOrbIDs(), "current": scene.current, "state": state()])
+
+        // 1. Option-click a Dock orb: it takes the full column, the full one goes to the clicked orb's Dock slot.
+        //    1a on an orb at rest, 1b on one a live Tide presents (M11.34 Q2: Option-click or the orb menu goes to it;
+        //    a plain click there toggles the pin).
+        let tideOrb = dockOrbIDs().first { scene.dock.tideOwns($0) }
+        if let id = dockOrbIDs().first(where: { $0 != tideOrb }), let p = dockOrbPoint(id) {
+            let full = scene.current, slot = scene.order.firstIndex(of: id)
+            await modifiedClick(p, .option); await settleOrbs()
+            orbCheck("option-dock", scene.current == id && scene.order.firstIndex(of: full) == slot && scene.dock.items[full]?.role == .orb,
+                     ["id": id, "full": full, "slot": slot ?? -1])
+        } else { orbCheck("option-dock", false, ["reason": "no Dock orb at rest"]) }
+        if let id = tideOrb, scene.dock.tideOwns(id), let p = dockOrbPoint(id) {
+            let full = scene.current, slot = scene.order.firstIndex(of: id)
+            await modifiedClick(p, .option); await settleOrbs()
+            orbCheck("option-dock-tide", scene.current == id && scene.order.firstIndex(of: full) == slot,
+                     ["id": id, "full": full, "slot": slot ?? -1])
+        } else { log("orb-switch skip", ["what": "option-dock-tide", "reason": "no live Tide on a Dock orb"]) }
+
+        // 2. Option-click a brief column's planet: it becomes full, the column order stays.
+        if let id = columnIDs().first(where: { $0 != scene.current }), let p = headerOrbPoint(id) {
+            let before = columnIDs()
+            await modifiedClick(p, .option); await settleOrbs()
+            orbCheck("option-brief", scene.current == id && columnIDs() == before, ["id": id, "before": before, "after": columnIDs()])
+        } else { orbCheck("option-brief", false, ["reason": "no brief column"]) }
+
+        // 3. Option-click the full planet: a bounce, no change. 4. Option-Command on a Dock orb: nothing at all.
+        let full = scene.current, order = scene.order
+        if let p = headerOrbPoint(full) {
+            await modifiedClick(p, .option); await settleOrbs()
+            orbCheck("option-full", scene.current == full && scene.order == order, ["id": full])
+        }
+        if let id = dockOrbIDs().first, let p = dockOrbPoint(id) {
+            await modifiedClick(p, [.option, .command]); await settleOrbs()
+            orbCheck("option-command-dock", scene.current == full && scene.order == order && !scene.orbMenu.state.isOpen, ["id": id])
+        }
+
+        // 5. Right-click a Dock orb: the menu opens; the keyboard skips New Sidechat and Remove (M11.41 / M11.37); Esc
+        //    closes the menu. Then the Fork row on an orb with history (M11.36b, mock only): a whole-thread fork joins the
+        //    Dock as a new orb, the columns and the full one stay, and its history is the source's from the start.
+        if let id = dockOrbIDs().first, let p = dockOrbPoint(id) {
+            await rightClick(p); await sleep(0.25)
+            let open = scene.orbMenu.state.isOpen, menu = orbMenuState()
+            orbCheck("right-click-opens", open, ["id": id, "menu": menu])
+            let reached = await keyboardRows()
+            let skipped = OrbMenuAction.allCases.filter { !reached.contains($0.rawValue) }.map(\.title)
+            orbCheck("disabled-rows", open && Set(skipped) == ["New Sidechat", "Remove from Organic"], ["reached": reached, "skipped": skipped])
+            escape(); await sleep(0.3)
+            orbCheck("esc-closes", !scene.orbMenu.state.isOpen)
+        }
+        // A conversation whose only turn is still running (mock D) has no completed history: Fork adds nothing and
+        // says so next to the orb. Skipped when no Dock orb is in that state.
+        if let id = dockOrbIDs().first(where: { scene.conversation($0).map { !$0.items.isEmpty && $0.completedForkItems.isEmpty } == true }),
+           let p = dockOrbPoint(id) {
+            let order = scene.order, columns = columnIDs(), full = scene.current
+            await rightClick(p); await sleep(0.25)
+            let open = scene.orbMenu.state.isOpen
+            if open { await modifiedClick(menuRowPoint(.fork), []) }
+            var toast = ""
+            for _ in 0..<40 {
+                await sleep(0.05)
+                if scene.orbToast.superview != nil { toast = scene.orbToast.label.stringValue; break }
+            }
+            await sleep(0.5)
+            orbCheck("fork-no-history-toast", open && scene.order == order && columnIDs() == columns && scene.current == full
+                     && !scene.orbMenu.state.isOpen && toast.contains("No completed history"), ["id": id, "toast": toast])
+            // Let the toast expire so it cannot sit over the next orb's click.
+            for _ in 0..<160 { if scene.orbToast.superview == nil { break }; await sleep(0.05) }
+        }
+        // The fork's history is the source's completed history, captured right before the click (a turn may finish
+        // while the menu is open, so the snapshot after the fork is accepted too), and a prefix of the source's rows.
+        if let id = dockOrbIDs().first(where: { scene.conversation($0).map { !$0.completedForkItems.isEmpty } == true }),
+           let p = dockOrbPoint(id), let source = scene.conversation(id) {
+            let order = scene.order, columns = columnIDs(), full = scene.current
+            await rightClick(p); await sleep(0.25)
+            let open = scene.orbMenu.state.isOpen
+            let before = source.completedForkItems.map(\.text)
+            if open { await modifiedClick(menuRowPoint(.fork), []) }
+            var fork: String?
+            for _ in 0..<80 {
+                await sleep(0.05)
+                fork = scene.order.first { !order.contains($0) }
+                if fork != nil { break }
+            }
+            await settleOrbs()
+            let f = fork.flatMap { scene.conversation($0) }
+            let after = source.completedForkItems.map(\.text)
+            let sourceTexts = source.items.map(\.text), forkTexts = f?.items.map(\.text) ?? []
+            let prefix = !forkTexts.isEmpty && forkTexts.count <= sourceTexts.count && Array(sourceTexts.prefix(forkTexts.count)) == forkTexts
+            orbCheck("fork-adds-dock-orb", open && fork != nil && fork.map { scene.dock.items[$0]?.role == .orb } == true
+                     && columnIDs() == columns && scene.current == full && !scene.orbMenu.state.isOpen,
+                     ["id": id, "fork": fork ?? "nil", "title": f?.title ?? "", "columns": columnIDs(), "full": scene.current,
+                      "toast": scene.orbToast.superview == nil ? "" : scene.orbToast.label.stringValue])
+            orbCheck("fork-whole-history", prefix && (forkTexts == before || forkTexts == after),
+                     ["id": id, "sourceItems": sourceTexts.count, "completed": before.count, "forkItems": forkTexts.count])
+        } else { orbCheck("fork-adds-dock-orb", false, ["reason": "no Dock orb with completed history"]) }
+
+        // 6. Keyboard: Down selects Swap, Right opens its submenu, Return swaps into the first free column.
+        if let id = dockOrbIDs().first, let p = dockOrbPoint(id) {
+            await rightClick(p); await sleep(0.25)
+            arrow(125); await sleep(0.1); arrow(124); await sleep(0.2)
+            let menu = orbMenuState(), cols = scene.orbMenu.state.columns
+            let target = scene.orbMenu.state.selectedColumn.flatMap { cols.indices.contains($0) ? cols[$0].id : nil }
+            returnKey(); await sleep(0.35); await settleOrbs()
+            orbCheck("keyboard-swap-into-column", target != nil && columnIDs().contains(id) && target.map { !columnIDs().contains($0) } == true
+                     && !scene.orbMenu.state.isOpen, ["id": id, "target": target ?? "nil", "menu": menu, "columns": columnIDs()])
+        }
+
+        // 7. Control-click a brief planet opens the same menu; Down three times reaches Peek; Return peeks.
+        if let id = columnIDs().first(where: { $0 != scene.current }), let p = headerOrbPoint(id) {
+            await modifiedClick(p, .control); await sleep(0.25)
+            let open = scene.orbMenu.state.isOpen
+            for _ in 0..<3 { arrow(125); await sleep(0.08) }
+            let selected = scene.orbMenu.state.selected
+            returnKey(); await sleep(0.8)
+            orbCheck("control-click-peek", open && selected == OrbMenuAction.peek.rawValue && scene.peeking == id,
+                     ["id": id, "selected": selected ?? -1, "peeking": scene.peeking ?? "nil"])
+            scene.dismissPeek(); await sleep(0.6)
+        }
+
+        // 8. Right button held onto Rename…, released after 0.4 s: Customize Chat opens (mock), Esc leaves it unchanged.
+        if let id = dockOrbIDs().first, let p = dockOrbPoint(id), let c = scene.conversation(id) {
+            let title = c.title
+            hover(p); pointer = p; markPointer(); post(.rightMouseDown, at: p); await sleep(0.12)
+            let q = scene.orbMenu.state.isOpen ? menuRowPoint(.rename) : p
+            for k in 1...24 {
+                let f = CGFloat(k) / 24; pointer = CGPoint(x: p.x + (q.x - p.x) * f, y: p.y + (q.y - p.y) * f); markPointer()
+                post(.rightMouseDragged, at: pointer); await sleep(1 / 120)
+            }
+            await sleep(0.2); post(.rightMouseUp, at: pointer, pressure: 0); await sleep(0.8)
+            let sheet = scene.customizeSheet.isShowing
+            orbCheck("right-hold-rename-opens-customize", sheet, ["id": id])
+            escape(); await sleep(0.6)
+            if scene.customizeSheet.isShowing { scene.customizeSheet.dismiss(); await sleep(0.6) }
+            orbCheck("rename-cancelled-unchanged", c.title == title && !scene.customizeSheet.isShowing, ["id": id])
+        }
+
+        // 9. Archive from the menu (Up from nothing selects the last enabled row), then Undo on the toast. Mock only.
+        if let id = dockOrbIDs().last, let p = dockOrbPoint(id), let c = scene.conversation(id) {
+            let slot = scene.order.firstIndex(of: id)
+            await rightClick(p); await sleep(0.25)
+            arrow(126); await sleep(0.1)
+            let selected = scene.orbMenu.state.selected
+            returnKey(); await sleep(0.4); await settleOrbs()
+            orbCheck("archive", selected == OrbMenuAction.archive.rawValue && c.archived && !scene.order.contains(id) && scene.orbToast.superview != nil,
+                     ["id": id, "selected": selected ?? -1])
+            let b = scene.orbToast.undoButton
+            if b.superview != nil, !b.isHidden {
+                let r = scene.dock.view.convert(b.bounds, from: b)
+                await modifiedClick(CGPoint(x: r.midX, y: r.midY), []); await sleep(0.4); await settleOrbs()
+            }
+            orbCheck("archive-undo", !c.archived && scene.order.firstIndex(of: id) == slot, ["id": id, "slot": slot ?? -1, "now": scene.order.firstIndex(of: id) ?? -1])
+        }
+
+        // 10. A click outside an open menu closes it and does not reach what is under it.
+        if let id = dockOrbIDs().first, let p = dockOrbPoint(id) {
+            let current = scene.current, order = scene.order
+            await rightClick(p); await sleep(0.25)
+            let open = scene.orbMenu.state.isOpen
+            let outside = CGPoint(x: scene.size.width * 0.5, y: scene.size.height * 0.45)
+            await modifiedClick(outside, []); await sleep(0.4)
+            orbCheck("outside-click-closes-no-passthrough", open && !scene.orbMenu.state.isOpen && scene.current == current && scene.order == order)
+        }
+
+        // 11. Open in Focused from the keyboard (Down twice), then back to Auto.
+        if let id = dockOrbIDs().first, let p = dockOrbPoint(id) {
+            await rightClick(p); await sleep(0.25)
+            arrow(125); await sleep(0.08); arrow(125); await sleep(0.08)
+            returnKey(); await sleep(0.4); await settleOrbs()
+            orbCheck("keyboard-open-in-focused", scene.isFocused && scene.current == id, ["id": id])
+            if scene.isFocused { scene.leaveFocused(reason: "input-run"); await sleep(1.6) }
+        }
+        // Leftovers only with the pointer off the Dock (hover lifts the node under it) and once the scene says it has
+        // stopped moving: a node still springing home is not left over.
+        hover(nil); await settleOrbs()
+
+        // A live Tide (a mock notice, every ~20 s) lays the Dock out itself: its owner widens and its neighbours make room,
+        // so their frames are not their spring slots (M11.36b real-window run b1, 11-10). Those positions belong to M11.34's
+        // own gates; here they are logged apart, and every other leftover still fails the scene.
+        let tides = scene.dock.items.keys.filter { scene.dock.tideHasNotice($0) }.sorted()
+        var left = leftovers(expectedWindows: 1), tideLaid: [String] = []
+        if !tides.isEmpty { tideLaid = left.filter { $0.hasPrefix("dock node ") && $0.contains(" stands at ") }; left.removeAll { tideLaid.contains($0) } }
+        let failed = orbChecks.filter { ($0["pass"] as? Bool) != true }.compactMap { $0["name"] as? String }
+        log("orb-switch summary", ["checks": orbChecks.count, "failed": failed, "leftovers": left, "tides": tides, "tideLaid": tideLaid, "state": state()])
+    }
+
+    // MARK: M11.39 LL hover (sun-hover, Claude for lane B 11-10, decision #136)
+    //
+    // The LL hover through the product's own entries. Pointer moves are posted and also handed to SunHoverNode the way
+    // its tracking area hands them on (posted moves never reach tracking areas; Peek above does the same through
+    // RootView's path). Clicks and keys are posted events, so the window's hit test, the node's mouseDown and the
+    // controller's local monitor all run. Mock only: Profile, Sign Out and the attention swap act on conversations.
+    // SUN_EXPECT lists the satellites the build exposes (default 2,3,4,5: B step one hides New Chat and Add).
+    private var sunChecks: [[String: Any]] = []
+
+    private func sunCheck(_ name: String, _ pass: Bool, _ extra: [String: Any] = [:]) {
+        var e = extra; e["name"] = name; e["pass"] = pass
+        sunChecks.append(e)
+        log("sun-hover check", e.merging(["sun": scene.sunHoverReadout]) { a, _ in a })
+    }
+    private var sunReadout: [String: Any] { scene.sunHoverReadout }
+    private func sunPhase() -> String { sunReadout["phase"] as? String ?? "?" }
+    private func sunSatellites() -> [Int] { sunReadout["satellites"] as? [Int] ?? [] }
+    private func sunLabels() -> [Int] { sunReadout["labels"] as? [Int] ?? [] }
+    private func sunPanel() -> String { sunReadout["panel"] as? String ?? "?" }
+    private func sunIdleResources() -> Bool {
+        ["timers", "monitors", "displayLinks"].allSatisfy { (sunReadout[$0] as? Int) == 0 }
+    }
+    private var sunExpected: [Int] {
+        let raw = ProcessInfo.processInfo.environment["SUN_EXPECT"] ?? "2,3,4,5"
+        return raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+    }
+    /// The geometry the controller builds from the LL the Dock measures (AutoSceneSunHover.geometry), in overlay points.
+    private func sunGeometry() -> SunHoverGeometry? {
+        guard let m = scene.dock.meMeasurement else { return nil }
+        return SunHoverGeometry(llCenter: m.center, dockBaseline: m.center.y, bounds: scene.overlayPlane.bounds, backingScale: scene.scale)
+    }
+    private func sunPoint(_ overlay: CGPoint) -> CGPoint { scene.dock.view.convert(overlay, from: scene.overlayPlane) }
+    private func llPoint() -> CGPoint? { sunGeometry().map { sunPoint($0.llCenter) } }
+    private func satellitePoint(_ raw: Int) -> CGPoint? {
+        guard let g = sunGeometry(), let key = SunHoverSatellite(rawValue: raw) else { return nil }
+        return sunPoint(g.satelliteCenter(key))
+    }
+    /// The badge as the board places it: LL centre + (17, -17) (SunHover02 showPanel('attention', SUN_X + 17, SUN_Y - 17)).
+    private func badgePoint() -> CGPoint? { sunGeometry().map { sunPoint(CGPoint(x: $0.llCenter.x + 17, y: $0.llCenter.y - 17)) } }
+    private func sunAway() -> CGPoint { CGPoint(x: scene.size.width * 0.5, y: scene.size.height * 0.4) }
+
+    /// One pointer step: posted (RootView and anything else on the event path), the scene's hover path, and the node's
+    /// tracking callback with the window point converted as its mouseMoved converts it.
+    private func sunStep(_ p: CGPoint) {
+        pointer = p; markPointer()
+        post(.mouseMoved, at: p, pressure: 0)
+        hover(p)
+        if let node = scene.sunHover?.node { node.onPointer?(node.convert(toWindow(p), from: nil)) }
+    }
+    /// `each` runs after every step (sampling what moves while the pointer travels).
+    private func sunMove(to q: CGPoint, over seconds: Double, each: (() -> Void)? = nil) async {
+        let a = pointer, steps = max(1, Int(seconds * 120))
+        for k in 1...steps {
+            let f = CGFloat(k) / CGFloat(steps), e = f * f * (3 - 2 * f)
+            sunStep(CGPoint(x: a.x + (q.x - a.x) * e, y: a.y + (q.y - a.y) * e))
+            each?()
+            await sleep(1 / 120)
+        }
+    }
+    /// Shown satellites' centre y, the badge's and the LL's frames, in the Dock view's points (#160: none of them may move
+    /// under the pointer while the hover prepares or shows).
+    /// How far the resting badge centre lies inside the badge's actual hit region (negative: outside; no badge: -1).
+    private func sunRestMargin(_ rest: CGRect, _ now: CGRect?) -> CGFloat {
+        guard let now else { return -1 }
+        let r = SunHoverNode.badgeHitRect(now), c = CGPoint(x: rest.midX, y: rest.midY)
+        return min(c.x - r.minX, r.maxX - c.x, c.y - r.minY, r.maxY - c.y)
+    }
+    private func sunPlaces() -> (satellites: [Int: CGFloat], badge: CGRect?, ll: CGRect?) {
+        var out: [Int: CGFloat] = [:]
+        if let node = scene.sunHover?.node {
+            for (key, r) in node.satelliteFrames { out[key.rawValue] = scene.dock.view.convert(r, from: node).midY }
+        }
+        return (out, scene.dock.sunHoverBadgeRect, scene.dock.meMeasurement?.frame)
+    }
+    /// Rest on a point while a person's hand trembles by a fraction of a point (moves keep arriving).
+    private func sunRest(_ seconds: Double) async {
+        let p = pointer, began = CACurrentMediaTime()
+        var k = 0
+        while CACurrentMediaTime() - began < seconds {
+            k += 1; sunStep(CGPoint(x: p.x + (k % 2 == 0 ? 0.3 : -0.3), y: p.y)); await sleep(1 / 30)
+        }
+        sunStep(p)
+    }
+    private func sunClick(_ p: CGPoint) async {
+        await sunMove(to: p, over: 0.08)
+        await press(p); await sleep(0.05); release(); await sleep(0.05)
+    }
+    /// Visible panel rows with their accessibility label and centre, in scene points.
+    private func sunRows() -> [(label: String, at: CGPoint)] {
+        guard let panel = scene.sunHover?.node.panel, !panel.isHidden else { return [] }
+        var out: [(label: String, at: CGPoint)] = []
+        func walk(_ v: NSView) {
+            for s in v.subviews {
+                if let r = s as? SunHoverPanelView.Row, !r.isHiddenOrHasHiddenAncestor, r.alphaValue > 0.5 {
+                    let b = scene.dock.view.convert(r.bounds, from: r)
+                    out.append((r.accessibilityLabel() ?? "", CGPoint(x: b.midX, y: b.midY)))
+                }
+                walk(s)
+            }
+        }
+        walk(panel)
+        return out
+    }
+    /// Opens the hover from far away: the pointer comes in to the LL and rests; true once the exposed satellites show.
+    private func sunOpen() async -> Bool {
+        guard let ll = llPoint() else { return false }
+        if hypot(pointer.x - ll.x, pointer.y - ll.y) < 30 { await sunMove(to: sunAway(), over: 0.15); await sunRest(0.5) }
+        await sunMove(to: ll, over: 0.2); await sunRest(0.6)
+        return Set(sunSatellites()) == Set(sunExpected)
+    }
+    private func sunLeave() async {
+        await sunMove(to: sunAway(), over: 0.12); await sunRest(1.0)
+    }
+
+    private func sunHoverScene() async {
+        guard app.mock != nil else { log("sun-hover abort", ["reason": "no mock: this scene never runs on a live Core"]); return }
+        requireKey("sun-hover")
+        if scene.isFocused { scene.leaveFocused(reason: "input-run"); await sleep(1.6) }
+        await settleOrbs()
+        guard scene.sunHover != nil, let ll = llPoint() else { log("sun-hover abort", ["reason": "no SunHover controller or no LL"]); return }
+        let expected = sunExpected
+        // The controller reads the real mouse location (retire suppression, geometry changes, the native shield).
+        // This driver posts events and leaves the real pointer alone, so it supplies the point it is driving.
+        scene.sunHover?.pointerOverride = { [weak self] in
+            guard let self, let node = self.scene.sunHover?.node else { return nil }
+            return node.convert(self.toWindow(self.pointer), from: nil)
+        }
+        pointer = sunAway(); sunStep(pointer); await sunRest(0.5)
+        log("sun-hover begin", ["ll": [Double(ll.x), Double(ll.y)], "expected": expected, "columns": columnIDs(), "current": scene.current, "sun": sunReadout])
+        // 0. At rest, before any hover: the corner badge sits on the LL (Sol r4's offscreen idle capture drew the LL's
+        //    front decoration, glow and badge, at the window's origin; the recording shows what a real window does).
+        if let badge = scene.dock.sunHoverBadgeRect, let frame = scene.dock.meMeasurement?.frame {
+            sunCheck("idle-badge-on-ll", abs(badge.maxX - frame.maxX - 3) < 1 && abs(badge.minY - frame.minY + 3) < 1,
+                     ["badge": [Double(badge.minX), Double(badge.minY), Double(badge.width), Double(badge.height)],
+                      "ll": [Double(frame.minX), Double(frame.minY), Double(frame.width), Double(frame.height)]])
+        }
+
+        // 1. The first entry after the window was set up (attach retires the controller with the pointer outside;
+        //    r1 review item 1: the suppression it sets was never cleared). Timeline of the satellites every 50 ms.
+        await sunMove(to: ll, over: 0.2)
+        var timeline: [[Any]] = [], firstAll: Double?
+        let entered = CACurrentMediaTime()
+        while CACurrentMediaTime() - entered < 1.2 {
+            let t = CACurrentMediaTime() - entered, s = sunSatellites()
+            timeline.append([Double(Int(t * 1000)) / 1000, s, sunPhase()])
+            if firstAll == nil && Set(s) == Set(expected) { firstAll = t }
+            sunStep(CGPoint(x: ll.x + (timeline.count % 2 == 0 ? 0.3 : -0.3), y: ll.y)); await sleep(0.05)
+        }
+        sunCheck("first-entry-opens", firstAll != nil && firstAll! < 0.8, ["allAt": firstAll ?? -1, "timeline": timeline])
+
+        // 2. Along the arc to each exposed satellite: exactly that one label, never two. On the way (#160) no satellite's
+        //    centre y, nor the LL's centre, may move: the pointer leaves the Dock and the Dock must not fall back. The badge
+        //    follows the opened 42 pt LL by 3 pt (#188), so it is not frozen; instead its resting centre must stay inside
+        //    the badge's actual hit region, at least 2 pt from every edge, for the whole hover.
+        var labelsSeen: [[Int]] = [], twoAtOnce = false
+        let rest = sunPlaces()
+        var ySpread: [Int: (lo: CGFloat, hi: CGFloat)] = [:], badgeMargin = CGFloat.infinity, llMoved: CGFloat = 0, samples = 0
+        let sample = { [self] in
+            let now = sunPlaces(); samples += 1
+            for (k, y) in now.satellites { let s = ySpread[k] ?? (y, y); ySpread[k] = (min(s.lo, y), max(s.hi, y)) }
+            if let a = rest.badge { badgeMargin = min(badgeMargin, sunRestMargin(a, now.badge)) }
+            if let a = rest.ll, let b = now.ll { llMoved = max(llMoved, hypot(b.midX - a.midX, b.midY - a.midY)) }
+        }
+        for raw in expected {
+            guard let p = satellitePoint(raw) else { continue }
+            await sunMove(to: p, over: 0.25, each: sample)
+            let began = CACurrentMediaTime()
+            while CACurrentMediaTime() - began < 0.45 { if sunLabels().count > 1 { twoAtOnce = true }; sunStep(p); sample(); await sleep(1 / 30) }
+            labelsSeen.append(sunLabels())
+        }
+        sunCheck("one-label-per-satellite", !twoAtOnce && labelsSeen == expected.map { [$0] }, ["seen": labelsSeen, "twoAtOnce": twoAtOnce])
+        let spread = ySpread.mapValues { Double($0.hi - $0.lo) }
+        sunCheck("satellites-hold-y-on-the-way", samples > 0 && Set(expected).isSubset(of: Set(ySpread.keys)) && spread.values.allSatisfy { $0 < 0.5 }
+                    && badgeMargin >= 2 && llMoved < 0.5,
+                 ["ySpread": Dictionary(uniqueKeysWithValues: spread.map { (String($0.key), $0.value) }), "badgeMargin": Double(badgeMargin.isFinite ? badgeMargin : -1),
+                  "llMoved": Double(llMoved), "samples": samples,
+                  "restY": Dictionary(uniqueKeysWithValues: rest.satellites.map { (String($0.key), Double($0.value)) })])
+
+        // 3. Leaving: the 260 ms grace keeps it open, then everything folds and the controller keeps nothing running.
+        await sunMove(to: sunAway(), over: 0.06)
+        let graceOpen = !sunSatellites().isEmpty
+        await sunRest(1.2)
+        sunCheck("leave-grace-then-fold", graceOpen && sunSatellites().isEmpty && sunLabels().isEmpty && sunPhase() == "idle",
+                 ["openRightAfterLeaving": graceOpen])
+        sunCheck("idle-holds-nothing", sunIdleResources() && sunPanel() == "none")
+
+        // 4. Badge dwell opens attention; rows match the badge count (conversations, not events), at most six visible.
+        if let b = badgePoint() {
+            await sunMove(to: b, over: 0.2); await sunRest(0.45)
+            // #160: the Dock no longer rises under a preparing or open hover; the badge only follows the opened LL by 3 pt
+            // (#188), so a pointer aimed at its resting point opens attention (counted since the #160 patch round), with
+            // the resting centre at least 2 pt inside the badge's hit region.
+            let margin = rest.badge.map { sunRestMargin($0, scene.dock.sunHoverBadgeRect) } ?? -1
+            sunCheck("badge-at-rest-point-opens", sunPanel() == "attention" && margin >= 2,
+                     ["point": [Double(b.x), Double(b.y)], "margin": Double(margin),
+                      "badge": (scene.dock.sunHoverBadgeRect).map { [Double($0.minX), Double($0.minY), Double($0.width), Double($0.height)] } ?? []])
+            // Then as a hand does: follow the badge to where it is now.
+            if sunPanel() != "attention", let r = scene.dock.sunHoverBadgeRect {
+                await sunMove(to: sunPoint(CGPoint(x: r.midX, y: r.midY)), over: 0.12); await sunRest(0.45)
+            }
+            let ids = sunReadout["attentionIDs"] as? [String] ?? [], count = sunReadout["attentionCount"] as? Int ?? -1
+            let rows = sunRows()
+            sunCheck("badge-opens-attention", sunPanel() == "attention" && count == ids.count && count > 0 && rows.count == min(6, count),
+                     ["count": count, "ids": ids, "rows": rows.map { $0.label }])
+            // 5. A row swaps its conversation in and closes the panel.
+            if sunPanel() == "attention", let first = ids.first, let row = rows.first {
+                await sunClick(row.at); await sleep(0.6); await settleOrbs()
+                sunCheck("attention-row-swaps-in", scene.current == first && sunPanel() == "none", ["id": first, "row": row.label, "current": scene.current])
+            } else { sunCheck("attention-row-swaps-in", false, ["reason": "no attention row"]) }
+        } else { sunCheck("badge-opens-attention", false, ["reason": "no LL"]) }
+        await sunLeave()
+
+        // 6. A click on the LL without moving opens account; resting there keeps it open (r1 review item 1, second half).
+        if await sunOpen(), let p = llPoint() {
+            await press(p); await sleep(0.05); release(); await sleep(0.4)
+            let opened = sunPanel() == "account"
+            await sunRest(1.2)
+            sunCheck("ll-click-account-stays", opened && sunPanel() == "account", ["openedAtFirst": opened])
+            // 7. Esc closes the top layer only: panel, then satellites; on the LL it stays shut until the pointer leaves.
+            escape(); await sleep(0.35)
+            let afterOne = (sunPanel(), sunSatellites())
+            escape(); await sunRest(0.9)
+            let afterTwo = (sunPanel(), sunSatellites())
+            await sunMove(to: sunAway(), over: 0.12); await sunRest(0.5)
+            let reopened = await sunOpen()
+            sunCheck("esc-layers-and-suppression", afterOne.0 == "none" && Set(afterOne.1) == Set(expected) && afterTwo.0 == "none"
+                     && afterTwo.1.isEmpty && reopened, ["afterOne": [afterOne.0, afterOne.1] as [Any], "afterTwo": [afterTwo.0, afterTwo.1] as [Any], "reopened": reopened])
+        } else { sunCheck("ll-click-account-stays", false, ["reason": "hover did not open"]) }
+        await sunLeave()
+
+        // 8. Usage satellite opens Usage; a click outside closes it and does not reach what is under it.
+        if expected.contains(SunHoverSatellite.usage.rawValue), await sunOpen(), let u = satellitePoint(SunHoverSatellite.usage.rawValue) {
+            await sunClick(u); await sleep(0.4)
+            let opened = sunPanel() == "usage"
+            let current = scene.current, order = scene.order, columns = columnIDs()
+            await press(sunAway()); await sleep(0.05); release(); await sleep(0.5)
+            sunCheck("usage-panel-and-outside-click", opened && sunPanel() == "none" && scene.current == current && scene.order == order
+                     && columnIDs() == columns && scene.peeking == nil, ["opened": opened])
+        }
+        await sunLeave()
+
+        // 9. Settings satellite opens account.
+        if expected.contains(SunHoverSatellite.settings.rawValue), await sunOpen(), let s = satellitePoint(SunHoverSatellite.settings.rawValue) {
+            await sunClick(s); await sleep(0.4)
+            sunCheck("settings-satellite-account", sunPanel() == "account")
+            escape(); await sleep(0.3); escape(); await sleep(0.3)
+        }
+        await sunLeave()
+
+        // 10. Pressing the LL and moving past the drag threshold folds the satellites (FOLD, not a cut) and opens no panel.
+        if await sunOpen(), let p = llPoint() {
+            hover(p); await press(p); await carry(to: CGPoint(x: p.x, y: p.y - 10), over: 0.1)
+            var trace: [[Any]] = []
+            let began = CACurrentMediaTime()
+            while CACurrentMediaTime() - began < 0.5 { trace.append([Double(Int((CACurrentMediaTime() - began) * 1000)) / 1000, sunSatellites()]); await sleep(1 / 30) }
+            await carry(to: p, over: 0.15); release(); await sleep(0.2)
+            await sunMove(to: sunAway(), over: 0.1); await settleOrbs(); await sunRest(0.6)
+            sunCheck("ll-drag-folds", sunSatellites().isEmpty && sunPanel() == "none" && !scene.isFocused && !scene.isDragging, ["trace": trace])
+        }
+
+        // 11. Search and Sidebar go to Normie through the existing mode switch; Search then holds a text field's focus.
+        for (name, raw) in [("search", SunHoverSatellite.search.rawValue), ("sidebar", SunHoverSatellite.sidebar.rawValue)] where expected.contains(raw) {
+            guard await sunOpen(), let p = satellitePoint(raw) else { sunCheck("\(name)-goes-normie", false, ["reason": "hover did not open"]); continue }
+            await sunClick(p); await sleep(3.0)
+            let responder = NSApp.keyWindow?.firstResponder
+            let typing = responder is NSTextView || responder is NSTextField
+            let normie = window.shell.mode == .normie
+            sunCheck("\(name)-goes-normie", normie && (name != "search" || typing),
+                     ["mode": window.shell.mode.rawValue, "responder": responder.map { String(describing: type(of: $0)) } ?? "nil"])
+            if window.shell.mode == .normie { modeKey(); await sleep(3.0) }
+            await settleOrbs()
+            hover(nil)
+        }
+
+        // 12. Losing key while open: everything folds and the controller holds no timer, monitor or display link.
+        if await sunOpen() {
+            otherApp(); await sleep(0.8)
+            let folded = sunSatellites().isEmpty && sunPanel() == "none" && sunIdleResources()
+            activate(); await sleep(0.8)
+            sunCheck("resign-key-cleans-up", folded)
+            requireKey("sun-hover after the app switch")
+        }
+
+        // 13. In and out quickly three times, then a real rest: it still opens.
+        if let p = llPoint() {
+            for _ in 0..<3 { await sunMove(to: p, over: 0.08); await sunMove(to: sunAway(), over: 0.08) }
+            await sunMove(to: p, over: 0.15); await sunRest(0.6)
+            sunCheck("quick-passes-then-rest-opens", Set(sunSatellites()) == Set(expected))
+        }
+
+        // Leftovers with the pointer far away once the scene stops moving (InputRun.leftovers counts a visible overlay).
+        await sunLeave(); hover(nil); await settleOrbs()
+        sunCheck("final-idle", sunPhase() == "idle" && sunIdleResources())
+        // The mock keeps sending notices: the ones deferred while the hover was open are replayed when it closes, and a
+        // Tide displaces Dock orbs by design. That is not a hover leftover. Record it, dismiss it the way Escape would,
+        // and judge the leftovers once it has returned.
+        let tideAtEnd = "\(scene.dock.tideProbe["phase"] ?? "idle") \(scene.dock.tideProbe["owner"] ?? "")"
+        let leftWithTide = leftovers(expectedWindows: 1)
+        var tideWait = 0.0
+        if !leftWithTide.isEmpty {
+            while tideWait < 8, !leftovers(expectedWindows: 1).isEmpty {
+                _ = scene.dock.dismissTide(); await sleep(0.25); tideWait += 0.25
+            }
+        }
+        let left = leftovers(expectedWindows: 1)
+        let failed = sunChecks.filter { ($0["pass"] as? Bool) != true }.compactMap { $0["name"] as? String }
+        log("sun-hover summary", ["checks": sunChecks.count, "failed": failed, "leftovers": left, "tideAtEnd": tideAtEnd,
+                                  "leftoversWithTide": leftWithTide, "tideWait": tideWait, "state": state(), "sun": sunReadout])
+    }
+
     // MARK: Pointer and keys
 
     private func toWindow(_ p: CGPoint) -> CGPoint { (pointerWindow ?? window).scene.dock.view.convert(p, to: nil) }
 
-    private func post(_ type: NSEvent.EventType, at p: CGPoint, pressure: Float = 1) {
+    private func post(_ type: NSEvent.EventType, at p: CGPoint, pressure: Float = 1, flags: NSEvent.ModifierFlags = []) {
         eventNumber += 1
         let w = pointerWindow ?? window
-        guard let e = NSEvent.mouseEvent(with: type, location: toWindow(p), modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
-                                         windowNumber: w.window.windowNumber, context: nil, eventNumber: eventNumber, clickCount: 1, pressure: pressure) else { return }
+        guard let e = NSEvent.mouseEvent(with: type, location: toWindow(p), modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                                         windowNumber: w.window.windowNumber, context: nil, eventNumber: eventNumber, clickCount: 1, pressure: pressure) else {
+            log("post-failed", ["type": Int(type.rawValue), "flags": Int(flags.rawValue)]); return
+        }
         NSApp.postEvent(e, atStart: false)
     }
 
@@ -1734,7 +2413,16 @@ extension AppController {
         if scene.isDragging { out.append("scene still dragging") }
         if let phase = dock.headerOrbDragging?.phase, phase != .idle { out.append("header gesture \(phase.rawValue)") }
         if dock.headerReturnCount != 0 { out.append("\(dock.headerReturnCount) header returns unfinished") }
-        let overlay = scene.overlayPlane.subviews.filter { !$0.isHidden }
+        // M11.37 keeps its trash passage in the overlay for the scene's lifetime (AutoSceneTrash.init) and hides only its
+        // children, so it is a leftover only while it carries, prompts or is pressed. The type name is checked first so the
+        // lazy trash controller is never created by this check.
+        let overlay = scene.overlayPlane.subviews.filter { view in
+            guard !view.isHidden else { return false }
+            if String(describing: type(of: view)) == "OrbTrashPassage", view === scene.orbTrash.presentation.view {
+                return scene.orbTrash.hasForegroundSurface
+            }
+            return true
+        }
         if !overlay.isEmpty { out.append("overlay has \(overlay.map { String(describing: type(of: $0)) })") }
         let carried = scene.columns.compactMap(\.island).filter(\.orbIsCarried).compactMap { $0.configuration?.id }
         if !carried.isEmpty { out.append("header orb still carried: \(carried)") }

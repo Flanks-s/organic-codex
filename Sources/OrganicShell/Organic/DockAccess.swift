@@ -1,6 +1,70 @@
 import AppKit
 import SwiftUI
 
+/// M11.39 values only. Existing AutoScene meClicked/meHover/contextMenu entry points below are unchanged.
+struct SunHoverAccess {
+    struct Item: Equatable {
+        let satellite: SunHoverSatellite
+        let title: String
+        let available: Bool
+        let disabledInLayout: Bool
+        var enabled: Bool { available && !disabledInLayout }
+    }
+    struct AccountItem: Equatable { let action: SunHoverAction; let title: String; let enabled: Bool; let dividerBefore: Bool }
+    let satellites: [Item]
+    let accountTitle: String
+    let accountPlan: String?
+    let accountSource: AccountUsageIdentity.Source
+    let accountItems: [AccountItem]
+    init(account: AccountUsage, available: Set<SunHoverSatellite>, disabledInLayout: Set<SunHoverSatellite>,
+         accountActions: Set<SunHoverActionKey>, sidebarShown: Bool = false) {
+        let titles = ["New Chat", "Add to Dock", "Search", sidebarShown ? "Hide Sidebar" : "Show Sidebar", "Usage", "Settings"]
+        satellites = SunHoverSatellite.allCases.map {
+            .init(satellite: $0, title: titles[$0.rawValue], available: available.contains($0), disabledInLayout: disabledInLayout.contains($0))
+        }
+        accountTitle = account.identity.name ?? "Unknown account"; accountPlan = account.identity.plan; accountSource = account.identity.source
+        let items: [(SunHoverActionKey, SunHoverAction, String, Bool)] = [(.profile, .profile, accountTitle, false), (.settings, .settings, "Settings…", false),
+                        (.shortcuts, .shortcuts, "Keyboard Shortcuts", false), (.collapse, .collapse, "Collapse to Side", false),
+                        (.signOut, .signOut, "Sign Out", true)]
+        accountItems = items.map { key, action, title, divider in
+            .init(action: action, title: title, enabled: accountActions.contains(key), dividerBefore: divider)
+        }
+    }
+}
+enum SunHoverActionKey: Hashable { case profile, settings, shortcuts, collapse, signOut }
+
+struct SunHoverUsagePanel {
+    struct Row {
+        let title: String
+        let used: Double?
+        let resetsAt: Date?
+        var percentage: String { used.map { "\(Int(($0 * 100).rounded()))%" } ?? "—" }
+        var detail: String { used == nil ? "Not reported" : percentage }
+    }
+    let accountVersion: UInt64
+    let currentConversationID: String?
+    let rows: [Row]
+    /// B passes current (the key column), never Peek's transient conversation.
+    @MainActor init(account: AccountUsage, current: Conversation?) {
+        accountVersion = account.version; currentConversationID = current?.id
+        func title(_ window: AccountUsage.Window, fallback: String) -> String {
+            guard let minutes = window.windowMinutes else { return fallback }
+            if minutes == 10_080 { return "Weekly limit" }
+            if minutes % 1_440 == 0 { return "\(minutes / 1_440)-day limit" }
+            if minutes % 60 == 0 { return "\(minutes / 60)-hour limit" }
+            return "\(minutes)-minute limit"
+        }
+        var result = [Row(title: title(account.primary, fallback: "Primary limit"), used: account.primary.used, resetsAt: account.primary.resetsAt),
+                      Row(title: title(account.secondary, fallback: "Secondary limit"), used: account.secondary.used, resetsAt: account.secondary.resetsAt)]
+        var context: Double?
+        if let current, current.backendThreadID != nil || current.items.contains(where: { $0.rowKind == .user }),
+           let used = current.exactTokensUsed, used >= 0, let limit = current.contextLimit, limit > 0 {
+            context = min(1, Double(used) / Double(limit))
+        }
+        result.append(.init(title: "Context, this conversation", used: context, resetsAt: nil)); rows = result
+    }
+}
+
 // The dock's other ways in (OrganicDockProjection, OrganicDockBridge): me's account menu and quota card, a node's
 // right-click menu, the sub-agents sheet, and VoiceOver's buttons with actions in place of the gestures (f008, f057,
 // f073, f120, f197).
@@ -41,14 +105,16 @@ extension AutoScene {
                              secondaryUsed: store.quotaWeekReported ? shown(store.quotaWeek) : nil,
                              primaryResetsAt: store.quotaFiveHourResetsAt, secondaryResetsAt: store.quotaWeekResetsAt,
                              primaryWindowMinutes: store.quotaFiveHourWindowMinutes, secondaryWindowMinutes: store.quotaWeekWindowMinutes)
-        return .init(name: NormieAccount.prototype.name, plan: NormieAccount.prototype.plan, quota: quota, organic: true, fullyFocused: fullyFocused)
+        let identity = store.accountUsage.identity
+        return .init(name: identity.name ?? "Unknown account", plan: identity.plan ?? "Plan not reported", quota: quota, organic: true, fullyFocused: fullyFocused)
     }
 
-    /// Whether `p` is on me (at least 44 × 44 to hit).
+    /// Whether `p` is on me (SunHover02's 48 x 48 hit area).
     func isMe(at p: CGPoint) -> Bool { dock.draggable(at: p) == DockNode.meID }
 
     /// A click on me: the account menu, above it (OrganicDockProjection click).
     func meClicked() {
+        if let sunHover { sunHover.llClick(); return }
         guard let frame = dock.meFrame else { return }
         meController.update(meModel())
         meController.presentAccountMenu(anchor: frame, in: overlayPlane)
@@ -56,6 +122,10 @@ extension AutoScene {
 
     /// The pointer over me for half a second shows the quota card; leaving, pressing or dragging takes it away.
     func meHover(_ p: CGPoint?) {
+        if let sunHover {
+            let point = p == nil && drag?.id == DockNode.meID && drag?.began == false ? lastPointer : p
+            sunHover.pointerChanged(point); return
+        }
         let inside = p.map { isMe(at: $0) } ?? false
         guard inside != meHovered, let frame = dock.meFrame else { return }
         meHovered = inside
@@ -68,22 +138,23 @@ extension AutoScene {
     /// Right-click on a dock node: me's account menu, or the conversation's (OrganicDockBridge.identityMenu):
     /// Customize Chat…, its symbol, its colour, and its sub-agents.
     func contextMenu(at p: CGPoint) -> NSMenu? {
-        if isMe(at: p) { meController.update(meModel()); return meController.makeAccountMenu() }
+        if isMe(at: p) { sunHover?.retire(); meController.update(meModel()); return meController.makeAccountMenu() }
         guard let id = dock.hoverNode(at: p)?.id, let c = conversation(id) else { return nil }
         let menu = NSMenu(); menu.autoenablesItems = false
         menu.addItem(ActionMenuItem("Customize Chat…") { [weak self] in self?.customize(id) })
         let identity = orbIdentity(of: c)
         let symbols = NSMenu()
-        for symbol in OrbCelestialBody.allCases {
-            let item = ActionMenuItem(symbol.name) { [weak self] in self?.setIdentity(id, symbol: symbol) }
-            item.image = Self.menuImage(symbol); item.state = identity.symbol == symbol ? .on : .off
+        for bodyID in BodyIdentityAdapter.choices {
+            let item = ActionMenuItem(bodyID.capitalized) { [weak self] in self?.setIdentity(id, bodyID:bodyID) }
+            item.isEnabled=store.canSelectBodyIdentity
+            item.image = BodyResources.shared.menuImage(bodyID); item.state = identity.resolvedBodyID == bodyID ? .on : .off
             symbols.addItem(item)
         }
         let symbolItem = NSMenuItem(title: "Symbol", action: nil, keyEquivalent: ""); symbolItem.submenu = symbols; menu.addItem(symbolItem)
         let colors = NSMenu()
         for tint in OrbTint.allCases {
             let item = ActionMenuItem(String(describing: tint).capitalized) { [weak self] in self?.setIdentity(id, tint: tint) }
-            item.image = Self.swatchImage(tint); item.state = identity.tint == tint ? .on : .off
+            item.image = Self.swatchImage(tint); item.state = (identity.tintID ?? String(describing:identity.tint)) == String(describing:tint) ? .on : .off
             colors.addItem(item)
         }
         let colorItem = NSMenuItem(title: "Color", action: nil, keyEquivalent: ""); colorItem.submenu = colors; menu.addItem(colorItem)
@@ -97,9 +168,10 @@ extension AutoScene {
     }
 
     /// The symbol or the colour alone, as Customize writes them (Core identitySymbol / identityTint).
-    func setIdentity(_ id: String, symbol: OrbCelestialBody? = nil, tint: OrbTint? = nil) {
-        guard let c = conversation(id) else { return }
-        if let symbol { c.identitySymbol = String(describing: symbol) }
+    func setIdentity(_ id: String, symbol: OrbCelestialBody? = nil, tint: OrbTint? = nil, bodyID: String? = nil) {
+        guard let c = conversation(id),store.canSelectBodyIdentity else { return }
+        let bodyID=bodyID ?? symbol.map { String(describing:$0) }
+        if let bodyID { guard BodyIdentityAdapter.choices.contains(bodyID) else { return }; c.identitySymbol=bodyID }
         if let tint { c.identityTint = String(describing: tint) }
         store.changed(c)
         onIdentityChanged?(c)
@@ -108,15 +180,7 @@ extension AutoScene {
 
     /// The planet's glyph as a template image, as the product's Identity.menuImage.
     static func menuImage(_ symbol: OrbCelestialBody) -> NSImage {
-        let image = NSImage(size: CGSize(width: 16, height: 16), flipped: true) { rect in
-            guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
-            ctx.addPath(OrbCelestialGlyph(symbol: symbol).path(in: rect.insetBy(dx: 1, dy: 1)).cgPath)
-            ctx.setStrokeColor(NSColor.black.cgColor); ctx.setLineWidth(1.3); ctx.setLineCap(.round); ctx.setLineJoin(.round)
-            ctx.strokePath()
-            return true
-        }
-        image.isTemplate = true
-        return image
+        BodyResources.shared.menuImage(String(describing:symbol)) ?? NSImage(size:CGSize(width:16,height:16))
     }
 
     /// The colour as a filled dot, as the product's Identity.swatchImage.

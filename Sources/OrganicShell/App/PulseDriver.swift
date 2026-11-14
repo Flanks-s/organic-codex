@@ -410,7 +410,7 @@ import QuartzCore
         for plane in [scene.sceneView, scene.nativePlane, scene.dockView, scene.overlayPlane, scene.peekNode.view] {
             plane.frame = host.bounds; host.addSubview(plane)
         }
-        var time = CACurrentMediaTime() + 3600
+        var time = VerificationClock.modelOrigin
         let began = time, epoch = Date().timeIntervalSince1970
         let delayed=ProcessInfo.processInfo.environment["PULSE_DRIVER_LATE"] == "1"
         var lastInputTime=time

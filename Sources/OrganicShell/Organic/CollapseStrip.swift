@@ -49,6 +49,10 @@ import AppKit
     private let hint = NativeLabel(labelWithString: "swipe to go back")
     private let me = NSGlassEffectView()
     private var meDecoration: OrbComponent?
+    var sunHoverBadge: ((Conversation?) -> OrbBadge?)? { didSet { configureMe() } }
+    private let attentionCache = SunHoverAttentionCache()
+    private(set) var attentionBadge: OrbBadge?
+    var sunHoverRenderedBadge: OrbBadge? { meDecoration?.meSemanticBadge }
     var motionProfile: DisplayProfile?
     var motionEnabled = true
     var motionTime: (() -> Double)?
@@ -128,7 +132,8 @@ import AppKit
         me.style = .regular
         addSubview(me)
         let decoration = OrbComponent(id: "collapse.me", glassView: me)
-        decoration.configure(makeMeConfiguration(store: store, initials: NormieAccount.prototype.initials, drawingSize: 36, backingScale: scale, reduceMotion: Motion.reduce, ambient: true, isKeyWindow: true))
+        let configuration = makeMeConfiguration(store: store, initials: NormieAccount.prototype.initials, drawingSize: 36, backingScale: scale, reduceMotion: Motion.reduce, ambient: true, isKeyWindow: true, badgeProjection: { self.projectedBadge() })
+        decoration.configure(configuration)
         addSubview(decoration.backView, positioned: .below, relativeTo: me)
         addSubview(decoration.frontView, positioned: .above, relativeTo: me)
         meDecoration = decoration
@@ -153,7 +158,7 @@ import AppKit
         members = next
         if !members.contains(where: { $0.id == shown }), let first = members.first { show(first.id, animated: false) }
         if members.isEmpty { showNothing() }
-        rebuildOrbs(); needsLayout = true
+        rebuildOrbs(); configureMe(); needsLayout = true
     }
 
     /// No member left (the last one archived): nothing is projected, not the one that went (WindowModel.remove;
@@ -174,6 +179,9 @@ import AppKit
     /// (CollapseView observes the same store; organic audit B02).
     private var observation: UUID?
     private func storeChanged(_ c: Conversation) {
+        let before = attentionBadge
+        let next = projectedBadge(changed: c)
+        if next != before { configureMe() }
         guard members.contains(where: { $0.id == c.id }) else { return }
         configureOrbs()
         guard c.id == shown, draft == nil else { return }
@@ -190,8 +198,17 @@ import AppKit
         configureOrbs(); configureMe(); needsLayout = true
     }
     private func configureMe() {
-        meDecoration?.configure(makeMeConfiguration(store: store, initials: NormieAccount.prototype.initials, drawingSize: 36, backingScale: scale, reduceMotion: Motion.reduce,
-                                                    ambient: ambientRunning, isKeyWindow: window?.isKeyWindow ?? true))
+        let configuration = makeMeConfiguration(store: store, initials: NormieAccount.prototype.initials, drawingSize: 36, backingScale: scale, reduceMotion: Motion.reduce,
+                                               ambient: ambientRunning, isKeyWindow: window?.isKeyWindow ?? true, badgeProjection: { self.projectedBadge() })
+        meDecoration?.configure(configuration)
+    }
+    private func projectedBadge(changed: Conversation? = nil) -> OrbBadge? {
+        if let sunHoverBadge { attentionBadge = sunHoverBadge(changed) }
+        else {
+            _ = attentionCache.update(store: store, members: Set(members.map(\.id)), changed: changed)
+            attentionBadge = attentionCache.value.badge
+        }
+        return attentionBadge
     }
 
     private func rebuildOrbs() {

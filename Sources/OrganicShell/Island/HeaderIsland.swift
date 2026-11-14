@@ -11,6 +11,7 @@ struct HeaderIslandConfiguration: Equatable {
     var band:CGFloat = 0
     var signals=HeaderIslandSignals()
     var activitySerial:UInt64=0
+    var bodyPhase:BodyPhaseEvent?=nil
     var satellitesRetired=false
     var contextDescription="Context usage has not been reported"
     var contextLimit:String?
@@ -122,6 +123,7 @@ struct HeaderIslandConfiguration: Equatable {
     private var pulse:HeaderPulsePresentation?
     private var pulsePresentationRetired=false
     private var modeContentFrozen=false
+    private var browserPresentationSuspended=false
     private var pulseSuppressed:[(NSView,Bool)]=[]
     private var pulseShowing:Bool { pulse?.isEnabled == true && pulse?.isHidden == false }
     var pulseClockRunning:Bool { pulse?.clockRunning == true }
@@ -179,6 +181,12 @@ struct HeaderIslandConfiguration: Equatable {
         titleButton.focus={ [weak self] in self?.setKeyboardFocus($0) }
         eventButton.focus={ [weak self] in self?.setKeyboardFocus($0) }
         planetButton.invoke={ [weak self] in guard let self,self.canAct else { return }; self.actions.customize?() }
+        planetButton.routePointerDown={ [weak self] event in
+            guard let self,event.type != .leftMouseDown && event.type != .rightMouseDown || self.canDragOrb else { return false }
+            return self.orbDragProvider()?.routeOrbInput(from:self,event:event) == true
+        }
+        planetButton.cancelRoutedPointer={ [weak self] in self?.orbDragProvider()?.cancelOrbDrag() == true }
+        planetButton.routesContextInput={ [weak self] in self?.canDragOrb == true && self?.orbDragProvider() != nil }
         planetButton.beginPointerGesture={ [weak self] event in
             guard let self,self.canDragOrb else { return nil }
             return self.orbDragProvider()?.beginOrbDrag(from:self,event:event)
@@ -309,10 +317,11 @@ struct HeaderIslandConfiguration: Equatable {
         if selector == #selector(NSResponder.cancelOperation(_:)) { cancelRename(); return true }; return false
     }
     override func cancelOperation(_ sender:Any?) { escape() }
-    private var canAct:Bool { !disposed && !isHiddenOrHasHiddenAncestor && !promotionInProgress && presentationActive && configuration?.active == true }
+    private var canAct:Bool { !browserPresentationSuspended && !disposed && !isHiddenOrHasHiddenAncestor && !promotionInProgress && presentationActive && configuration?.active == true }
     private func publishExpansion() { actions.expansion?(state.expanded,state.pinned); syncOutsideMonitor() }
 
     private func render(animated:Bool) {
+        if browserPresentationSuspended { setAccessibilityHidden(true); return }
         restorePulseContent()
         guard let c=configuration else { return }
         if !c.active || !presentationActive {satelliteOpeners.values.forEach{$0.cancel()}}
@@ -384,6 +393,9 @@ struct HeaderIslandConfiguration: Equatable {
             renameField.frame=r; renameField.font = .systemFont(ofSize:g.titleFont,weight:.semibold); renameField.participates=c.active && presentationActive
         } else { renameField.participates=false; renameField.removeFromSuperview() }
         var oc=OrbConfiguration(content:c.variant == .newChat ? .seed:.identity(c.identity),drawingSize:56)
+        oc.bodyPhase=c.variant == .newChat ? nil:c.bodyPhase
+        oc.bodyOuter=g.planet.width
+        oc.bodyUnknown=c.signals.context == nil
         oc.context=c.variant == .newChat ? 0:c.signals.context ?? 0
         oc.running=c.variant != .newChat && c.signals.running
         oc.activitySerial=c.variant == .newChat ? 0:c.activitySerial
@@ -680,7 +692,7 @@ struct HeaderIslandConfiguration: Equatable {
         timer?.invalidate(); timer=nil
         // Not canAct: that goes false when the window has been idle for 8 s (the ambient hold), and an event line then
         // stayed on screen until the next input (user 10-30; 14.7 s with a 2.2 s hold in a real-path run).
-        guard !disposed,configuration?.active == true,let deadline=state.nextDeadline else { return }
+        guard !browserPresentationSuspended,!disposed,configuration?.active == true,let deadline=state.nextDeadline else { return }
         let timer=Timer(timeInterval:max(0.001,deadline-now()),repeats:false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -1177,6 +1189,16 @@ extension HeaderIsland {
         if !active { timer?.invalidate(); timer=nil; popover?.close(); stopMotionExposure() }
         pulse?.setAmbientActive(active)
         render(animated:false); schedule(); syncOutsideMonitor()
+    }
+    /// Independent of ambient policy: preserve semantic state while another full surface owns this column.
+    func setBrowserPresentationSuspended(_ suspended:Bool) {
+        guard browserPresentationSuspended != suspended else { return }
+        browserPresentationSuspended=suspended
+        if suspended {
+            timer?.invalidate();timer=nil;popover?.close();stopMotionExposure();pulse?.suspend()
+            satelliteOpeners.values.forEach{$0.cancel()};setAccessibilityHidden(true)
+        }
+        render(animated:false);schedule();syncOutsideMonitor()
     }
 }
 

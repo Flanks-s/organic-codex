@@ -1,0 +1,47 @@
+name: ci-gates
+
+# Offscreen gates for one lane snapshot (pushed by tools/mac/ci.py to ci/<item>-<n>). Not for main.
+on:
+  push:
+    branches: ["ci/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: xcode-27   # standard runner, free for public repositories; never the billed -xlarge
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          sysctl -n hw.ncpu hw.memsize
+      - name: Cache SwiftPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .build/repositories
+          key: spm-${{ runner.os }}-${{ hashFiles('Package.resolved') }}
+      - name: Display settings (Reduce Motion and Reduce Transparency off, decision 171)
+        run: zsh ci/display.sh set "$RUNNER_TEMP/display"
+      - name: Build release app
+        run: zsh scripts/build.sh
+      - name: Offscreen suites (ci/suites.txt; timings do not count)
+        run: |
+          zsh ci/display.sh check "$RUNNER_TEMP/display" "$RUNNER_TEMP/gates"
+          zsh ci/run-suites.sh "$RUNNER_TEMP/gates"
+      - name: Upload suite logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gates-${{ github.sha }}
+          path: ${{ runner.temp }}/gates
+          retention-days: 14
+          if-no-files-found: ignore

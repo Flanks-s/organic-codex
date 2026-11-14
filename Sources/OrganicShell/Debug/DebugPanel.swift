@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
     override func loadView(){
         super.loadView();view.setAccessibilityLabel("Debug panel")
         form.heading("Mock Engine")
+        DebugBrowserOrb.add(to: form, session: session)
         pausedButton=form.toggle("Paused",value:session.paused){[weak self] in guard let self else{return};_ = session.setPaused(!session.paused)}
         stepButton=form.button("Step"){[weak self] in _ = self?.session.step()}
         backgroundButton=form.toggle("Background sub-agent events",value:session.backgroundEvents){[weak self] in guard let self else{return};_ = session.setBackgroundEvents(!session.backgroundEvents)}

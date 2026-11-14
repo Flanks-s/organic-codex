@@ -71,6 +71,7 @@ struct CoreError: Error, Sendable, Equatable, LocalizedError {
     let message: String
     let data: JSONValue?
     let httpStatus: Int?
+    var requestSent: Bool? = nil
 
     var errorDescription: String? { message }
 }

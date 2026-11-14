@@ -30,8 +30,10 @@ import Foundation
     private var ticks = 0, injectionSerial = 0
     private var elapsed: TimeInterval = 0, backgroundElapsed: TimeInterval = 0
     private var started = false
+    private var phaseDemonstrationPrepared = false
     private var loop: Task<Void, Never>?
     private let clock: any CoreRuntimeClock
+    var browserReplay: MockBrowserReplay?
     private var advancing = false
     private(set) var playbackSettings = MockPlaybackSettings()
     private(set) var isPlaybackActive = false
@@ -73,6 +75,11 @@ import Foundation
                 .command("render --batch scenes/*.json --no-texture-reload", "Rendered 240 frames in 3m 12s (was 6m 40s)."),
                 .write("Caching the textures across frames cut the batch time roughly in half."), .finish], endless: true)
         }
+        prepareBodyIdentities()
+        if ProcessInfo.processInfo.environment["ORGANIC_M1145_PHASE_DEMO"] == "1",!phaseDemonstrationPrepared {
+            phaseDemonstrationPrepared=true
+            for e in MockPhaseDemonstration.prepare(store:store) {emit(e.method,thread:e.thread,e.params)}
+        }
         guard live, !isPlaybackActive else { return }
         isPlaybackActive = true
         playbackGeneration &+= 1
@@ -88,7 +95,18 @@ import Foundation
             }
         }
     }
+    /// Every entry seeds through start(), before any host can display its first frame.
+    /// Mock identities have no durable domain; live stores retain their persistence guard.
+    private func prepareBodyIdentities() {
+        guard !store.bodyIdentityMigrationRequired,!store.bodyIdentitiesReady else { return }
+        let records=store.conversations.map { BodyIdentityMigration.Record(id:$0.id,title:$0.title,identityIndex:$0.identityIndex,symbol:$0.identitySymbol,tint:$0.identityTint) }
+        let migrated=BodyIdentityMigration.migrate(records,choices:ConversationBodyIdentity.choices)
+        for (c,identity) in zip(store.conversations,migrated) { c.identitySymbol=identity.symbol; c.identityTint=identity.tint }
+        store.bodyIdentitiesReady=true
+        for c in store.conversations { store.changed(c) }
+    }
     func stopPlayback() {
+        if !canPlay { browserReplay?.disable(); browserReplay = nil }
         playbackGeneration &+= 1
         isPlaybackActive = false; loop?.cancel(); loop = nil
     }
@@ -135,6 +153,11 @@ import Foundation
         advancing = true; defer { advancing = false }
         ticks += 1
         elapsed += interval
+        browserReplay?.advance(by: interval)
+        if phaseDemonstrationPrepared {
+            for e in MockPhaseDemonstration.notifications(at:ticks) {emit(e.method,thread:e.thread,e.params)}
+            return
+        }
         for c in store.conversations {
             guard canPlay else { stopPlayback(); return }
             guard c.running, !store.isOffline(c) else { continue }

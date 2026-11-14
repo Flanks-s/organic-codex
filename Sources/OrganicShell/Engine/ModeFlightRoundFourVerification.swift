@@ -293,7 +293,7 @@ import QuartzCore
             native.frame=CGRect(x:0,y:0,width:96,height:64);native.backgroundColor=NSColor.blue.cgColor
             curtain.frame=native.frame;curtain.backgroundColor=NSColor.green.cgColor;curtain.opacity=1
             root.addSublayer(native);root.addSublayer(curtain)
-            let epoch=CACurrentMediaTime()+3600
+            let epoch=VerificationClock.renderOrigin
             let fade=original.copy() as! CAAnimation;fade.beginTime=epoch+content.delay
             curtain.add(fade,forKey:"mode.source.turn")
             let renderer=OffscreenRenderer(size:CGSize(width:96,height:64),host:root,scale:scale)
@@ -343,7 +343,7 @@ import QuartzCore
                     let glass=CALayer();glass.frame=CGRect(x:24,y:24,width:16,height:16);glass.backgroundColor=NSColor(white:0.2,alpha:1).cgColor;glass.zPosition=7
                     root.addSublayer(glass);root.addSublayer(ink)
                     let renderer=OffscreenRenderer(size:CGSize(width:64,height:64),host:root,scale:scale)
-                    return renderer.render(at:CACurrentMediaTime()+3600)
+                    return renderer.render(at:VerificationClock.renderOrigin)
                 }
                 // The oracle only changes ordering; it never recaptures or redraws the native glyph.
                 check(render(actual.zPosition) == render(7.01),"A5 owned bitmap readback preserves board front-to-back order \(scale)x \(time)")

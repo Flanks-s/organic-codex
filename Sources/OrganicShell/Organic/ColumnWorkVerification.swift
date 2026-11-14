@@ -115,7 +115,7 @@ import QuartzCore
             let replay=MockReplay(store:store);replay.start(live:false)
             let scene=AutoScene(size:size,store:store,profile:.init(name:"Built-in fixture",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:autoScale)
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false;scene.columnExposureEnabled=enabled
-            var time=CACurrentMediaTime()+3600;scene.now={time};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
+            var time=VerificationClock.renderOrigin;scene.now={time};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             M10ColumnWorkTrace.reset();scene.showCaptures(true)
             check((counts()["column.viewport"] ?? 0)>0,"explicit capture comparison prepares bitmaps \(enabled)")

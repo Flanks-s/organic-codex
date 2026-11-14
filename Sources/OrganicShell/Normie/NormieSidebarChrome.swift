@@ -102,6 +102,32 @@ import AppKit
 }
 
 @MainActor final class NormieSidebarSpinner: NSProgressIndicator {
+    var running = false { didSet { syncAnimation() } }
+    var presented = true { didSet { syncAnimation() } }
+    private(set) var verificationAnimating = false
+    /// Native sidebar hosts can leave the screen through opacity/translation without being hidden.
+    static func setPresented(_ presented: Bool, in view: NSView) {
+        if let spinner = view as? NormieSidebarSpinner { spinner.presented = presented }
+        for child in view.subviews { setPresented(presented, in: child) }
+    }
+    private func syncAnimation() {
+        if window != nil && !isHiddenOrHasHiddenAncestor && running && presented {
+            startAnimation(nil)
+        } else {
+            stopAnimation(nil)
+        }
+    }
+    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); syncAnimation() }
+    override func viewDidHide() { super.viewDidHide(); syncAnimation() }
+    override func viewDidUnhide() { super.viewDidUnhide(); syncAnimation() }
+    override func startAnimation(_ sender: Any?) {
+        verificationAnimating = true
+        super.startAnimation(sender)
+    }
+    override func stopAnimation(_ sender: Any?) {
+        verificationAnimating = false
+        super.stopAnimation(sender)
+    }
     override func draw(_ dirtyRect: NSRect) {
         guard window == nil else { super.draw(dirtyRect); return }
         // A frozen mini spinner, because an offscreen indicator never starts a WindowServer clock.
@@ -119,12 +145,9 @@ import AppKit
 /// SidebarView uses IdentityGlyph(size: 15, weight: 2.2) inside a 16 pt slot.
 /// The generic NormiePlanetView is also used outside the sidebar, so keep this optical size local.
 @MainActor final class NormieSidebarIdentity: NormieView {
-    var identity = OrbIdentity.assigned(0) { didSet { needsDisplay = true } }
+    var identity = OrbIdentity.assigned(0) { didSet { if identity != oldValue { needsDisplay = true } } }
     override func draw(_ dirtyRect: NSRect) {
-        guard let cg = NSGraphicsContext.current?.cgContext else { return }
         let rect = CGRect(x:bounds.midX-7.5,y:bounds.midY-7.5,width:15,height:15)
-        cg.addPath(OrbCelestialGlyph(symbol: identity.symbol).path(in: rect).cgPath)
-        cg.setStrokeColor(identity.tint.color.cgColor); cg.setLineWidth(15/24*2.2)
-        cg.setLineCap(.round); cg.setLineJoin(.round); cg.strokePath()
+        BodyFaceDrawing.draw(identity.resolvedBodyID,in:rect)
     }
 }

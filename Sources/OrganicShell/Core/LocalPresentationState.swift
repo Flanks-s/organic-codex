@@ -9,9 +9,15 @@ import Foundation
     init(_ defaults: UserDefaults = .standard) { self.defaults = defaults }
     func read(key: String) throws -> Data? { defaults.data(forKey: key) }
     func write(_ data: Data, key: String) throws {
+        let previous=defaults.data(forKey:key)
         defaults.set(data, forKey: key)
         // Queue acceptance must wait for a preferences-domain write, not just its in-memory mutation.
-        guard defaults.synchronize() else { throw CoreWire.failure("The local presentation state could not be written to disk.") }
+        guard defaults.synchronize() else {
+            // A failed synchronization must not expose an uncommitted migration marker to the next reader.
+            if let previous { defaults.set(previous,forKey:key) } else { defaults.removeObject(forKey:key) }
+            _=defaults.synchronize()
+            throw CoreWire.failure("The local presentation state could not be written to disk.")
+        }
     }
 }
 @MainActor final class CoreMemoryStorage: CorePresentationStorage {
@@ -61,7 +67,7 @@ import Foundation
         init(_ p: Project) { id = p.id; name = p.name; device = p.deviceID; color = p.colorHex; pinned = p.pinned; path = p.path }
         var project: Project { .init(id: id, name: name, deviceID: device, colorHex: color, pinned: pinned, path: path) }
     }
-    struct Saved: Codable, Equatable { var version = 3; var chats: [ChatState]; var projects: [ProjectState]; var windows: [WindowState]; var newModel: ModelState; var accepted: [UUID] }
+    struct Saved: Codable, Equatable { var version = 3; var chats: [ChatState]; var projects: [ProjectState]; var windows: [WindowState]; var newModel: ModelState; var accepted: [UUID]; var bodyMigrationVersion: Int? = nil }
     let store: ConversationStore
     let scope: String
     private let storage: any CorePresentationStorage
@@ -78,12 +84,30 @@ import Foundation
     private(set) var accepted: Set<UUID> = []
     private(set) var windows: [WindowState] = []
     private(set) var lastError: String?
+    private var writeProtection: String?
     init(store: ConversationStore, scope: String, storage: any CorePresentationStorage = CoreDefaultsStorage(), clock: any CoreRuntimeClock = CoreSystemClock(), attachmentInputs: (any CoreAttachmentInputStorage)? = nil) {
         self.store = store; self.scope = scope; self.storage = storage; self.clock = clock
+        store.bodyIdentitiesReady = false
+        store.bodyIdentityMigrationRequired = true
         self.attachmentInputs = attachmentInputs ?? (storage as? CoreMemoryStorage)?.attachmentInputs ?? CoreFileAttachmentInputs()
         key = "organic.shell.presentation.v2." + Data(scope.utf8).base64EncodedString()
-        do { if let data = try storage.read(key: key) { saved = try JSONDecoder().decode(Saved.self, from: data) }; accepted = Set(saved?.accepted ?? []); windows = saved?.windows ?? [] }
-        catch { lastError = error.localizedDescription }
+        do {
+            if let data = try storage.read(key: key) {
+                struct Header: Decodable { let version: Int }
+                let version = try JSONDecoder().decode(Header.self, from: data).version
+                switch version {
+                case 2:
+                    // v2 has inline attachment inputs and no WindowState.files.
+                    // save() migrates these through persistFile and commits v3 only after success.
+                    saved = try JSONDecoder().decode(Saved.self, from: data)
+                case 3: saved = try JSONDecoder().decode(Saved.self, from: data)
+                default:
+                    writeProtection = "Presentation version \(version) is unsupported. The original state is read-only."
+                    lastError = writeProtection
+                }
+            }
+            accepted = Set(saved?.accepted ?? []); windows = saved?.windows ?? []
+        } catch { writeProtection = error.localizedDescription; lastError = writeProtection }
     }
     isolated deinit { pending?.cancel(); if let observation { store.removeObserver(observation) } }
     func localID(forBackend id: String) -> String? { saved?.chats.first { $0.backend == id }?.key }
@@ -97,6 +121,24 @@ import Foundation
             apply(state, to: c)
         }
         if let m = saved?.newModel { store.newChatSettings = m.settings }
+        if (saved?.bodyMigrationVersion ?? 0) >= BodyIdentityMigration.version { store.bodyIdentitiesReady = true }
+        else { do { try migrateBodyIdentities() } catch { lastError = error.localizedDescription } }
+    }
+    /// Change only identity fields and the body version in an existing durable snapshot.
+    /// Attachment conversion, queue recovery, drafts and window payloads are not part of this transaction.
+    private func migrateBodyIdentities() throws {
+        guard var value=saved else { try save(); return }
+        guard (value.bodyMigrationVersion ?? 0)<BodyIdentityMigration.version else { store.bodyIdentitiesReady=true; return }
+        let records=value.chats.map { BodyIdentityMigration.Record(id:$0.key,title:$0.title,identityIndex:$0.identityIndex,symbol:$0.symbol,tint:$0.tint) }
+        let migrated=BodyIdentityMigration.migrate(records,choices:ConversationBodyIdentity.choices)
+        for i in value.chats.indices { value.chats[i].symbol=migrated[i].symbol; value.chats[i].tint=migrated[i].tint }
+        value.bodyMigrationVersion=BodyIdentityMigration.version
+        try storage.write(JSONEncoder().encode(value),key:key)
+        saved=value; lastSnapshot=nil; lastError=nil
+        for state in value.chats {
+            if let c=store.conversation(state.key) ?? state.backend.flatMap(store.backendConversation) { c.identitySymbol=state.symbol; c.identityTint=state.tint }
+        }
+        store.bodyIdentitiesReady=true
     }
     func apply(to c: Conversation) { if let state = saved?.chats.first(where: { $0.key == c.id || $0.backend != nil && $0.backend == c.backendThreadID }) { apply(state, to: c) } }
     private func apply(_ s: ChatState, to c: Conversation) {
@@ -144,11 +186,13 @@ import Foundation
     func setWindows(_ values: [WindowState]) { windows = values; scheduleSave() }
     func observe() { guard observation == nil else { return }; observation = store.observe { [weak self] _ in self?.scheduleSave() } }
     func scheduleSave() {
+        guard writeProtection == nil else { return }
         guard pending == nil else { return } // Coalesce; a continuous stream must never postpone a draft indefinitely.
         let clock = clock
         pending = Task { [weak self] in do { try await clock.sleep(seconds: 0.2); try Task.checkCancellation(); try self?.save() } catch is CancellationError {} catch { self?.lastError = error.localizedDescription } }
     }
     func save() throws {
+        if let reason = writeProtection { throw CoreWire.failure(reason) }
         pending?.cancel(); pending = nil
         let chats = store.conversations.map { c in
             ChatState(key: c.id, backend: c.backendThreadID, title: c.title, project: c.projectID, device: c.deviceID, cwd: c.cwd,
@@ -156,13 +200,22 @@ import Foundation
                       identityIndex: c.identityIndex, symbol: c.identitySymbol, tint: c.identityTint, pinned: c.pinned,
                       unknown: c.sendOutcomeUnknown || !(outbound[c.id] ?? [:]).isEmpty, archivedUnsent: c.archived, outbound: (outbound[c.id] ?? [:]).values.sorted { $0.id.uuidString < $1.id.uuidString }.map(OutboundState.init))
         }
-        let snapshot = Saved(chats: chats, projects: store.projects.map(ProjectState.init), windows: windows, newModel: ModelState(store.newChatSettings), accepted: accepted.sorted { $0.uuidString < $1.uuidString })
+        var snapshot = Saved(chats: chats, projects: store.projects.map(ProjectState.init), windows: windows, newModel: ModelState(store.newChatSettings), accepted: accepted.sorted { $0.uuidString < $1.uuidString })
         if snapshot == lastSnapshot {
             // Also retire payloads prepared by a failed save when the user reverted to the committed draft.
             obsoleteInputs.formUnion(preparedInputs); obsoleteInputs.subtract(Self.references(saved)); preparedInputs = []
             lastError = nil; cleanupInputs(); return // Ordinary streaming deltas perform no file I/O.
         }
         var value = snapshot
+        value.bodyMigrationVersion = saved?.bodyMigrationVersion ?? 0
+        if (value.bodyMigrationVersion ?? 0) < BodyIdentityMigration.version {
+            let records = value.chats.map { BodyIdentityMigration.Record(id: $0.key, title: $0.title, identityIndex: $0.identityIndex, symbol: $0.symbol, tint: $0.tint) }
+            let migrated = BodyIdentityMigration.migrate(records, choices: ConversationBodyIdentity.choices)
+            for i in value.chats.indices { value.chats[i].symbol = migrated[i].symbol; value.chats[i].tint = migrated[i].tint }
+            // Match the eventual store identities before sidecar conversion changes the storage-only representation.
+            snapshot.chats = value.chats
+            value.bodyMigrationVersion = BodyIdentityMigration.version
+        }
         do {
             for i in value.chats.indices {
                 value.chats[i].files = try value.chats[i].files.map(persistFile)
@@ -175,6 +228,11 @@ import Foundation
             obsoleteInputs.formUnion(Self.references(saved)); obsoleteInputs.formUnion(preparedInputs)
             obsoleteInputs.subtract(Self.references(value)); preparedInputs = []
             saved = value; lastSnapshot = snapshot; lastError = nil; cleanupInputs()
+            // Publish only after storage accepts the entire versioned snapshot. Failed writes leave both sides old.
+            for state in value.chats {
+                if let c = store.conversation(state.key) { c.identitySymbol = state.symbol; c.identityTint = state.tint }
+            }
+            store.bodyIdentitiesReady = true
         } catch { lastError = error.localizedDescription; throw error }
     }
     private func persistFile(_ original: FileState) throws -> FileState {
@@ -215,5 +273,10 @@ import Foundation
         }
         if retrying, obsoleteInputs.isEmpty, lastError?.hasPrefix("Draft saved, but an unused attachment") == true { lastError = nil }
     }
-    func setIdentity(_ c: Conversation, symbol: String?, tint: String?) throws { c.identitySymbol = symbol; c.identityTint = tint; try save(); store.changed(c) }
+    func setIdentity(_ c: Conversation, symbol: String?, tint: String?) throws {
+        guard store.bodyIdentitiesReady, symbol == nil || ConversationBodyIdentity.choices.contains(symbol!) else { throw CoreWire.failure("The body identity is unavailable.") }
+        let previous = (c.identitySymbol, c.identityTint)
+        c.identitySymbol = symbol; c.identityTint = tint
+        do { try save(); store.changed(c) } catch { c.identitySymbol = previous.0; c.identityTint = previous.1; throw error }
+    }
 }

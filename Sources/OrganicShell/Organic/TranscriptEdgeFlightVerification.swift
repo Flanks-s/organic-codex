@@ -24,7 +24,7 @@ extension TranscriptHandoffVerification {
             let size=CGSize(width:1600,height:823)
             let scene=AutoScene(size:size,store:store,profile:.init(name:"edge-flights",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:scale,transcriptSessions:NativeTranscriptSessions())
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false;scene.setTranscriptPresentationActive(true)
-            var clock=CACurrentMediaTime()+3600;scene.now={clock};scene.install(members:members);scene.clock.invalidate()
+            var clock=VerificationClock.renderOrigin;scene.now={clock};scene.install(members:members);scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             clock=max(clock,scene.transitionEnd+0.1);scene.frame(clock);scene.settle();scene.clock.invalidate()
             let column=scene.columns[targetSlot]

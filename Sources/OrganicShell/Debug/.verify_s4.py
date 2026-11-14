@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): historical comparison. Kept, not deleted (#181).
 """S4 isolated verification: git archive baseline + only this task's Core/Debug files.
 
 No app launch, real transport, or backend data directories. Standalone suites use

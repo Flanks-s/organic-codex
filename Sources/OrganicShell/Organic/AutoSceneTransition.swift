@@ -444,6 +444,7 @@ extension AutoScene {
     }
 
     func commit(_ p: Prepared, reason: String, prewarmed hit: Bool, start: Double) {
+        sunHover?.retire(resumeTide: false)
         let work=M10ColumnWorkTrace.scope("scene.commit",["reason":reason,"hit":hit,"flights":p.flightCount]);defer{work.end()}
         discardNewChatPreparation()
         // A transition ends a peek at once (the bud's glass is taken over where it is); see DECISIONS #7.
@@ -453,6 +454,9 @@ extension AutoScene {
         let preparedAt = CACurrentMediaTime()
         let membersChanged = members.map(\.id) != p.members.map(\.id)
         members = p.members; current = p.current; order = p.order; scheme = p.scheme
+        orbTrash.committed(reason:reason,next:p.next)
+        browserPort?.committed(in: self, layout: p.next)
+        if membersChanged { sunHover?.refreshData() }
         if membersChanged { onMembersChange?(members) }
         let shown = Array(p.order.prefix(p.next.columns.count))
         columns = shown.compactMap { nodes[$0] }
@@ -585,6 +589,7 @@ extension AutoScene {
 
     /// The transition is over: drop the flights, show the rest forms, apply content that changed meanwhile.
     func settle() {
+        defer { dock.resumeSunHoverTide(source: "settle") }
         defer {onModeEndpointVisibilityChanged?()}
         clearReorderText()
         dirty.formUnion(pendingMovingRenders);pendingMovingRenders=[]
@@ -634,6 +639,7 @@ extension AutoScene {
     func frame(_ target: Double) {
         let work=M10ColumnWorkTrace.scope("scene.frame",["t":target]);defer{work.end()}
         endPressIfButtonReleased()
+        orbTrash.validateCarrier()
         handoffTranscripts(at:target)
         if let d = draftColumn {
             let wasMoving=d.isMoving
@@ -659,6 +665,8 @@ extension AutoScene {
         }
         // Header destinations are ready before the Dock computes and applies its single glass batch.
         dock.frame(at: target, elapsed: began >= 0 ? target - began : .infinity)
+        orbFlights.frame(target)
+        orbHint.frame(target)
         peekNode.placeCapsuleShadow(dock.peekCapsuleFrame)
     }
 }

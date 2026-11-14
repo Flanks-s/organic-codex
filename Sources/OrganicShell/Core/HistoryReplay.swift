@@ -16,12 +16,17 @@ import Foundation
     private var latestLifecycle: CoreEvent?
     private var baselineNotice: ConversationNoticeSnapshot?
     private(set) var lifecycleTurnIDs: Set<String> = []
+    private let initialCursor: Int
+    private var metadataCursors: [String: Int] = [:]
+    private var collabEvents: [CoreEvent] = []
 
     init(conversation c: Conversation, cursor: Int, seeded: Bool, trustedItemIDs: Set<String>? = nil) {
         self.cursor = cursor
+        initialCursor = cursor
         state = Conversation(id: c.id, title: c.title)
         state.projectID = c.projectID; state.updated = c.updated; state.contextUsed = c.contextUsed
         if seeded {
+            state.phaseFacts=c.phaseFacts
             baselineNotice = c.notices.snapshot(in: c)
             authoritativeItemIDs = trustedItemIDs ?? Set(c.items.map(\.id))
             state.items = c.items; state.satellites = c.satellites; state.satellitesRetired = c.satellitesRetired; state.activeTurnID = c.activeTurnID; state.running = c.running
@@ -30,6 +35,16 @@ import Foundation
             turnIDs = Set(c.items.map(\.turnID).filter { !$0.isEmpty })
             hasLifecycle = true
         }
+        state.plan = c.plan; state.exactTokensUsed = c.exactTokensUsed; state.contextLimit = c.contextLimit
+    }
+
+    /// Separate per-field cursors admit buffered SSE missing from an event page,
+    /// without applying older usage/plan over a newer event already replayed.
+    func applyMetadata(_ event: CoreEvent, through high: Int) {
+        guard ["turn/plan/updated", "thread/tokenUsage/updated"].contains(event.method),
+              event.id > (metadataCursors[event.method] ?? initialCursor), event.id <= high else { return }
+        metadataCursors[event.method] = event.id
+        EventReducer.apply(event, to: state)
     }
 
     func apply(_ event: CoreEvent, through highWatermark: Int) {
@@ -52,7 +67,9 @@ import Foundation
         } else if let id = event.params["itemId"]?.stringValue, event.params["delta"]?.stringValue != nil, !authoritativeItemIDs.contains(id) {
             partialItemIDs.insert(id)
         }
-        EventReducer.apply(event, to: state)
+        if ["item/started", "item/completed"].contains(event.method), event.params["item"]?["type"]?.stringValue == "collabAgentToolCall" { collabEvents.append(event) }
+        if ["turn/plan/updated", "thread/tokenUsage/updated"].contains(event.method) { applyMetadata(event, through: highWatermark) }
+        else { EventReducer.apply(event, to: state) }
     }
 
     func merge(into c: Conversation, snapshot: JSONValue? = nil) {
@@ -133,8 +150,13 @@ import Foundation
         if replaceLifecycle {
             c.activeTurnID = state.activeTurnID; c.running = state.running; c.stopping = state.stopping; c.stops = max(c.stops, state.stops); c.lastTurnInterrupted = state.lastTurnInterrupted
         }
-        if replaceLifecycle { c.satellites = state.satellites; c.satellitesRetired = state.satellitesRetired }
+        mergeSatellites(into: c, snapshot: snapshot, replaceLifecycle: replaceLifecycle)
         c.approvals = state.approvals; c.userInput = state.userInput; c.question = state.question
+        if metadataCursors["turn/plan/updated"] != nil { c.plan = state.plan }
+        if metadataCursors["thread/tokenUsage/updated"] != nil {
+            c.exactTokensUsed = state.exactTokensUsed; c.contextLimit = state.contextLimit
+            c.contextUsed = state.contextUsed
+        }
         let terminal = snapshotTurns.last { ["completed","failed","interrupted"].contains($0["status"]?.stringValue ?? "") }
         let replayIdentity = latestLifecycle.flatMap { $0.params["turnId"]?.stringValue ?? $0.params["turn"]?["id"]?.stringValue }
         let replayStatus = latestLifecycle?.method == "turn/completed" ? latestLifecycle?.params["turn"]?["status"]?.stringValue : nil
@@ -154,5 +176,36 @@ import Foundation
         let status = replayTerminal == identity && replayTerminal != nil ? replayStatus : recovered?["status"]?.stringValue
         c.notices.restore(in: c, started: start, ended: c.activeTurnID == nil ? end : nil,
                           confirmedTurn: identity, status: status)
+        c.phaseFacts.mergeHistory(state.phaseFacts,turnID:identity,status:status,in:c)
+    }
+
+    private func mergeSatellites(into c: Conversation, snapshot: JSONValue?, replaceLifecycle: Bool) {
+        let turns = snapshot?["turns"]?.arrayValue ?? []
+        let snapshotTurn = turns.last(where: { $0["status"]?.stringValue == "inProgress" })?["id"]?.stringValue ?? turns.last?["id"]?.stringValue
+        let replayTurn = latestLifecycle.flatMap { $0.params["turnId"]?.stringValue ?? $0.params["turn"]?["id"]?.stringValue } ?? state.activeTurnID
+        let selectedTurn = replaceLifecycle ? replayTurn ?? snapshotTurn : snapshotTurn
+        if replaceLifecycle, selectedTurn != snapshotTurn {
+            c.satellites = state.satellites
+        } else {
+            // hydrate owns the snapshot baseline. Only actual collab events may
+            // override it; the copied seed is not a new event for the same turn.
+            let updates = collabEvents.filter { ($0.params["turnId"]?.stringValue ?? $0.params["turn"]?["id"]?.stringValue) == selectedTurn }
+            if !updates.isEmpty {
+                let projection = Conversation(id: c.id, title: c.title); projection.satellites = c.satellites
+                for event in updates {
+                    if let item = event.params["item"] {
+                        EventReducer.upsert(item, turnID: selectedTurn ?? "", in: projection, completed: event.method == "item/completed", time: event.time)
+                    }
+                }
+                c.satellites = projection.satellites
+            }
+            for i in c.satellites.indices {
+                if let old = state.satellites.first(where: { $0.id == c.satellites[i].id }) {
+                    c.satellites[i].items = old.items
+                    if old.done && c.satellites[i].done { c.satellites[i].finishedOrder = old.finishedOrder }
+                }
+            }
+        }
+        if replaceLifecycle { c.satellitesRetired = state.satellitesRetired }
     }
 }

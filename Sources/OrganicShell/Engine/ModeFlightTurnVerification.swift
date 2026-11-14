@@ -151,7 +151,7 @@ import QuartzCore
         var readbacks:[[String:Any]]=[]
         let row=ModeOrreryFlightVerification.rows[0],real=ModeOrreryFlightVerification.real[0]
         for scale:CGFloat in [1,2] {for forward in [true,false] {
-            let epoch=CACurrentMediaTime()+3600
+            let epoch=VerificationClock.renderOrigin
             var clock=epoch
             let f=ModeFlight();f.manualTime={clock};f.verificationServerMotion=true;f.resize(to:size)
             let avatar=(ModeOrreryFlightVerification.sidebarAvatar,ModeOrreryFlightVerification.dockAvatar)

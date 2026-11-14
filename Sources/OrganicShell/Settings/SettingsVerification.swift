@@ -200,9 +200,20 @@ import ObjectiveC.runtime
         check(w.focusChain.last?.nextKeyView === w.search,"Tab focus wraps to search")
         png(w.snapshot(scale:1),"directory@1x",output);png(w.snapshot(scale:2),"directory@2x",output)
         preferences.set("look.mode","light");s.go("appearance");w.render()
+        let appearanceRows=w.form.rows.filter{$0.spec.kind != .heading && $0.spec.visual.style != .footer}.map{ $0.spec.id }
+        check(appearanceRows == ["look.text","look.theme","look.glass","color.background","color.foreground","look.accent","look.code","look.font","look.size","code.preview","reset.appearance"],"#130 Appearance removes only the mode row and preserves every remaining row in order")
+        check(SettingsPanels.make(s).contains{$0.kind == .heading && $0.title == "Appearance"},"#130 Appearance group heading is retained")
+        let reloaded=SettingsPreferences(defaults:defaults)
+        check(reloaded.nativeLook == preferences.nativeLook,"#130 loading stored Light leaves the resolved look unchanged")
         for scale:CGFloat in [1,2]{png(w.snapshot(scale:scale),"appearance-light@\(Int(scale))x",output)}
         check(w.view.effectiveAppearance.bestMatch(from:[.aqua,.darkAqua]) == .darkAqua,"Light preference remains dark in the dark-only port")
-        preferences.set("look.mode","dark");preferences.set("look.theme","nord");w.render()
+        let display=NativeDisplayOptions.shared,displayState=display.state
+        for contrast in [true,false] {
+            display.setVerificationState(.init(increaseContrast:contrast,reduceTransparency:displayState.reduceTransparency));display.refresh();w.render()
+            check(display.state.increaseContrast==contrast && w.view.effectiveAppearance.name == NativeDisplayOptions.appearance?.name,"#130 Settings follows Native's contrast appearance with legacy Light stored: \(contrast)")
+        }
+        display.setVerificationState(nil);display.refresh()
+        preferences.set("look.theme","nord");w.render()
         check(SettingsDrawing.palette(w.form).canvas.usingColorSpace(.sRGB) == SettingsDrawing.hex("#2e3440").usingColorSpace(.sRGB),"Window theme palette applies")
         for scale:CGFloat in [1,2]{png(w.snapshot(scale:scale),"appearance-nord@\(Int(scale))x",output)}
         preferences.resetAppearance()

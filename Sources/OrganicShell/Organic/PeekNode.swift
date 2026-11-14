@@ -10,11 +10,12 @@ import QuartzCore
         var covers: (CGPoint) -> Bool = { _ in false }
         var click: ((CGPoint) -> Void)?
         var scroll: ((CGFloat, CGPoint) -> Void)?
+        var orbInput: ((NSEvent) -> Bool)?
         override var isFlipped: Bool { true }
-        override func mouseDown(with event: NSEvent) { click?(convert(event.locationInWindow, from: nil)) }
+        override func mouseDown(with event: NSEvent) { if orbInput?(event) != true { click?(convert(event.locationInWindow, from: nil)) } }
         override func mouseDragged(with event: NSEvent) {}
         override func mouseUp(with event: NSEvent) {}
-        override func rightMouseDown(with event: NSEvent) {}
+        override func rightMouseDown(with event: NSEvent) { _ = orbInput?(event) }
         override func pressureChange(with event: NSEvent) {}
         override func scrollWheel(with event: NSEvent) { scroll?(event.scrollingDeltaY, convert(event.locationInWindow, from: nil)) }
         override func hitTest(_ point: NSPoint) -> NSView? {
@@ -171,6 +172,8 @@ import QuartzCore
         headerPlane.frame = CGRect(x: g.blur.minX, y: 0,
                                   width: header.frame.width, height: header.frame.height)
         if headerPlane.superview == nil { view.addSubview(headerPlane) }
+        // The header was configured before its host moved; resolve LL after the final common-space placement.
+        header.orb.setFrame(header.geometry.planet)
         setHeaderVisible(showHeader)
         headerWork.end()
         // Cover the actual painted header, not its transparent canvas above the Peek. Pointer and halo

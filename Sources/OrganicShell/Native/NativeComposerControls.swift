@@ -129,6 +129,21 @@ extension NativeComposer {
             trailing(sendButton, control)
             if isVoice { trailing(voiceButton, control) }
         }
+        attachmentScrollView.isHidden = attachments.isEmpty || isVoice
+        if !attachmentScrollView.isHidden {
+            let iconOnly = densityWidth < 220
+            for chip in attachmentChips { chip.iconOnly = iconOnly }
+            let width = min(190, max(iconOnly ? 44 : 52, (right - left) * 0.36))
+            trailing(attachmentScrollView, width)
+            attachmentScrollView.frame.origin.y = (h - 26) / 2
+            attachmentScrollView.frame.size.height = 26
+            var x: CGFloat = 0
+            for chip in attachmentChips {
+                let width = min(chip.preferredWidth, max(44, attachmentScrollView.contentSize.width))
+                chip.frame = controlRect(CGRect(x: x, y: 0, width: width, height: 26)); chip.needsLayout = true; chip.layoutSubtreeIfNeeded(); x += width + 6
+            }
+            attachmentContent.frame = controlRect(CGRect(x: 0, y: 0, width: max(attachmentScrollView.contentSize.width, x), height: 26))
+        }
         stopButton.isHidden = !state.running || segment != nil
         if !stopButton.isHidden { trailing(stopButton, control) }
         dictationButton.isHidden = tight || isVoice || segment != nil
@@ -138,7 +153,8 @@ extension NativeComposer {
             // fixed slots/controls/gaps, then its truncated intrinsic width leaves the remainder to the editor.
             trailing(modelButton,modelButton.width(fittingLabelProposal:max(0,(right-left-gap)/2)))
         } else {
-            trailing(modelButton, min(modelButton.preferredWidth, max(74, bounds.width * 0.38)))
+            let proposal = attachments.isEmpty ? max(74, bounds.width * 0.38) : max(1, (right-left-gap) * 0.45)
+            trailing(modelButton, min(modelButton.preferredWidth, proposal))
         }
         queueButton.isHidden = queued.isEmpty || segment != nil
         if !queueButton.isHidden { trailing(queueButton, 38) }
@@ -148,17 +164,6 @@ extension NativeComposer {
             historyRefreshButton.font = .systemFont(ofSize: 11)
             historyRefreshButton.imagePosition = compact ? .imageOnly : .imageLeading
             trailing(historyRefreshButton, compact ? control : 120)
-        }
-        attachmentScrollView.isHidden = attachments.isEmpty || isVoice || segment != nil
-        if !attachmentScrollView.isHidden {
-            let width = min(160, max(52, (right - left) * 0.36))
-            leading(attachmentScrollView, width)
-            var x: CGFloat = 0
-            for chip in attachmentChips {
-                let width = min(chip.preferredWidth, max(52, attachmentScrollView.contentSize.width))
-                chip.frame = controlRect(CGRect(x: x, y: 0, width: width, height: 26)); chip.needsLayout = true; chip.layoutSubtreeIfNeeded(); x += width + 6
-            }
-            attachmentContent.frame = controlRect(CGRect(x: 0, y: 0, width: max(attachmentScrollView.contentSize.width, x), height: 26))
         }
         scrollView.isHidden = isVoice
         voiceTextLabel.isHidden = !isVoice
@@ -225,6 +230,7 @@ extension NativeComposer {
             attachmentScrollView.frame = controlRect(CGRect(x:14,y:42,width:max(1,bounds.width-28),height:26))
             var x: CGFloat = 0
             for chip in attachmentChips {
+                chip.iconOnly = false
                 let width=min(chip.preferredWidth,max(52,attachmentScrollView.contentSize.width))
                 chip.frame=controlRect(CGRect(x:x,y:0,width:width,height:26)); chip.needsLayout=true; chip.layoutSubtreeIfNeeded(); x+=width+6
             }
@@ -280,23 +286,28 @@ extension NativeComposer {
     let label = NativeLabel(labelWithString: "")
     let removeButton = NativeButton(title: "", target: nil, action: nil)
     var onRemove: (() -> Void)?
-    var preferredWidth: CGFloat { min(190, max(80, label.intrinsicContentSize.width + 52)) }
+    var iconOnly = false { didSet { label.isHidden = iconOnly; needsLayout = true } }
+    var preferredWidth: CGFloat { iconOnly ? 44 : min(190, max(80, label.intrinsicContentSize.width + 52)) }
     init(attachment: Attachment) {
         attachmentID = attachment.id; super.init(frame: .zero)
-        wantsLayer = true; layer?.cornerRadius = 8; layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
+        wantsLayer = true; layer?.cornerRadius = 13; layer?.backgroundColor = NSColor(white: 1, alpha: 0.08).cgColor
         label.font = .systemFont(ofSize: 12); label.lineBreakMode = .byTruncatingMiddle
         removeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)
         removeButton.isBordered = false; removeButton.target = self; removeButton.action = #selector(remove)
         for view in [icon, label, removeButton] { addSubview(view) }
-        setAccessibilityElement(false); update(attachment)
+        setAccessibilityElement(true); setAccessibilityRole(.group); update(attachment)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func update(_ attachment: Attachment) {
         label.stringValue = attachment.name; icon.image = NSImage(systemSymbolName: attachment.symbol, accessibilityDescription: nil)
         icon.setAccessibilityElement(false); label.setAccessibilityLabel("Attachment: " + attachment.name)
+        label.setAccessibilityElement(false)
+        setAccessibilityLabel("Attachment: " + attachment.name)
+        setAccessibilityIdentifier("composer.attachment." + attachmentID)
         removeButton.setAccessibilityIdentifier("composer.attachment." + attachmentID + ".remove")
         removeButton.setAccessibilityLabel("Remove " + attachment.name); toolTip = attachment.name; needsLayout = true
     }
+    override func accessibilityChildren() -> [Any]? { [removeButton] }
     override func layout() {
         super.layout(); icon.frame = CGRect(x: 8, y: 6, width: 14, height: 14)
         label.frame = CGRect(x: 27, y: 4, width: max(1, floor(bounds.width - 51)), height: 18)

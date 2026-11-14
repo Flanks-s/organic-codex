@@ -10,8 +10,120 @@ import QuartzCore
 
 /// Exercises the system split command and the actual inspector without an app controller, visible window or transport.
 @MainActor enum NormieInspectorVerification {
+    private static var builtInScreen: NSScreen {
+        NSScreen.screens.first { screen in
+            let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! NSNumber
+            return CGDisplayIsBuiltin(CGDirectDisplayID(id.uint32Value)) != 0
+        }!
+    }
+    static func idle61(output: URL, check: (Bool, String) -> Void) throws {
+        try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        func tree(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(tree) }
+        let screen = builtInScreen
+        let diagnose = ProcessInfo.processInfo.environment["IDLE61_DIAGNOSE"] == "1"
+        let size = CGSize(width:1280,height:820), store = ConversationStore()
+        let replay = MockReplay(store:store); replay.start(live:false)
+        let c = store.conversation("A")!; c.running = true
+        c.error = nil; c.approvals = []; c.question = nil; c.userInput = nil
+        c.plan = [.init(id:"idle61-plan",title:"Idle61 running step")]
+        c.satellites = [.init(id:"idle61-child",face:"•ᴗ•",title:"Idle61 running child")]
+        let sessions = NativeTranscriptSessions(store:store)
+        let scene = AutoScene(size:size,store:store,profile:.init(name:"idle61",frameInterval:1/60,mmPerPoint:0.27,persistenceFrames:0),scale:screen.backingScaleFactor,transcriptSessions:sessions)
+        scene.ambient = false; scene.manualSettle = true
+        let root = RootView(frame:CGRect(origin:.zero,size:size)); root.wantsLayer = true
+        for plane in [scene.sceneView,scene.nativePlane,scene.peekNode.view,scene.dockView,scene.overlayPlane] { plane.frame = root.bounds; root.addSubview(plane) }
+        scene.install(); scene.settle()
+        let workbench = NormieWorkbench(store:store,sessions:scene.composers,current:"A",transcriptSessions:sessions)
+        let shell = WindowShell(organic:root,scene:scene,workbench:workbench,mode:.normie)
+        let window = NSWindow(contentRect:CGRect(origin:screen.visibleFrame.origin,size:size),styleMask:[.titled,.resizable],backing:.buffered,defer:true,screen:screen)
+        window.isReleasedWhenClosed = false; window.contentViewController = shell
+        var states: [[String:Any]] = []
+        for (index,mode) in [WindowShell.Mode.normie,.organic,.normie,.organic].enumerated() {
+            if index == 0 { shell.apply(mode,in:window) }
+            else { shell.setMode(mode,animated:false) }
+            check(shell.mode == mode,"IDLE61 \(index) actual mode switch commits \(mode.rawValue)")
+            if mode == .normie { shell.split.splitViewItems.last!.isCollapsed = false }
+            shell.view.layoutSubtreeIfNeeded(); workbench.inspector.viewDidLayout()
+            RunLoop.main.run(until:Date(timeIntervalSinceNow:0.05))
+            let spinners = tree(window.contentView!).compactMap { $0 as? NormieSidebarSpinner }
+            var records: [[String:Any]] = []
+            for (i,spinner) in spinners.enumerated() {
+                var ancestors: [[String:Any]] = [], cursor: NSView? = spinner
+                while let view = cursor {
+                    ancestors.append(["class":String(describing:type(of:view)),"isHidden":view.isHidden,
+                        "alpha":view.alphaValue,"layerOpacity":view.layer?.opacity ?? 1,
+                        "translationX":view.layer?.value(forKeyPath:"transform.translation.x") as? NSNumber ?? 0,
+                        "contentView":view === window.contentView])
+                    if view === window.contentView { break }; cursor = view.superview
+                }
+                records.append(["index":i,"identifier":spinner.identifier?.rawValue ?? "",
+                    "owner":String(describing:type(of:spinner.superview!)),
+                    "hidden":spinner.isHiddenOrHasHiddenAncestor,"animating":spinner.verificationAnimating,"window":spinner.window != nil,"ancestors":ancestors])
+                print("IDLE61 \(index) \(mode.rawValue) spinner \(i): hidden=\(spinner.isHiddenOrHasHiddenAncestor) animating=\(spinner.verificationAnimating) " + ancestors.map { "\($0["class"]!)(hidden=\($0["isHidden"]!),opacity=\($0["layerOpacity"]!),x=\($0["translationX"]!))" }.joined(separator:" -> "))
+            }
+            states.append(["mode":mode.rawValue,"index":index,"spinners":records])
+            check(!window.isVisible,"IDLE61 \(index) window never shown")
+            if !diagnose {
+                check(!spinners.isEmpty,"IDLE61 \(index) real shell contains indicators")
+                if mode == .organic {
+                    check(spinners.allSatisfy { !$0.verificationAnimating },"IDLE61 \(index) Organic stops every indicator")
+                    c.title += " updated"; store.changed(c)
+                    check(tree(window.contentView!).compactMap { $0 as? NormieSidebarSpinner }.allSatisfy { !$0.verificationAnimating },"IDLE61 \(index) Organic reconfigured rows stay stopped")
+                } else {
+                    for (name,host) in [("sidebar",workbench.sidebar.view),("inspector",workbench.inspector.view)] {
+                        if host.isHiddenOrHasHiddenAncestor {
+                            check(tree(host).compactMap { $0 as? NormieSidebarSpinner }.allSatisfy { !$0.verificationAnimating },"IDLE61 \(index) Normie \(name) hidden native root stays stopped")
+                            // The shell retains a hidden inspector root after returning from Organic.
+                            // Explicitly show this fixture to exercise the visible inspector's lifecycle too.
+                            host.isHidden = false
+                        }
+                        let visible = tree(host).compactMap { $0 as? NormieSidebarSpinner }.filter { !$0.isHiddenOrHasHiddenAncestor }
+                        check(visible.count == (name == "inspector" ? 2:1) && visible.allSatisfy(\.verificationAnimating),"IDLE61 \(index) Normie \(name) visible running indicators animate")
+                        host.isHidden = true
+                        check(visible.allSatisfy { !$0.verificationAnimating },"IDLE61 \(index) \(name) ancestor hide stops indicators")
+                        host.isHidden = false
+                        check(visible.allSatisfy(\.verificationAnimating),"IDLE61 \(index) \(name) ancestor unhide restarts indicators")
+                        for (i,spinner) in visible.enumerated() {
+                            let owner = spinner.superview!
+                            owner.isHidden = true
+                            check(!spinner.verificationAnimating,"IDLE61 \(index) \(name) \(i) owner hide stops indicator")
+                            owner.isHidden = false
+                            check(spinner.verificationAnimating,"IDLE61 \(index) \(name) \(i) owner unhide restarts indicator")
+                            spinner.isHidden = true
+                            check(!spinner.verificationAnimating,"IDLE61 \(index) \(name) \(i) self hide stops indicator")
+                            spinner.isHidden = false
+                            check(spinner.verificationAnimating,"IDLE61 \(index) \(name) \(i) self unhide restarts indicator")
+                            spinner.removeFromSuperview()
+                            check(!spinner.verificationAnimating,"IDLE61 \(index) \(name) \(i) leaving window stops indicator")
+                            owner.addSubview(spinner)
+                            check(spinner.verificationAnimating,"IDLE61 \(index) \(name) \(i) entering window restarts indicator")
+                        }
+                    }
+                    let side = tree(workbench.sidebar.view).compactMap { $0 as? NormieSidebarSpinner }.filter { !$0.isHiddenOrHasHiddenAncestor }
+                    workbench.sidebarVisible = false
+                    check(side.allSatisfy { !$0.verificationAnimating },"IDLE61 \(index) sidebar presentation withdrawal stops indicators without hiding")
+                    workbench.sidebarVisible = true
+                    check(side.allSatisfy(\.verificationAnimating),"IDLE61 \(index) sidebar presentation restoration restarts indicators")
+                    workbench.inspector.presentationActive = false
+                    check(tree(workbench.inspector.view).compactMap { $0 as? NormieSidebarSpinner }.allSatisfy { !$0.verificationAnimating },"IDLE61 \(index) inspector presentation withdrawal stops indicators")
+                    workbench.inspector.presentationActive = true
+                    c.running = false; c.satellites[0].done = true; store.changed(c)
+                    check(tree(window.contentView!).compactMap { $0 as? NormieSidebarSpinner }.allSatisfy { !$0.verificationAnimating },"IDLE61 \(index) completed conversation and sub-agent stop every indicator")
+                    c.running = true; c.satellites[0].done = false; store.changed(c)
+                    for (name,host) in [("sidebar",workbench.sidebar.view),("inspector",workbench.inspector.view)] {
+                        let active = tree(host).compactMap { $0 as? NormieSidebarSpinner }.filter { !$0.isHiddenOrHasHiddenAncestor }
+                        check(!active.isEmpty && active.allSatisfy(\.verificationAnimating),"IDLE61 \(index) \(name) resuming work restarts indicators")
+                    }
+                }
+            }
+        }
+        try JSONSerialization.data(withJSONObject:["screen":screen.localizedName,"scale":screen.backingScaleFactor,"hz":screen.maximumFramesPerSecond,"states":states],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("idle61-spinners.json"))
+        shell.disposeModePreparation(); workbench.dispose(); scene.disposeTranscriptPresentation()
+        window.contentViewController = nil; window.close()
+    }
     static func run(output: URL, check: (Bool, String) -> Void) throws {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        try idle61(output:output.appendingPathComponent("idle61"),check:check)
         var states: [[String: Any]] = []
         func tree(_ view: NSView) -> [NSView] { [view]+view.subviews.flatMap(tree) }
         func labels(_ inspector: NormieInspectorController) -> [String] {
@@ -153,7 +265,7 @@ import QuartzCore
                 check(contentInk(image,scale:scale) > Int(100*scale*scale),prefix+"\(Int(width))pt paints actual content below the heading")
                 Offscreen.write(image,output.appendingPathComponent("width-\(Int(width))@\(Int(scale))x.png"))
             }
-            let window=NSWindow(contentRect:CGRect(origin:.zero,size:size),styleMask:[.titled,.resizable],backing:.buffered,defer:true)
+            let window=NSWindow(contentRect:CGRect(origin:builtInScreen.visibleFrame.origin,size:size),styleMask:[.titled,.resizable],backing:.buffered,defer:true,screen:builtInScreen)
             window.isReleasedWhenClosed=false;window.contentViewController=shell
             check(window.makeFirstResponder(window) && window.firstResponder === window,prefix+"window is first responder without being shown")
             let selector=#selector(NSSplitViewController.toggleInspector(_:))
@@ -272,7 +384,7 @@ import QuartzCore
             check(branch.titleRect.maxX+3<=branch.chevron.frame.minX && branch.chevron.frame.maxX<=branch.bounds.maxX,"M11.28c \(Int(scale))x long branch reserves separate title and chevron bounds")
             check(branch.titleRect.width>0 && branch.frame.width == 228,"M11.28c \(Int(scale))x 280pt branch retains its full-row hit target")
             Offscreen.write(NativeViewBitmap.capture(inspector.view,scale:scale),output.appendingPathComponent("long-branch@\(Int(scale))x.png"))
-            let window=NSWindow(contentRect:inspector.view.frame,styleMask:[.titled],backing:.buffered,defer:true)
+            let window=NSWindow(contentRect:CGRect(origin:builtInScreen.visibleFrame.origin,size:inspector.view.frame.size),styleMask:[.titled],backing:.buffered,defer:true,screen:builtInScreen)
             window.isReleasedWhenClosed=false;window.contentViewController=inspector
             check(inspector.beginCommit(),"M11.28c commit fixture opens the real form")
             inspector.motion.settle()

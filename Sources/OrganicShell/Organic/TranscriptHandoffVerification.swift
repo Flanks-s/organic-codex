@@ -26,7 +26,7 @@ import QuartzCore
             let scene=AutoScene(size:size,store:store,profile:.init(name:"freeze-offscreen",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:scale,transcriptSessions:shared ? NativeTranscriptSessions():nil)
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false
             if shared {scene.setTranscriptPresentationActive(true)}
-            var clock=CACurrentMediaTime()+3600;scene.now={clock};scene.install(members:conversations.map(\.id));scene.clock.invalidate()
+            var clock=VerificationClock.renderOrigin;scene.now={clock};scene.install(members:conversations.map(\.id));scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             let tag="\(Int(scale))x-\(shared ? "shared":"owned")"
             var exchangeOffsets:[String:CGFloat]=[:]
@@ -155,7 +155,7 @@ import QuartzCore
             let scene=AutoScene(size:CGSize(width:1600,height:900),store:store,profile:.init(name:"freeze-gates",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:scale,transcriptSessions:shared ? NativeTranscriptSessions():nil)
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false
             if shared {scene.setTranscriptPresentationActive(true)}
-            var clock=CACurrentMediaTime()+3600;scene.now={clock};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
+            var clock=VerificationClock.renderOrigin;scene.now={clock};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             clock=max(clock,scene.transitionEnd+0.1);scene.frame(clock);scene.settle();scene.clock.invalidate()
             scene.switchTo(2,reason:"freeze-independent-gates")
@@ -266,7 +266,7 @@ import QuartzCore
             let scene=AutoScene(size:CGSize(width:1600,height:900),store:store,profile:.init(name:"early-wheel",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:scale,transcriptSessions:shared ? NativeTranscriptSessions():nil)
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false
             if shared {scene.setTranscriptPresentationActive(true)}
-            var clock=CACurrentMediaTime()+3600;scene.now={clock};scene.install(members:conversations.map(\.id));scene.clock.invalidate()
+            var clock=VerificationClock.renderOrigin;scene.now={clock};scene.install(members:conversations.map(\.id));scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             let tag="\(Int(scale))x-\(shared ? "shared":"owned")"
             @MainActor func finish() {clock=max(clock,scene.transitionEnd+0.1);scene.frame(clock);scene.settle();scene.clock.invalidate()}
@@ -368,7 +368,7 @@ import QuartzCore
             }
             let scene=AutoScene(size:CGSize(width:1600,height:900),store:store,profile:.init(name:"carry-lifecycle",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:scale,transcriptSessions:NativeTranscriptSessions())
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false;scene.setTranscriptPresentationActive(true)
-            var clock=CACurrentMediaTime()+3600;scene.now={clock};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
+            var clock=VerificationClock.renderOrigin;scene.now={clock};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             clock=max(clock,scene.transitionEnd+0.1);scene.frame(clock);scene.settle();scene.clock.invalidate()
             let target=scene.columns[2]
@@ -438,7 +438,7 @@ import QuartzCore
             let scene=AutoScene(size:CGSize(width:1600,height:900),store:store,profile:.init(name:"early-flight",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:scale,transcriptSessions:shared ? NativeTranscriptSessions():nil)
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false
             if shared {scene.setTranscriptPresentationActive(true)}
-            var clock=CACurrentMediaTime()+3600;scene.now={clock};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
+            var clock=VerificationClock.renderOrigin;scene.now={clock};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             clock=max(clock,scene.transitionEnd+0.1);scene.frame(clock);scene.settle();scene.clock.invalidate()
             scene.switchTo(2,reason:"early-flight")

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py sheets-m101. Kept, not deleted (#181).
 """Windowless M10.1-F checks. Read only an explicit private HEAD archive, keep incremental debug objects."""
 from pathlib import Path
 import argparse,subprocess,json,hashlib,os
