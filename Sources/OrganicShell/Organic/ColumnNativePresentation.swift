@@ -7,6 +7,7 @@ extension ColumnNode {
     var ownsNative: Bool { !sharedTranscript || (nativeLease?.isCurrent == true && !modeSuspended) }
 
     @discardableResult func mountNative(in host: NSView, configuration: NativeTranscriptSessions.Configuration, frame: CGRect? = nil, visible: Bool = true) -> Bool {
+        let visible = visible && browserAttachment?.covers != true
         guard sharedTranscript else { if native.superview !== host { host.addSubview(native) }; return true }
         if nativeLease?.isCurrent == true {
             if let frame {_=nativeLease?.place(frame)}
@@ -326,6 +327,7 @@ extension ColumnNode {
     }
     /// Rest visibility for a form; while moving, the goal's words belong to the flights.
     func showRest(full: Bool) {
+        if browserAttachment?.covers == true { setNative(visible: false); return }
         // Capture departure intent before hiding the native view. hideGoal runs after this in commit.
         if ownsNative,!native.isHidden,followBeforeMotion == nil {
             atEndBeforeMotion = native.shouldFollowEnd && native.isAtEnd
@@ -387,6 +389,7 @@ extension ColumnNode {
     /// The view's own layer too, so the swap lands in this transaction rather than AppKit's next update.
     func setNative(visible: Bool) {
         guard ownsNative else { return }
+        let visible = visible && browserAttachment?.covers != true
         if sharedTranscript { _ = nativeLease?.setActive(visible); _ = nativeLease?.setVisible(visible) }
         native.isHidden = !visible
         native.layer?.isHidden = !visible

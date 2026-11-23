@@ -29,7 +29,8 @@ import QuartzCore
     static func beginWindow(_ label:String) {
         guard requested,!active else{return}
         reset();let g=generation
-        DispatchQueue.main.asyncAfter(deadline:.now()+2) {
+        let seconds=Double(ProcessInfo.processInfo.environment["M10_COLUMN_TRACE_SECONDS"] ?? "") ?? 2
+        DispatchQueue.main.asyncAfter(deadline:.now()+max(0,seconds)) {
             guard g==generation else{return}
             let prefix=ProcessInfo.processInfo.environment["M10_COLUMN_TRACE_OUT"] ?? "/tmp/sol-column-work"
             sequence+=1

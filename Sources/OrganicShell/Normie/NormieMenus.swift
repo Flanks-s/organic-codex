@@ -33,7 +33,7 @@ struct NormieMenuContext {
     var memberCount = 0
     var canAttach = true
     var supported = Set(NormieCommand.allCases)
-    func enabled(_ command: NormieCommand, tag: Int = 0) -> Bool {
+    @MainActor func enabled(_ command: NormieCommand, tag: Int = 0) -> Bool {
         guard supported.contains(command) else { return false }
         switch command {
         case .stop: return hasConversation && running && online && !stopping
@@ -45,8 +45,8 @@ struct NormieMenuContext {
         case .focus: return hasConversation || composingNew
         case .terminal: return hasConversation && normie && !composingNew
         case .inspector: return normie
-        case .collapse: return !collapsed
-        case .restore: return collapsed
+        case .collapse: return OrganicFeatureAvailability.current.collapse && !collapsed
+        case .restore: return OrganicFeatureAvailability.current.collapse && collapsed
         case .help: return false // Same disabled placeholder as the product account menu.
         default: return true
         }
@@ -68,7 +68,10 @@ struct NormieMenuContext {
         let item = NSMenuItem(title: title, action: #selector(fire(_:)), keyEquivalent: key)
         item.target = self; item.representedObject = action.rawValue; item.tag = tag
         // Match the product: only commands in Keyboard Shortcuts carry the editable prefix.
-        let configurable:Set<NormieCommand>=[.newChat,.archive,.rename,.pin,.unread,.attach,.focus,.stop,.search,.sidebar,.collapse,.restore,.inspector,.settings]
+        var configurable: Set<NormieCommand> = [
+            .newChat, .archive, .rename, .pin, .unread, .attach, .focus, .stop, .search, .sidebar, .inspector, .settings
+        ]
+        if OrganicFeatureAvailability.current.collapse { configurable.formUnion([.collapse, .restore]) }
         item.identifier = .init(action == .member ? "number.\(tag+1)" : (configurable.contains(action) ? "shortcut.":"command.")+action.rawValue)
         item.keyEquivalentModifierMask = modifiers; menu.addItem(item)
         item.isEnabled = context().enabled(action, tag: tag); return item
@@ -114,10 +117,15 @@ struct NormieMenuContext {
         responder(windowsMenu, "Minimize", selector: "performMiniaturize:", key: "m"); responder(windowsMenu, "Zoom", selector: "performZoom:")
         windowsMenu.addItem(.separator()); command(windowsMenu, "Move Conversation to New Window", .moveWindow)
         command(windowsMenu, "Merge All Conversation Windows", .mergeWindows)
+        if OrganicFeatureAvailability.current.collapse {
+            windowsMenu.addItem(.separator())
+            command(windowsMenu, "Collapse to Side", .collapse,
+                    key: String(UnicodeScalar(NSDownArrowFunctionKey)!), modifiers: [.command, .option])
+            command(windowsMenu, "Restore Window", .restore,
+                    key: String(UnicodeScalar(NSUpArrowFunctionKey)!), modifiers: [.command, .option])
+        }
         windowsMenu.addItem(.separator())
-        command(windowsMenu, "Collapse to Side", .collapse, key: String(UnicodeScalar(NSDownArrowFunctionKey)!), modifiers: [.command, .option])
-        command(windowsMenu, "Restore Window", .restore, key: String(UnicodeScalar(NSUpArrowFunctionKey)!), modifiers: [.command, .option])
-        windowsMenu.addItem(.separator()); responder(windowsMenu, "Bring All to Front", selector: "arrangeInFront:")
+        responder(windowsMenu, "Bring All to Front", selector: "arrangeInFront:")
         if !demo {
             let tools = submenu("Tools")
             command(tools, "Artifacts & Annotations…", .artifacts); command(tools, "Browser…", .browser); command(tools, "Appshots…", .appshots)
@@ -135,7 +143,9 @@ struct NormieMenuContext {
     func makeAccountMenu(account: NormieAccount, quotaSummary: String, organic: Bool = false) -> NSMenu {
         let menu = NSMenu(); menu.autoenablesItems = true
         if organic {
-            command(menu, "New Chat", .newChat); command(menu, "Show Sidebar", .sidebar); command(menu, "Collapse to Side", .collapse)
+            command(menu, "New Chat", .newChat)
+            command(menu, "Show Sidebar", .sidebar)
+            if OrganicFeatureAvailability.current.collapse { command(menu, "Collapse to Side", .collapse) }
             menu.addItem(.separator())
         }
         menu.addItem(.sectionHeader(title: account.name+" · "+account.plan))

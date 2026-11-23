@@ -4,7 +4,10 @@ struct SheetChatCustomization: Equatable {
     var name: String
     var symbol: OrbCelestialBody
     var tint: OrbTint
-    var identity: OrbIdentity { OrbIdentity(symbol: symbol, tint: tint) }
+    var bodyID: String? = nil
+    var tintID: String? = nil
+    var resolvedBodyID: String { bodyID ?? String(describing:symbol) }
+    var identity: OrbIdentity { OrbIdentity(symbol:symbol,tint:tint,bodyID:bodyID,tintID:tintID) }
 }
 
 @MainActor final class SheetCustomizeChat: SheetSurface, NSTextFieldDelegate {
@@ -21,17 +24,19 @@ struct SheetChatCustomization: Equatable {
     private var originalName = ""
     var onDone: ((SheetChatCustomization) -> Void)?
     var onCancel: (() -> Void)?
+    /// Persistence migration gates identity edits, while the conversation title remains editable.
+    var bodySelectionEnabled = true { didSet { if oldValue != bodySelectionEnabled { sync() } } }
     override var initialResponder: NSView? { nameField }
     override init(clock: any OverlayClock = OverlaySystemClock()) {
         super.init(clock: clock); dismissesOnOutside = false
         for view in [preview, heading, fieldPlate, nameField, symbolLabel, tintLabel, defaultsButton, cancelButton, doneButton] { card.content.addSubview(view) }
         nameField.placeholderString = "Chat name"; nameField.setAccessibilityLabel("Chat name"); nameField.delegate = self
-        for symbol in OrbCelestialBody.allCases {
-            let b = SheetButton(frame: .zero); b.title = symbol.name; b.setAccessibilityLabel(symbol.name)
-            b.drawContent = { [weak self] rect in
-                guard let self else { return }; SheetStyle.glyph(.init(symbol: symbol, tint: self.tintPicked ? self.draft.tint : OrbTint.allCases[symbol.rawValue]), in: rect.insetBy(dx: 9, dy: 9))
+        for bodyID in BodyIdentityAdapter.choices {
+            let b = SheetButton(frame: .zero); b.title = bodyID.capitalized; b.setAccessibilityLabel(bodyID.capitalized)
+            b.drawContent = { rect in
+                BodyFaceDrawing.draw(bodyID,in:rect.insetBy(dx:5,dy:5))
             }
-            b.invoke = { [weak self] in self?.selectSymbol(symbol) }; symbolButtons.append(b); card.content.addSubview(b)
+            b.invoke = { [weak self] in self?.selectBody(bodyID) }; symbolButtons.append(b); card.content.addSubview(b)
         }
         for tint in OrbTint.allCases {
             let b = SheetButton(frame: .zero); b.title = String(describing: tint).capitalized; b.drawsPlate = false
@@ -50,12 +55,12 @@ struct SheetChatCustomization: Equatable {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func present(name: String, identity: OrbIdentity, level: Double, in host: NSView) {
-        originalName = name; draft = .init(name: name, symbol: identity.symbol, tint: identity.tint); tintPicked = false
+        originalName = name; draft = .init(name:name,symbol:identity.symbol,tint:identity.tint,bodyID:identity.bodyID,tintID:identity.tintID); tintPicked = false
         nameField.stringValue = name; preview.level = level; sync()
         super.present(anchor: CGRect(x: host.bounds.midX, y: host.bounds.midY, width: 0, height: 0), in: host)
     }
     override func layout() {
-        super.layout(); let width = min(400, max(1, bounds.width - 24)), height: CGFloat = 350
+        super.layout(); let width = min(400, max(1, bounds.width - 24)), height: CGFloat = 446
         card.frame = snapped(CGRect(x: max(12, bounds.midX - width / 2), y: max(12, bounds.midY - height / 2), width: width, height: height)); card.layoutSubtreeIfNeeded()
         preview.frame = snapped(CGRect(x: 20, y: 20, width: 64, height: 64))
         heading.frame = snapped(CGRect(x: 100, y: 21, width: max(1, width - 120), height: 20))
@@ -63,17 +68,28 @@ struct SheetChatCustomization: Equatable {
         nameField.frame = snapped(CGRect(x: 108, y: 54, width: max(1, width - 136), height: 21))
         symbolLabel.frame = snapped(CGRect(x: 20, y: 102, width: width - 40, height: 16))
         for (i, b) in symbolButtons.enumerated() { b.frame = snapped(CGRect(x: 20 + CGFloat(i % 7) * 48, y: 126 + CGFloat(i / 7) * 48, width: 42, height: 42)) }
-        tintLabel.frame = snapped(CGRect(x: 20, y: 228, width: width - 40, height: 16))
+        tintLabel.frame = snapped(CGRect(x: 20, y: 324, width: width - 40, height: 16))
         let tintStep = min(30, max(22, (width - 62) / 12))
-        for (i, b) in tintButtons.enumerated() { b.frame = snapped(CGRect(x: 20 + CGFloat(i) * tintStep, y: 252, width: 22, height: 22)) }
-        defaultsButton.frame = snapped(CGRect(x: 20, y: 302, width: 108, height: 28))
-        cancelButton.frame = snapped(CGRect(x: width - 168, y: 302, width: 70, height: 28)); doneButton.frame = snapped(CGRect(x: width - 90, y: 302, width: 70, height: 28))
+        for (i, b) in tintButtons.enumerated() { b.frame = snapped(CGRect(x: 20 + CGFloat(i) * tintStep, y: 348, width: 22, height: 22)) }
+        defaultsButton.frame = snapped(CGRect(x: 20, y: 398, width: 108, height: 28))
+        cancelButton.frame = snapped(CGRect(x: width - 168, y: 398, width: 70, height: 28)); doneButton.frame = snapped(CGRect(x: width - 90, y: 398, width: 70, height: 28))
     }
     func setName(_ value: String) { nameField.stringValue = value; draft.name = value }
     func controlTextDidChange(_ obj: Notification) { draft.name = nameField.stringValue }
-    func selectSymbol(_ symbol: OrbCelestialBody) { guard !isDismissing else { return }; draft.symbol = symbol; if !tintPicked { draft.tint = OrbTint.allCases[symbol.rawValue] }; sync() }
-    func selectTint(_ tint: OrbTint) { guard !isDismissing else { return }; draft.tint = tint; tintPicked = true; sync() }
-    func useDefaults() { draft.tint = OrbTint.allCases[draft.symbol.rawValue]; tintPicked = false; sync() }
+    func selectSymbol(_ symbol: OrbCelestialBody) { selectBody(String(describing:symbol)) }
+    func selectBody(_ bodyID: String) {
+        guard bodySelectionEnabled,!isDismissing,BodyIdentityAdapter.choices.contains(bodyID) else { return }
+        draft.bodyID=bodyID
+        if let symbol=OrbCelestialBody.allCases.first(where:{String(describing:$0)==bodyID}) { draft.symbol=symbol }
+        if !tintPicked { applyDefaultTint() }; sync()
+    }
+    private func applyDefaultTint() {
+        guard let catalogue=BodyResources.shared.catalogue,let body=try? catalogue.body(draft.resolvedBodyID) else { return }
+        let tint=BodyTintCatalogue.defaultTint(body); draft.tintID=tint.id
+        if let raw=tint.legacyRawValue,let old=OrbTint(rawValue:raw) { draft.tint=old }
+    }
+    func selectTint(_ tint: OrbTint) { guard bodySelectionEnabled,!isDismissing else { return }; draft.tint=tint; draft.tintID=nil; tintPicked=true; sync() }
+    func useDefaults() { guard bodySelectionEnabled else { return }; applyDefaultTint(); tintPicked=false; sync() }
     func commit() {
         guard isShowing, !isDismissing else { return }
         let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -87,8 +103,9 @@ struct SheetChatCustomization: Equatable {
     override func willDismiss(reason: SheetDismissReason) { if reason != .confirmed { onCancel?() } }
     private func sync() {
         preview.identity = draft.identity
-        for (i, b) in symbolButtons.enumerated() { b.selected = OrbCelestialBody.allCases[i] == draft.symbol; b.needsDisplay = true }
-        for (i, b) in tintButtons.enumerated() { b.selected = OrbTint.allCases[i] == draft.tint; b.needsDisplay = true }
-        defaultsButton.isEnabled = draft.tint != OrbTint.allCases[draft.symbol.rawValue]
+        for (i, b) in symbolButtons.enumerated() { b.isEnabled=bodySelectionEnabled; b.selected = BodyIdentityAdapter.choices[i] == draft.resolvedBodyID; b.needsDisplay = true }
+        for (i, b) in tintButtons.enumerated() { b.isEnabled=bodySelectionEnabled; b.selected = (draft.tintID ?? String(describing:draft.tint)) == String(describing:OrbTint.allCases[i]); b.needsDisplay = true }
+        let defaultID=BodyResources.shared.catalogue.flatMap { try? $0.body(draft.resolvedBodyID) }.map { BodyTintCatalogue.defaultTint($0).id }
+        defaultsButton.isEnabled = bodySelectionEnabled && (draft.tintID ?? String(describing:draft.tint)) != defaultID
     }
 }

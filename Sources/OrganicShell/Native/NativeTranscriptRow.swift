@@ -38,11 +38,73 @@ import AppKit
     private var stream: NativeTranscriptStreamLayout?
     private var streamGeneration = -1
     var sourceOffsets: [Int] { stream?.offsets ?? fixedSourceOffsets }
+    func selectedSourceRange() -> NSRange? {
+        let offsets = sourceOffsets
+        let range = body.selectedRange()
+        guard range.location >= 0, range.location < offsets.count, range.length > 0 else { return nil }
+        let end = range.location + min(range.length, offsets.count - range.location)
+        let selected = offsets[range.location..<end].filter { $0 >= 0 }
+        guard let start = selected.first, let last = selected.last, last >= start else { return nil }
+        return NSRange(location: start, length: last - start + 1)
+    }
     private(set) var item = TranscriptItem(id: "", turnID: "", kind: .assistant, text: "")
     var onToggle: (() -> Void)?, onReview: (() -> Void)?, onRevert: (() -> Void)?
     var onEdit: (() -> Void)? { didSet { if (oldValue == nil) != (onEdit == nil) { layoutActions() } } }
     var onFork: (() -> Void)? { didSet { if (oldValue == nil) != (onFork == nil) { layoutActions() } } }
     var allowsRevert = true
+    private(set) var referenceInteraction: NativeReferenceInteraction?
+    private weak var referenceNextKeyView: NSView?
+    private var referenceSourcesHidden = false
+    private var referenceWasVisible = false
+    private var referenceIsVisible: Bool {
+        guard onReference != nil, !body.isHidden, !referenceSourcesHidden, let storage = body.textStorage else { return false }
+        var found = false
+        storage.enumerateAttribute(.transcriptReference, in: NSRange(location: 0, length: storage.length)) { value, _, stop in
+            if value is String { found = true; stop.pointee = true }
+        }
+        // Plain rows need neither a transient interaction view nor viewport/host geometry queries.
+        return found && !body.visibleRect.isEmpty && NativeInteractionSurface.permits(body)
+    }
+    var onReference: ((ReferenceTarget, NSRange) -> Void)? { didSet { updateReferences() } }
+    func reconcileReferenceVisibility() { if referenceWasVisible != referenceIsVisible { updateReferences() } }
+    func updateReferences() {
+        referenceWasVisible = referenceIsVisible
+        guard referenceWasVisible, let onReference else {
+            if let interaction = referenceInteraction, body.nextKeyView === interaction { body.nextKeyView = referenceNextKeyView }
+            referenceInteraction?.revoke(); referenceInteraction?.removeFromSuperview(); referenceInteraction = nil; return
+        }
+        let interaction = referenceInteraction ?? NativeReferenceInteraction()
+        interaction.configure(body: body, action: onReference)
+        if !interaction.hits.isEmpty {
+            if referenceInteraction == nil {
+                referenceNextKeyView = body.nextKeyView; body.nextKeyView = interaction; interaction.nextKeyView = referenceNextKeyView
+                referenceInteraction = interaction; addSubview(interaction)
+            }
+        } else {
+            if body.nextKeyView === interaction { body.nextKeyView = referenceNextKeyView }
+            interaction.removeFromSuperview(); referenceInteraction = nil
+        }
+    }
+    func rawSelection(_ range: NSRange) -> String? {
+        let offsets = sourceOffsets
+        guard range.length > 0, range.location >= 0, NSMaxRange(range) <= offsets.count else { return nil }
+        let mapped = offsets[range.location..<NSMaxRange(range)].filter { $0 >= 0 }
+        guard let first = mapped.first, let last = mapped.last, last >= first else { return nil }
+        if range.location == 0, range.length == offsets.count { return item.text }
+        var source = NSRange(location: first, length: last + 1 - first)
+        for reference in TranscriptContentIndex.parse(item.text) where reference.labelRange.length > 0 && NSIntersectionRange(source, reference.labelRange) == reference.labelRange {
+            source = NSUnionRange(source, reference.range)
+        }
+        return (item.text as NSString).substring(with: source)
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers == "c", window?.firstResponder === body,
+           NativeInteractionSurface.permits(body), let text = rawSelection(body.selectedRange()) {
+            NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string); return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
 
     private var trackingInteraction = false
     var blocksHandoff: Bool {
@@ -65,7 +127,7 @@ import AppKit
         stream = nil; streamGeneration = -1; fixedSourceOffsets = []
         body.setSelectedRange(NSRange(location: 0, length: 0))
         applyFlightHidden([], textHidden: false); applyHiddenSourceRanges([])
-        onToggle = nil; onReview = nil; onRevert = nil; onEdit = nil; onFork = nil
+        onToggle = nil; onReview = nil; onRevert = nil; onEdit = nil; onFork = nil; onReference = nil
         activityMark.status = .none; if hasChrome { metaStatus.status = .none }
         isHidden = true
     }
@@ -169,7 +231,9 @@ import AppKit
             if body.selectedRanges != restored { body.selectedRanges = restored }
         }
         stream = streamed; streamGeneration = prepared.streamGeneration
+        body.isAutomaticLinkDetectionEnabled = false
         fixedSourceOffsets = streamed == nil ? prepared.offsets : []
+        defer { updateReferences() }
         let g = prepared.geometry
         geometry = g
         // Every child sits on the pixel grid: on screen a fractional layer is resampled, in a capture it is drawn
@@ -333,10 +397,11 @@ import AppKit
         let bodyHidden = textHidden || (geometry?.isCompact == true && parts.contains(.activityText))
         let markHidden = geometry?.indicatorRect == nil || parts.contains(.activityMark)
         if hasChrome, divider.isHidden != dividerHidden { divider.isHidden = dividerHidden }
-        if body.isHidden != bodyHidden { body.isHidden = bodyHidden }
+        if body.isHidden != bodyHidden { body.isHidden = bodyHidden; updateReferences() }
         if activityMark.isHidden != markHidden { activityMark.isHidden = markHidden }
     }
     func applyHiddenSourceRanges(_ indices: IndexSet) {
+        if referenceSourcesHidden != !indices.isEmpty { referenceSourcesHidden = !indices.isEmpty; updateReferences() }
         guard let manager = body.layoutManager as? NativeTranscriptFlightLayoutManager, let container = body.textContainer else { return }
         if indices.isEmpty { if manager.setOmittedRanges([], in: container) { body.needsDisplay = true }; return }
         var ranges: [NSRange] = [], start: Int?
@@ -357,12 +422,45 @@ import AppKit
         guard superview != nil,NativeInteractionSurface.permits(self)else{return false}
         pasteboard.clearContents();return pasteboard.setString(item.text,forType:.string)
     }
+    /// Lazy source mapping, invoked only by a selection/drag request, never by row configuration or streaming.
+    func attachmentQuotes(conversationID: String) -> [DragAttachmentPayload.Quote] {
+        let shown = body.string as NSString, offsets = sourceOffsets, sourceLength = (item.text as NSString).length
+        return body.selectedRanges.compactMap { wrapped in
+            let range = wrapped.rangeValue
+            guard range.location != NSNotFound, range.location >= 0, range.length > 0,
+                  range.location < shown.length, range.length <= shown.length - range.location,
+                  range.location < offsets.count, range.length <= offsets.count - range.location else { return nil }
+            let mapped = offsets[range.location..<(range.location + range.length)].filter { $0 >= 0 && $0 < sourceLength }
+            guard let first = mapped.min(), let last = mapped.max() else { return nil }
+            let quote = DragAttachmentPayload.Quote(conversationID: conversationID, itemID: item.id,
+                range: NSRange(location: first, length: last - first + 1), exactText: shown.substring(with: range))
+            return quote.isValid ? quote : nil
+        }
+    }
+    /// Multiple selected items remain separate source ranges in transcript order.
+    func dragAttachmentQuotes() -> [DragAttachmentPayload.Quote] {
+        var parent = superview
+        while let view = parent {
+            if let transcript = view as? NativeTranscript {
+                func rows(_ view: NSView) -> [NativeTranscriptRow] {
+                    if let row = view as? NativeTranscriptRow { return row.isHidden ? [] : [row] }
+                    return view.subviews.flatMap(rows)
+                }
+                let order = Dictionary(transcript.conversation.items.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+                return rows(transcript).filter { order[$0.item.id] != nil }
+                    .sorted { order[$0.item.id]! < order[$1.item.id]! }
+                    .flatMap { $0.attachmentQuotes(conversationID: transcript.conversation.id) }
+            }
+            parent = view.superview
+        }
+        return []
+    }
     @objc private func edited() { if !isHiddenOrHasHiddenAncestor { onEdit?() } }
     @objc private func forked() { if !isHiddenOrHasHiddenAncestor { onFork?() } }
 }
 
 /// The viewport and a flight both draw this same mark; never a second renderer in the flight composer.
-@MainActor private final class NativeTranscriptMark: NativeFlippedView {
+@MainActor private final class NativeTranscriptMark: NativeFlippedView, AmbientSpinner {
     private var phase = 0
     private var clock: Timer?
     var status: RowStatusKind = .none { didSet { if status != oldValue { needsDisplay = true }; updateClock() } }
@@ -374,8 +472,10 @@ import AppKit
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     isolated deinit { clock?.invalidate() }
     override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); updateClock() }
+    func refreshAmbientSpinner() { updateClock() }
     private func updateClock() {
-        let running = status == .progress && symbolName == nil && window != nil && !isHiddenOrHasHiddenAncestor
+        let running = status == .progress && symbolName == nil && window != nil &&
+            !isHiddenOrHasHiddenAncestor && canAnimateSpinner
         if !running { clock?.invalidate(); clock = nil; return }
         guard clock == nil else { return }
         let timer = Timer(timeInterval: 1 / 15, repeats: true) { [weak self] _ in
@@ -415,3 +515,48 @@ import AppKit
 }
 
 extension NativeTranscriptRow: NativePointerHoverClient {}
+
+@MainActor final class NativeSidechatQuoteRow: NativeFlippedView {
+    private let source = SheetStyle.label("", size: 11, weight: .semibold)
+    private let summary = SheetStyle.label("", size: 13)
+    private var quote: SidechatQuote?
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        addSubview(source)
+        addSubview(summary)
+        source.textColor = .secondaryLabelColor
+        summary.maximumNumberOfLines = 0
+        summary.cell?.wraps = true
+        summary.lineBreakMode = .byWordWrapping
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    static func height(for quote: SidechatQuote, width: CGFloat) -> CGFloat {
+        let size = CGSize(width: max(1, min(740, width - 76)), height: .greatestFiniteMagnitude)
+        let rect = (quote.summary as NSString).boundingRect(
+            with: size, options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: NSFont.systemFont(ofSize: 13)]
+        )
+        return ceil(rect.height) + 48
+    }
+
+    func configure(_ value: SidechatQuote, width: CGFloat) {
+        if quote != value {
+            quote = value
+            source.stringValue = "From sidechat · " + value.source
+            summary.stringValue = value.summary
+            setAccessibilityLabel(source.stringValue + ", " + value.summary)
+        }
+        let height = Self.height(for: value, width: width)
+        let span = max(1, min(740, width - 76))
+        let x = (width - span) / 2
+        setFrameSize(CGSize(width: width, height: height))
+        source.frame = CGRect(x: x, y: 8, width: span, height: 16)
+        summary.frame = CGRect(x: x, y: 25, width: span, height: max(1, height - 38))
+    }
+
+}

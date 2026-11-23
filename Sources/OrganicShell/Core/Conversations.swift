@@ -22,6 +22,8 @@ struct Approval: Identifiable, Equatable, Sendable {
     var request: JSONValue = .null
     var source: String = ""
     var submitting = false
+    var revision = 0
+    var isSidechat = false
 
     /// Core grants this application across CUA tools in one backend chat only.
     /// An arbitrary MCP elicitation (even an empty form) cannot acquire this scope.
@@ -124,7 +126,24 @@ struct FileChange: Identifiable, Equatable, Sendable {
 /// The scene-facing API is retained while richer Core rows travel alongside it.
 @MainActor final class Conversation: Identifiable {
     enum Kind: String, Sendable { case user, assistant, reasoning, command, tool }
+    struct Timing: Equatable, Sendable {
+        var started: Double?
+        var completed: Double?
+        func filling(from other: Self?) -> Self {
+            .init(started: started ?? other?.started, completed: completed ?? other?.completed)
+        }
+        func seconds(scale: Double = 1) -> Int? {
+            guard let started, let completed, completed >= started else { return nil }
+            return Int(exactly: ((completed - started) / scale).rounded(.down))
+        }
+    }
     struct Item: Identifiable, Equatable, Sendable {
+        enum Phase: String, Sendable {
+            case commentary
+            case partialAnswer = "partial_answer"
+            case finalAnswer = "final_answer"
+        }
+
         let id: String
         var turnID: String = ""
         var rowKind: RowKind
@@ -132,6 +151,11 @@ struct FileChange: Identifiable, Equatable, Sendable {
         var status: String?
         var revision = 0
         var timestamp: Date?
+        // A present clock marks a live row. Reasoning keeps Core's millisecond units.
+        var coreTiming: Timing?
+        var phase: Phase?
+        var reasoning: ReasoningParts?
+        var quoteFields: ItemQuoteFields?
 
         var kind: Kind {
             get {
@@ -174,8 +198,16 @@ struct FileChange: Identifiable, Equatable, Sendable {
     var isLiveConversation = false
     var backendThreadID: String?
     var activeTurnID: String?
+    var usesLiveTiming: Bool { isLiveConversation || backendThreadID != nil }
+    var turnTimes: [String: Timing] = [:]
+    func turn(_ id: String, started: Double? = nil, completed: Double? = nil) {
+        guard usesLiveTiming, !id.isEmpty, started != nil || completed != nil else { return }
+        turnTimes[id] = Timing(started: started, completed: completed).filling(from: turnTimes[id])
+    }
     var notices = ConversationNoticeFeed()
     var orbActivity = ConversationActivity()
+    var phaseFacts = ConversationPhaseFacts()
+    weak var phaseStore: ConversationStore?
     var cwd: String?
     var historyLoaded = false
     var loading = false
@@ -227,6 +259,14 @@ struct FileChange: Identifiable, Equatable, Sendable {
 
     var summaryIndex: SummaryLogIndex?
     var items: [TranscriptItem] = []
+    var sidechatQuotes: [SidechatQuote] = []
+    var transcriptRows: [TranscriptPresentation.ProjectedRow] {
+        TranscriptPresentation.rows(items: items, quotes: sidechatQuotes)
+    }
+    func mergeSidechatQuotes(_ quotes: [SidechatQuote]) {
+        let known = Set(sidechatQuotes.map(\.id))
+        sidechatQuotes += quotes.filter { !known.contains($0.id) }
+    }
     private var transcriptItemPositions: [String: Int] = [:]
     /// Validated on every hit: public array replacement/reorder cannot leave a stale ID lookup.
     /// The active tail costs O(1), including the first event after a snapshot; older active items cache once.
@@ -238,12 +278,13 @@ struct FileChange: Identifiable, Equatable, Sendable {
         return i
     }
 
-    var draft = ""
+    private(set) var draftRevision: UInt64 = 0
+    var draft = "" { didSet { if draft != oldValue { draftRevision &+= 1 } } }
     var access: Access = .auto
     /// Settings the last message used, and the ones the next message will use (spec: model picker).
     var settings = ModelSettings()
     var next = ModelSettings()
-    var attachments: [Attachment] = []
+    var attachments: [Attachment] = [] { didSet { if attachments != oldValue { draftRevision &+= 1 } } }
     /// Follow-ups waiting for the running reply to finish (Queue).
     var queued: [QueuedMessage] = []
     /// Dictation is typing into the draft (mock).

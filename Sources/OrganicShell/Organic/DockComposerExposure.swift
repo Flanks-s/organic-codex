@@ -31,7 +31,8 @@ import QuartzCore
                 c.concatenate(CGAffineTransform(a:x.x-o.x,b:x.y-o.y,c:y.x-o.x,d:y.y-o.y,tx:o.x,ty:o.y));c.clip(to:v.bounds)
                 if let color=v.layer?.backgroundColor {c.setFillColor(color);let r=v.layer?.cornerRadius ?? 0;c.addPath(CGPath(roundedRect:v.bounds,cornerWidth:r,cornerHeight:r,transform:nil));c.fillPath()}
                 NSGraphicsContext.saveGraphicsState();NSGraphicsContext.current=NSGraphicsContext(cgContext:c,flipped:v.isFlipped)
-                if plates,let b=v as? NSButton {let title=b.title,image=b.image;b.title="";b.image=nil;b.draw(b.bounds);b.title=title;b.image=image}
+                if let b=v as? NativeComposerMenuButton {let saved=b.drawingPlate;b.drawingPlate=plates;b.draw(b.bounds);b.drawingPlate=saved}
+                else if plates,let b=v as? NSButton {let title=b.title,image=b.image;b.title="";b.image=nil;b.draw(b.bounds);b.title=title;b.image=image}
                 else {v.draw(source.convert(source.bounds,to:v).intersection(v.bounds))}
                 NSGraphicsContext.restoreGraphicsState();c.restoreGState()
             }
@@ -119,6 +120,7 @@ import QuartzCore
         weak var source:NSView?
         let layer=CALayer(),history=M10DockHistory()
         var tiles:[(M10DockPicture.Tile,ChordTrail,CALayer)]=[],plates:[(M10DockPicture.Tile,CALayer)]=[]
+        var modelSplit:Int?
         let gaussianInk=CALayer()
         var gaussian:ContentGaussianTransition?
         var active=false,prepared=CGSize.zero
@@ -149,6 +151,39 @@ import QuartzCore
         func reset(){moving=false;gaussianUntil=0;for p in parts{p.reset()};source?.voiceWaveform.setCarryStretch(.zero)}
     }
     private var entries:[ObjectIdentifier:Entry]=[:]
+    func splitPart(for composer: NativeComposer) -> SplitDockBinding.Part? {
+        guard let entry = entries[ObjectIdentifier(composer)],
+              let part = entry.parts.first(where: { $0.active && !$0.layer.isHidden }),
+              let source = part.source else { return nil }
+        return .init(instance: part, source: source, paint: part.layer)
+    }
+    func yieldSplitPaint(to composer: NativeComposer) {
+        guard let entry = entries[ObjectIdentifier(composer)], entry.active else { return }
+        entry.reset()
+        foreground.isHidden = entries.values.allSatisfy { !$0.active }
+    }
+    func endSplitReplyChrome(_ source: NativeComposer, dropsPlaceholder: Bool, update: () -> Void) {
+        let entry = entries[ObjectIdentifier(source)]
+        let prepared = entry?.dirty == false && entry?.preparationViews == nil
+        let model = source.modelButton
+        let previousTitle = model.itemTitle(at: 0)
+        let wasComplete = model.bounds.width >= model.preferredWidth
+        update()
+        guard let entry else { return }
+        var retired: [NSView] = [source.accessButton, source.stopButton] + (dropsPlaceholder ? [source.scrollView] : [])
+        if !wasComplete || previousTitle != model.itemTitle(at: 0) { retired.append(model) }
+        for part in entry.parts where retired.contains(where: { $0 === part.source }) {
+            part.reset()
+            part.layer.removeFromSuperlayer()
+        }
+        entry.parts.removeAll { part in retired.contains(where: { $0 === part.source }) }
+        // The other Parts still carry the sampled geometry. Do not capture replacement ink in this commit.
+        if prepared { entry.dirty = false }
+        refreshForeground()
+    }
+    #if M1126_REPLY_INTERFACE
+    func replyOwnerCount(_ composer: NativeComposer) -> Int { entries.values.filter { $0.source === composer }.count }
+    #endif
     private(set) var captures=0,modeCaptureSkips=0
     private var modeInFlight=false
     private var idleTask:DispatchWorkItem?,inputMonitor:Any?
@@ -188,7 +223,12 @@ import QuartzCore
             MainActor.assumeIsolated {self?.lastInput=CACurrentMediaTime()};return event
         }}
     }
-    func prepare(_ source:NativeComposer, atCommit:Bool = false,onePart:Bool=false) {
+    func prepare(_ source:NativeComposer, atCommit:Bool = false,onePart:Bool=false,registerOnly:Bool=false) {
+        guard !source.splitOwnsPresentation else { return }
+        #if M1138_CAPTURE
+        if SplitRealwinCapture.enabled { SplitRealwinCapture.beginBitmapObservation(); SplitRealwinCapture.invalidateBindings() }
+        defer { if SplitRealwinCapture.enabled { SplitRealwinCapture.endBitmapObservation() } }
+        #endif
         guard let host,source.isDescendant(of:host),source.bounds.width>0 else{return}
         // A mode flight never captures or scans pixels, including its semantic admission/atCommit calls.
         if modeInFlight {
@@ -218,7 +258,8 @@ import QuartzCore
                 self.scheduleIdlePreparation()
             }
         }
-        if !onePart,atCommit && (e.dirty || e.parts.contains(where:{$0.source?.bounds.size != $0.prepared})) {e.reset()}
+        if registerOnly { e.reset(); e.dirty=true; scheduleIdlePreparation(); return }
+        if !onePart,atCommit && (e.dirty || source.modelButton.segmentBlend != nil || e.parts.contains(where:{$0.source?.bounds.size != $0.prepared})) {e.reset();e.dirty=true;e.preparationViews=nil}
         guard !e.active,!e.moving,e.dirty || e.parts.contains(where:{$0.source?.bounds.size != $0.prepared}) else{return}
         if e.preparationViews == nil {
             e.reset();for p in e.parts{p.layer.removeFromSuperlayer()};e.parts=[]
@@ -238,7 +279,14 @@ import QuartzCore
             #if M10_DOCK_SELFTEST
             p.full=full
             #endif
-            p.tiles=M10DockPicture.tiles(M10DockPicture.ink(full,solid),scale:scale).map {tile in let t=ChordTrail(),l=CALayer();ReplicaContainerAudit.register(l,material:.glyph,note:"Composer own-draw tight alpha ink");l.contents=tile.image;l.contentsScale=scale;t.layer.addSublayer(l);p.layer.addSublayer(t.layer);return(tile,t,l)}
+            var tiles=M10DockPicture.tiles(M10DockPicture.ink(full,solid),scale:scale)
+            if view === source.modelButton,let blend=source.modelButton.segmentBlend {
+                guard let a=blend.from.cgImage(forProposedRect:nil,context:nil,hints:nil),let b=blend.to.cgImage(forProposedRect:nil,context:nil,hints:nil) else{continue}
+                let from=M10DockPicture.tiles(a,scale:scale),to=M10DockPicture.tiles(b,scale:scale)
+                guard !from.isEmpty,!to.isEmpty else{continue}
+                p.modelSplit=from.count;tiles=from+to
+            }
+            p.tiles=tiles.map {tile in let t=ChordTrail(),l=CALayer();ReplicaContainerAudit.register(l,material:.glyph,note:"Composer own-draw tight alpha ink");l.contents=tile.image;l.contentsScale=scale;t.layer.addSublayer(l);p.layer.addSublayer(t.layer);return(tile,t,l)}
             p.plates=M10DockPicture.plates(solid,scale:scale).map {tile in let l=CALayer();l.contents=tile.image;l.contentsScale=scale;let x=min(0.49,20/tile.rect.width),y=min(0.49,20/tile.rect.height);l.contentsCenter=CGRect(x:x,y:y,width:1-2*x,height:1-2*y);p.layer.insertSublayer(l,at:0);return(tile,l)}
             // Prepared at the same semantic commit. Gaussian ink shares immutable CGImages, never a backing tree.
             #if M10_DOCK_SELFTEST
@@ -259,6 +307,7 @@ import QuartzCore
     }
     /// Semantic role change only. Plain ink bitmaps prepared at rest; unfiltered plate siblings remain sharp.
     func setGaussianVisible(_ source:NativeComposer,_ visible:Bool,at time:Double,initiallyVisible:Bool) {
+        guard !source.splitOwnsPresentation else { return }
         guard let e=entries[ObjectIdentifier(source)],!e.dirty else{return}
         e.gaussianUntil=time+0.1
         for p in e.parts {
@@ -273,6 +322,7 @@ import QuartzCore
         e.gaussianUntil=0;for part in e.parts {part.reset()};refreshForeground()
     }
     func update(_ source:NativeComposer,frame:M10DockFrame,profile:DisplayProfile,enabled:Bool) {
+        guard !source.splitOwnsPresentation else { return }
         guard let host,let e=entries[ObjectIdentifier(source)] else{return}
         guard source.isDescendant(of:host) else{e.reset();prune();return}
         // A retained mode bitmap owns this ink. Its native source and its exposure foreground must both yield.
@@ -290,10 +340,24 @@ import QuartzCore
             e.moving = e.moving || f.exposure.gate>0
             let active=(f.exposure.gate>0 || semanticGaussian) && !source.isHiddenOrHasHiddenAncestor && !view.isHidden && !e.dirty
             if !active {p.reset();continue}
+            let gaussianGlyphs=p.gaussianInk.sublayers ?? []
+            if p.modelSplit != nil && gaussianGlyphs.count != p.tiles.count {
+                #if M10_DOCK_SELFTEST
+                modelMaterialMismatchCount += 1
+                #endif
+                p.reset();continue
+            }
             p.active=true;p.layer.isHidden=false
             var alpha:Float=1;var ancestor:NSView?=view
             while let v=ancestor,v !== host {alpha *= v === view ? Float(v.alphaValue):(v.layer?.presentation()?.opacity ?? Float(v.alphaValue));ancestor=v.superview}
             p.layer.opacity=alpha;view.layer?.opacity=0
+            if let split=p.modelSplit {
+                let k=source.modelButton.segmentBlend?.progress ?? 1
+                for (i,(_,trail,_)) in p.tiles.enumerated() {
+                    let opacity=Float(i<split ? 1-k:k);trail.layer.opacity=opacity
+                    gaussianGlyphs[i].opacity=opacity
+                }
+            }
             p.layer.frame=foreground.bounds
             #if M10_DOCK_SELFTEST
             p.glyphFrames=[]
@@ -322,7 +386,13 @@ import QuartzCore
         refreshForeground()
     }
     private func refreshForeground(){foreground.isHidden=entries.values.allSatisfy{!$0.active};if let host,host.subviews.last !== foreground{host.addSubview(foreground,positioned:.above,relativeTo:nil)}}
-    func reset(){for e in entries.values{e.reset();for p in e.parts{p.history.reset()}};refreshForeground()}
+    func reset(excluding sources: Set<ObjectIdentifier> = []) {
+        for (key, entry) in entries where !sources.contains(key) {
+            entry.reset()
+            for part in entry.parts { part.history.reset() }
+        }
+        refreshForeground()
+    }
     isolated deinit {idleTask?.cancel();if let inputMonitor{NSEvent.removeMonitor(inputMonitor)};for e in entries.values{e.reset()}}
     func prune(){
         let parked=entries.filter{$0.value.source != nil && $0.value.source?.isDescendant(of:host ?? foreground) != true}.sorted{$0.value.lastPrepared>$1.value.lastPrepared}
@@ -335,6 +405,7 @@ import QuartzCore
         };refreshForeground()
     }
     #if M10_DOCK_SELFTEST
+    private(set) var modelMaterialMismatchCount=0
     private(set) var gaussianPreparationMs=0.0
     var verificationGaussianFields:[String:Any] {
         let parts=entries.values.flatMap{$0.parts}.filter{!$0.gaussianInk.isHidden}

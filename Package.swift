@@ -9,7 +9,9 @@ let package = Package(
         .package(url: "https://github.com/migueldeicaza/SwiftTerm.git", exact: "1.99.1"),
     ],
     targets: [
-        .executableTarget(name: "OrganicShell", dependencies: [.product(name: "SwiftTerm", package: "SwiftTerm")],
+        .target(name: "OrganicBodyResources", path: "Resources", sources: ["BodyResources.swift"],
+                resources: [.copy("Bodies"), .copy("Credits.rtf")]),
+        .executableTarget(name: "OrganicShell", dependencies: ["OrganicBodyResources", .product(name: "SwiftTerm", package: "SwiftTerm")],
                           path: "Sources/OrganicShell"),
     ]
 )

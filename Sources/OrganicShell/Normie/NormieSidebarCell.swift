@@ -1,6 +1,7 @@
 import AppKit
 
 @MainActor final class NormieSidebarCell: NormieView {
+    static var statusNow:()->Date = {Date()}
     let planet = NormieSidebarIdentity(), title = NormieDrawing.label(size: 13)
     let trailing = NormieDrawing.label(size: 11), device = NormieDrawing.label(size: 11)
     let folder = NormieSidebarSymbol(), deviceMark = NormieSidebarSymbol(), statusMark = NormieSidebarSymbol()
@@ -58,7 +59,7 @@ import AppKit
         flightHidden = hidden; planet.isHidden = !isChat || hidden
     }
     func configure(_ row: NormieSidebarRow, model: NormieSidebarModel) {
-        showsRunning = false; runningIndicator.stopAnimation(nil); toolTip = nil
+        showsRunning = false; runningIndicator.running = false; toolTip = nil
         isChat = row.conversationID != nil; nested = false; topLevel = false; isGroup = false; isMore = false
         projectColor = nil; projectExpanded = false; hasStatus = false; rename.isHidden = true
         folder.isHidden = true; device.isHidden = true; deviceMark.isHidden = true
@@ -82,7 +83,7 @@ import AppKit
             guard let c = model.store.conversation(id) else { return }
             nested = project != nil; topLevel = !nested; title.stringValue = c.title
             planet.identity = NormieDrawing.identity(c); hasStatus = NormieSidebarModel.hasStatus(c)
-            let status = NormieSidebarModel.status(c)
+            let status = NormieSidebarModel.status(c, now: Self.statusNow())
             if c.error != nil { statusMark.symbol = "exclamationmark.triangle.fill"; statusMark.tint = .systemRed }
             else if !c.approvals.isEmpty { statusMark.symbol = "hand.raised.fill"; statusMark.tint = .systemOrange }
             else if c.question != nil || c.userInput != nil { statusMark.symbol = "questionmark.bubble.fill"; statusMark.tint = .systemOrange }
@@ -107,7 +108,7 @@ import AppKit
         }
         planet.isHidden = !isChat || flightHidden
         runningIndicator.isHidden = !showsRunning
-        if showsRunning, window != nil { runningIndicator.startAnimation(nil) }
+        runningIndicator.running = showsRunning
         disclosure.setAccessibilityLabel(title.stringValue); updatePalette(); updateHover(); needsLayout = true
     }
     private func showDevice(_ id: String, store: ConversationStore) {
@@ -189,10 +190,6 @@ import AppKit
         super.updateTrackingAreas(); if let tracking { removeTrackingArea(tracking) }
         let area = NSTrackingArea(rect: .zero, options: [.inVisibleRect, .mouseEnteredAndExited, .activeInKeyWindow], owner: self)
         addTrackingArea(area); tracking = area
-    }
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if window != nil, showsRunning { runningIndicator.startAnimation(nil) } else { runningIndicator.stopAnimation(nil) }
     }
     override func mouseEntered(with event: NSEvent) { hovering = true; updateHover() }
     override func mouseExited(with event: NSEvent) { hovering = false; updateHover() }

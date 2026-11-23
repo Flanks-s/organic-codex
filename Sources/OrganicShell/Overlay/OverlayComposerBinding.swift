@@ -8,6 +8,7 @@ import AppKit
     private weak var composer: NativeComposer?
     private weak var host: NSView?
     private var monitor: Any?
+    private var panelModelChange: ((ModelSettings) -> Void)?
     private(set) var isConnected = true
     private(set) var capturesSendPress = false
     /// Share the host window's Engine clock. No extra frame callback/display link is installed.
@@ -18,7 +19,15 @@ import AppKit
     init(composer: NativeComposer, host: NSView, clock: any OverlayClock = OverlaySystemClock()) {
         self.composer = composer; self.host = host
         modelPicker = OverlayModelPicker(clock: clock); sendOptions = OverlaySendOptions(clock: clock)
-        modelPicker.onSettingsChange = { [weak composer] in composer?.setSettings($0) }
+        let previousDismiss = modelPicker.onDismiss
+        modelPicker.onDismiss = { [weak self] reason in
+            self?.revokePanelModelChange()
+            previousDismiss?(reason)
+        }
+        modelPicker.onSettingsChange = { [weak self, weak composer] in
+            if let change = self?.panelModelChange { change($0) }
+            else { composer?.setSettings($0) }
+        }
         sendOptions.canSend = { [weak composer] in guard let composer else { return false }; return composer.superview != nil && !composer.isHiddenOrHasHiddenAncestor && composer.canSend && composer.window?.isKeyWindow != false }
         sendOptions.onShortPress = { [weak composer] in _ = composer?.submit() }
         sendOptions.onSelect = { [weak composer] in _ = composer?.submit(followUp: $0) }
@@ -51,6 +60,10 @@ import AppKit
         isConnected = false
         if let monitor { NSEvent.removeMonitor(monitor); self.monitor = nil }
         sendOptions.cancelPress(); sendOptions.dismiss(); modelPicker.dismiss(); capturesSendPress = false
+        revokePanelModelChange()
+    }
+    private func revokePanelModelChange() {
+        if panelModelChange != nil { panelModelChange = { _ in } }
     }
     private var canPresentModelPicker: Bool {
         guard isConnected, let composer, let host, !host.isHiddenOrHasHiddenAncestor, composer.superview != nil,
@@ -60,10 +73,37 @@ import AppKit
     }
     @discardableResult func presentModelPicker() -> Bool {
         guard canPresentModelPicker, let composer, let host else { return false }
+        guard panelModelChange == nil || !modelPicker.isShowing else { return false }
+        panelModelChange = nil
+        showModelPicker(composer, host: host)
+        return true
+    }
+    @discardableResult
+    func presentModelPicker(for target: Conversation, qualify: @escaping () -> Bool,
+                            completion: @escaping ConversationEditCompletion) -> Bool {
+        guard canPresentModelPicker, !modelPicker.isShowing, let composer, let host,
+              composer.identity == target.id else { return false }
+        let lease = composer.attachmentDropTarget
+        // configure may normalize unsupported settings. Only a user's selection may write next.
+        panelModelChange = { _ in }
+        showModelPicker(composer, host: host)
+        panelModelChange = { [weak self, weak target, weak composer] settings in
+            guard qualify() else { return }
+            guard let self, let target, let composer, self.canPresentModelPicker,
+                  composer.attachmentDropTarget == lease, self.modelPicker.isShowing,
+                  !self.modelPicker.isDismissing else {
+                completion(.failed("This Model picker is no longer available."))
+                return
+            }
+            composer.setSettings(settings)
+            completion(target.next == settings ? .accepted : .failed("The next model was not saved."))
+        }
+        return true
+    }
+    private func showModelPicker(_ composer: NativeComposer, host: NSView) {
         modelPicker.reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         modelPicker.configure(settings: composer.settings, base: composer.baseSettings)
         modelPicker.present(anchor: host.convert(composer.modelButton.bounds, from: composer.modelButton), in: host)
-        return true
     }
     /// Point coordinates are host bounds coordinates; also used by deterministic offscreen integration checks.
     @discardableResult func pointerDown(at point: CGPoint) -> Bool {

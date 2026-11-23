@@ -11,6 +11,7 @@ struct HeaderIslandConfiguration: Equatable {
     var band:CGFloat = 0
     var signals=HeaderIslandSignals()
     var activitySerial:UInt64=0
+    var bodyPhase:BodyPhaseEvent?=nil
     var satellitesRetired=false
     var contextDescription="Context usage has not been reported"
     var contextLimit:String?
@@ -22,6 +23,13 @@ struct HeaderIslandConfiguration: Equatable {
     var noticeColumnWidth:CGFloat?
 }
 
+struct HeaderIslandHostPresentation: Equatable {
+    var conversationID: String?
+    var interactiveRegions: [CGRect]
+    var holdsPeek: Bool
+    var acceptsInput: Bool
+}
+
 @MainActor struct HeaderIslandActions {
     var customize:(()->Void)?
     var rename:((String)->Void)?
@@ -31,6 +39,7 @@ struct HeaderIslandConfiguration: Equatable {
     /// The window owner closes its other islands here. No window/scene registry lives in this component.
     var expansion:((Bool,Bool)->Void)?
     var geometry:((HeaderIslandGeometry)->Void)?
+    var presentation:((HeaderIslandHostPresentation)->Void)?
     /// Sheet owner receives this island's frame in its superview coordinates. nil selects the default row.
     var subAgents:((_ anchor:CGRect,_ select:String?)->Void)?
     /// nil is a click/AX action; a screen point is a satellite dropped away from its row.
@@ -39,6 +48,7 @@ struct HeaderIslandConfiguration: Equatable {
 
 /// Retained native endpoint. The column owns placement and uses snapshots while driver B changes variants.
 @MainActor final class HeaderIsland:IslandPlane, NSTextFieldDelegate, NSPopoverDelegate {
+    var yieldPeekReplyEscape: (() -> Bool)?
     private(set) var configuration:HeaderIslandConfiguration?
     private(set) var state=HeaderIslandState() {didSet {if state != oldValue {NotificationCenter.default.post(name:Notification.Name("Organic.ModePreparationInputsChanged"),object:self)}}}
     private(set) var geometry=HeaderIslandGeometry.make(variant:.full,columnWidth:400,state:.init())
@@ -83,6 +93,14 @@ struct HeaderIslandConfiguration: Equatable {
     /// While the column moves the capsule comes from `motionGeometry`, not from the island's state. An activity line that arrives then
     /// waits for the landing: it showed with no glass under it for the whole motion (board 261031j). One already up stays, with its capsule.
     private var hostMotion=false,hostMotionKeepsActivity=false,hostMotionTruncatesTitle=false
+    private var titleSource: NSImage?, titleTarget: NSImage?
+    private var titleSourceWidth: CGFloat = 0
+    private var titleSourceFont: CGFloat = 1
+    private var titleSourcePoseFont: CGFloat = 1
+    private var titleSourceCenter = CGPoint.zero
+    private var titleSourceWasPulse = false
+    private var titleSourcePoint = CGPoint.zero, titleTargetPoint = CGPoint.zero
+    private var titleSourceOpacity: CGFloat = 1, titleTargetOpacity: CGFloat = 1
     private var shownShape:HeaderIslandShape { hostMotion && !hostMotionKeepsActivity && state.shape == .activity ? .compact:state.shape }
     var motionProfile:DisplayProfile?
     var motionExposure:ExposureSettings = {var s=ExposureSettings();s.enabled=ProcessInfo.processInfo.environment["M10_COLUMNS"] != "0";return s}()
@@ -119,9 +137,33 @@ struct HeaderIslandConfiguration: Equatable {
     private var nameAnimationBegan:Double?
     private var renderedLobe=0, disposed=false, presentationActive=true
     private var interactionGeneration=0
+    private var lastHostPresentation:HeaderIslandHostPresentation?
+    private var publishingHostPresentation=false
+    /// Read the original state machines and painted endpoints; hosts own no Pulse deadlines.
+    var hostPresentation:HeaderIslandHostPresentation {
+        guard !disposed,!browserPresentationSuspended,!isHiddenOrHasHiddenAncestor,configuration?.active == true else {
+            return .init(conversationID:configuration?.id,interactiveRegions:[],holdsPeek:false,acceptsInput:false)
+        }
+        var regions=[visiblePlanet,visibleCapsule]
+        if !lobe.isHidden {regions.append(lobe.frame)}
+        regions += satelliteButtons.values.filter{!$0.isHidden && $0.participates}.map(\.frame)
+        if !overflowButton.isHidden {regions.append(overflowButton.frame)}
+        let p=pulseShowing ? pulse?.state:nil
+        let hold=state.expanded || state.pinned || state.editing || state.focused || state.activity != nil || !carriedSatellites.isEmpty
+            || p?.hovering == true || p?.pinned == true || p?.focused == true || p?.event != nil
+        return .init(conversationID:configuration?.id,interactiveRegions:regions,holdsPeek:hold,acceptsInput:canAct)
+    }
+    private func publishHostPresentation() {
+        guard actions.presentation != nil,!publishingHostPresentation else {return}
+        let value=hostPresentation
+        guard value != lastHostPresentation else {return}
+        lastHostPresentation=value;publishingHostPresentation=true
+        actions.presentation?(value);publishingHostPresentation=false
+    }
     private var pulse:HeaderPulsePresentation?
     private var pulsePresentationRetired=false
     private var modeContentFrozen=false
+    private var browserPresentationSuspended=false
     private var pulseSuppressed:[(NSView,Bool)]=[]
     private var pulseShowing:Bool { pulse?.isEnabled == true && pulse?.isHidden == false }
     var pulseClockRunning:Bool { pulse?.clockRunning == true }
@@ -143,6 +185,7 @@ struct HeaderIslandConfiguration: Equatable {
             else if let c=configuration,c.notices != nil {restorePulseContent();configurePulse(c)}
             // The host can configure a retained hidden island before showing it again.
             if configuration != nil { installMenus(); schedule(); syncOutsideMonitor() }
+            publishHostPresentation()
         }
     }
 
@@ -179,6 +222,12 @@ struct HeaderIslandConfiguration: Equatable {
         titleButton.focus={ [weak self] in self?.setKeyboardFocus($0) }
         eventButton.focus={ [weak self] in self?.setKeyboardFocus($0) }
         planetButton.invoke={ [weak self] in guard let self,self.canAct else { return }; self.actions.customize?() }
+        planetButton.routePointerDown={ [weak self] event in
+            guard let self,event.type != .leftMouseDown && event.type != .rightMouseDown || self.canDragOrb else { return false }
+            return self.orbDragProvider()?.routeOrbInput(from:self,event:event) == true
+        }
+        planetButton.cancelRoutedPointer={ [weak self] in self?.orbDragProvider()?.cancelOrbDrag() == true }
+        planetButton.routesContextInput={ [weak self] in self?.canDragOrb == true && self?.orbDragProvider() != nil }
         planetButton.beginPointerGesture={ [weak self] event in
             guard let self,self.canDragOrb else { return nil }
             return self.orbDragProvider()?.beginOrbDrag(from:self,event:event)
@@ -309,10 +358,13 @@ struct HeaderIslandConfiguration: Equatable {
         if selector == #selector(NSResponder.cancelOperation(_:)) { cancelRename(); return true }; return false
     }
     override func cancelOperation(_ sender:Any?) { escape() }
-    private var canAct:Bool { !disposed && !isHiddenOrHasHiddenAncestor && !promotionInProgress && presentationActive && configuration?.active == true }
+    private var canAct:Bool { !browserPresentationSuspended && !disposed && !isHiddenOrHasHiddenAncestor && !promotionInProgress && presentationActive && configuration?.active == true }
     private func publishExpansion() { actions.expansion?(state.expanded,state.pinned); syncOutsideMonitor() }
 
-    private func render(animated:Bool) {
+    private func render(animated requestedAnimation:Bool) {
+        if browserPresentationSuspended { setAccessibilityHidden(true); return }
+        defer {publishHostPresentation()}
+        let animated=requestedAnimation && !isHiddenOrHasHiddenAncestor
         restorePulseContent()
         guard let c=configuration else { return }
         if !c.active || !presentationActive {satelliteOpeners.values.forEach{$0.cancel()}}
@@ -362,7 +414,7 @@ struct HeaderIslandConfiguration: Equatable {
             eventBaseRect=r;eventButton.text=event.text; eventButton.symbol=event.symbol
             eventButton.tint=event.urgent ? (event.kind == .error ? .systemRed:.systemYellow):event.kind == .done ? .systemGreen:.secondaryLabelColor
         }
-        if !c.active || !presentationActive {eventPhase.reset(visible:showEvent)}
+        if isHiddenOrHasHiddenAncestor {eventPhase.reset(visible:showEvent)}
         else if showEvent != wantedEvent {eventPhase.retarget(visible:showEvent,at:now(),reduced:c.reduceMotion)}
         wantedEvent=showEvent
         eventPhase.sample(now());applyEventPose()
@@ -384,6 +436,9 @@ struct HeaderIslandConfiguration: Equatable {
             renameField.frame=r; renameField.font = .systemFont(ofSize:g.titleFont,weight:.semibold); renameField.participates=c.active && presentationActive
         } else { renameField.participates=false; renameField.removeFromSuperview() }
         var oc=OrbConfiguration(content:c.variant == .newChat ? .seed:.identity(c.identity),drawingSize:56)
+        oc.bodyPhase=c.variant == .newChat ? nil:c.bodyPhase
+        oc.bodyOuter=g.planet.width
+        oc.bodyUnknown=c.signals.context == nil
         oc.context=c.variant == .newChat ? 0:c.signals.context ?? 0
         oc.running=c.variant != .newChat && c.signals.running
         oc.activitySerial=c.variant == .newChat ? 0:c.activitySerial
@@ -410,7 +465,7 @@ struct HeaderIslandConfiguration: Equatable {
         glyphPlane.warmTextures()
         if animated && old != g && (c.notices == nil || state.expanded || state.editing) { animateGeometry(from:departure,to:g) }
         else if localMotion != nil { sampleMotion(at:now()) }
-        if state.lobeRevision != renderedLobe,shape == state.shape { renderedLobe=state.lobeRevision; popLobe() }
+        if state.lobeRevision != renderedLobe,shape == state.shape { renderedLobe=state.lobeRevision; if !isHiddenOrHasHiddenAncestor {popLobe()} }
         if old != g { actions.geometry?(g) }
         if canDragOrb {orbDragProvider()?.prepareOrbDrag(from:self)}
         configurePulse(c)
@@ -422,9 +477,11 @@ struct HeaderIslandConfiguration: Equatable {
     }
 
     private func configurePulse(_ c:HeaderIslandConfiguration) {
+        let work=M10ColumnWorkTrace.scope("peek.header.pulse");defer {work.end()}
         guard let notices=c.notices else {pulse?.suspend();return}
         if pulse == nil {
             let view=HeaderPulsePresentation();pulse=view
+            view.now = { [weak self] in self?.now() ?? CACurrentMediaTime() }
             view.setModeContentFrozen(modeContentFrozen)
             addSubview(view,positioned:.below,relativeTo:orb.glassView)
             view.onToggle={ [weak self] in self?.togglePin() }
@@ -434,9 +491,11 @@ struct HeaderIslandConfiguration: Equatable {
                 if action == .review {self.pulse?.dismiss();self.route(.transcript)} else {self.actions.noticeAction?(action)}
             }
             view.onPanel={ [weak self] in self?.openPanel($0) }
-            view.onExpansion={ [weak self] open,pin in self?.actions.expansion?(open,pin);self?.syncOutsideMonitor() }
+            view.onExpansion={ [weak self] open,pin in self?.actions.expansion?(open,pin);self?.syncOutsideMonitor();self?.publishHostPresentation() }
             view.onPose={ [weak self] scale in
-                guard let self,self.pulseShowing else{return}
+                guard let self else{return}
+                defer {self.publishHostPresentation()}
+                guard self.pulseShowing else{return}
                 let r=self.geometry.planet
                 let frame=CGRect(x:r.midX-r.width*scale/2,y:r.midY-r.height*scale/2,width:r.width*scale,height:r.height*scale)
                 // OrbComponent.setFrame places decorations only. The host owns the visible glass geometry.
@@ -452,7 +511,6 @@ struct HeaderIslandConfiguration: Equatable {
             state:.init(titleWidth:widths[font] ?? 0,hasMark:c.signals.mark != nil,band:c.band,scale:c.scale))
         let suspended = isHiddenOrHasHiddenAncestor || !c.active || pulsePresentationRetired || hostMotion || state.editing || state.expanded || promotionInProgress
         pulse?.frame=CGRect(x:0,y:0,width:c.columnWidth,height:max(geometry.height,compact.capsule.minY+140))
-        pulse?.setAmbientActive(presentationActive)
         pulse?.wallTime=noticeWallTime
         pulse?.configure(notices,input:c,compact:compact.capsule,at:now(),suspended:suspended,interactive:canAct)
         pulse?.setTitleMenu(titleButton.menu)
@@ -487,12 +545,32 @@ struct HeaderIslandConfiguration: Equatable {
     }
 
     /// A transition starts: an open island closes (its expansion, rename and popover end).
-    func beginMotion() {
-        pulse?.suspend(); restorePulseContent()
+    func beginMotion(capturingTitle: Bool = true) {
+        // Capture before configure replaces the endpoint, including any unfinished blend.
+        let wasPulse = pulseShowing
+        let label = wasPulse ? pulse?.motionTitleDrawing ?? nameLabel : nameLabel
+        let source = !capturingTitle || promotionInProgress || configuration?.variant == .newChat ? nil
+            : label.titleImage(scale: window?.backingScaleFactor ?? configuration?.scale ?? 2)
+        let rect = label === nameLabel ? motionGlyphRect : label.convert(label.bounds, to: self)
+        let opacity = label.alphaValue
+        let truncated = (widths[label.font?.pointSize ?? 0] ?? 0)
+            > label.bounds.width + 0.5
+        let pose = motionPose ?? geometry
+        let font = nameLabel.font?.pointSize ?? 1
+        pulse?.suspend()
+        restorePulseContent()
         if state.expanded || state.editing || state.pinned { escape() }
         stopMotionExposure()
+        titleSource = source
+        titleSourceWidth = pose.capsule.width
+        titleSourceFont = font
+        titleSourcePoseFont = pose.titleFont
+        titleSourceCenter = CGPoint(x: pose.capsule.midX, y: pose.capsule.midY)
+        titleSourceWasPulse = wasPulse
+        titleSourcePoint = CGPoint(x: rect.minX, y: rect.midY)
+        titleSourceOpacity = opacity
         if !hostMotion {
-            hostMotionTruncatesTitle=(widths[geometry.titleFont] ?? 0)>geometry.title.width+0.5
+            hostMotionTruncatesTitle = truncated
             hostMotion=true;hostMotionKeepsActivity=state.activity != nil
         }
     }
@@ -525,6 +603,7 @@ struct HeaderIslandConfiguration: Equatable {
 
     /// At rest again: the configured layout, exactly.
     func endMotion() {
+        if nameLabel.titleBlend != nil { pulse?.suspend() }
         stopMotionExposure()
         nameLabel.setBoundsSize(nameLabel.frame.size)
         // What arrived or ended during the motion takes its shape now, on the activity's own spring.
@@ -539,7 +618,10 @@ struct HeaderIslandConfiguration: Equatable {
     /// Call after configuring the retained conversation as .full. No timers or geometry animation are installed.
     func beginPromotion(seedCenterY:CGFloat) -> HeaderIslandPromotion? {
         guard let c=configuration,c.variant == .full,!disposed else { return nil }
-        beginMotion(); promotionInProgress=true; promotionTitleRevealed=false; promotionName="New Chat"
+        beginMotion(capturingTitle: false)
+        promotionInProgress = true
+        promotionTitleRevealed = false
+        promotionName = "New Chat"
         render(animated:false)
         if semanticGaussian {
             animateName(from:nameLabel.stringValue,frame:nameLabel.frame,font:nameLabel.font,bounds:nameLabel.bounds.size,feedback:false)
@@ -680,7 +762,7 @@ struct HeaderIslandConfiguration: Equatable {
         timer?.invalidate(); timer=nil
         // Not canAct: that goes false when the window has been idle for 8 s (the ambient hold), and an event line then
         // stayed on screen until the next input (user 10-30; 14.7 s with a 2.2 s hold in a real-path run).
-        guard !disposed,configuration?.active == true,let deadline=state.nextDeadline else { return }
+        guard !browserPresentationSuspended,!disposed,!isHiddenOrHasHiddenAncestor,configuration?.active == true,let deadline=state.nextDeadline else { return }
         let timer=Timer(timeInterval:max(0.001,deadline-now()),repeats:false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -703,6 +785,7 @@ struct HeaderIslandConfiguration: Equatable {
         // A sibling island's activity/expansion monitor may run before the drag monitor. Whichever sees
         // Esc first cancels the SAME scene gesture; it must not merely dismiss an unrelated nameplate.
         if event.type == .keyDown,event.keyCode == 53,orbDragProvider()?.cancelOrbDrag() == true { return true }
+        if event.type == .keyDown,event.keyCode == 53,yieldPeekReplyEscape?() == true { return false }
         guard canAct else { return false }
         if event.type == .keyDown,event.keyCode == 53,state.expanded || state.editing || state.activity != nil || pulseShowing && pulse?.state.mode != .compact { escape(); return true }
         if event.type == .leftMouseDown,popover == nil,(state.expanded || state.editing || pulseShowing && pulse?.state.pinned == true),!visibleCapsule.union(visiblePlanet).insetBy(dx:-4,dy:-4).contains(convert(event.locationInWindow,from:nil)) {
@@ -741,6 +824,17 @@ struct HeaderIslandConfiguration: Equatable {
         if state.shape == .compact { return titleButton.participates ? titleButton:nil }
         return super.hitTest(point)
     }
+    /// Retire only an unmounted Peek interaction; browser suspension remains independently owned.
+    func retireHiddenInteraction() {
+        let work=M10ColumnWorkTrace.scope("peek.header.retire");defer {work.end()}
+        guard isHiddenOrHasHiddenAncestor else {return}
+        interactionGeneration+=1;timer?.invalidate();timer=nil;lobeTask?.cancel();popover?.close();endInput()
+        satelliteOpeners.values.forEach{$0.cancel()};pulse?.suspend();restorePulseContent()
+        state=HeaderIslandState();hostMotion=false;hostMotionKeepsActivity=false
+        configuration?.active=false;wantedEvent=false;eventPhase.reset(visible:false)
+        stopMotionExposure();orb.setPresentationActive(false);setAccessibilityHidden(true);syncOutsideMonitor()
+        publishHostPresentation()
+    }
     func dispose() {
         restorePulseContent();pulse?.dispose()
         satelliteOpeners.values.forEach{$0.cancel()};satelliteOpeners=[:]
@@ -749,6 +843,7 @@ struct HeaderIslandConfiguration: Equatable {
         timer?.invalidate(); timer=nil; lobeTask?.cancel(); popover?.close(); endInput(); orb.dispose()
         stopMotionExposure()
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor); self.outsideMonitor=nil }
+        publishHostPresentation();actions.presentation=nil
     }
 }
 
@@ -757,6 +852,9 @@ extension HeaderIsland {
         window?.screen.map(DisplayProfile.of) ?? motionProfile ?? DisplayProfile(name:"offscreen island",frameInterval:1/60,mmPerPoint:0.27,persistenceFrames:0)
     }
     private func stopMotionExposure() {
+        nameLabel.titleBlend = nil
+        titleSource = nil
+        titleTarget = nil
         localMotion=nil; lobeMotion=nil; motionClock.stop(); glyphPlane.reset(); controls.layer?.mask=nil
         nameGaussian?.setVisible(true,animated:false);nameGaussian=nil
         for effect in outgoingGaussians {
@@ -808,16 +906,57 @@ extension HeaderIsland {
         orb.exposeGlyphs(now:world(g.planet,origin),earlier:world(previous.planet,oldOrigin),profile:profile,enabled:settings.enabled && !semanticZoom)
         let k=max(0.01,fontScale)
         var baseRect=nameBaseRect
+        let endpoint = configuration?.notices != nil && !pulsePresentationRetired && pulse?.isEnabled == true
+            ? pulse?.motionTitleDrawing ?? nameLabel : nameLabel
+        if hostMotion, (widths[endpoint.font?.pointSize ?? 0] ?? 0)
+            > endpoint.bounds.width + 0.5 { hostMotionTruncatesTitle = true }
         // Promotion retains its authored seed-to-title choreography.
         let constrained=hostMotion && hostMotionTruncatesTitle && !promotionInProgress && configuration?.variant != .newChat
         if constrained {
+            let span = geometry.capsule.width - titleSourceWidth
+            let fontSpan = geometry.titleFont - titleSourcePoseFont
+            let xSpan = geometry.capsule.midX - titleSourceCenter.x
+            let ySpan = geometry.capsule.midY - titleSourceCenter.y
+            if let source = titleSource {
+                if titleTarget == nil {
+                    // Express the captured drawing in the destination font's canonical coordinate space.
+                    let ratio = (nameLabel.font?.pointSize ?? 1) / titleSourceFont
+                    source.size = CGSize(width: source.size.width * ratio, height: source.size.height * ratio)
+                    titleTarget = endpoint.titleImage(
+                        scale: window?.backingScaleFactor ?? configuration?.scale ?? 2, blended: false)
+                    let rect = endpoint === nameLabel ? nameLabel.frame : endpoint.convert(endpoint.bounds, to: self)
+                    titleTargetPoint = CGPoint(x: rect.minX, y: rect.midY)
+                    titleTargetOpacity = endpoint.alphaValue
+                }
+                if let target = titleTarget {
+                    let progress = abs(span) > 0.5 ? (g.capsule.width - titleSourceWidth) / span
+                        : abs(fontSpan) > 0.001 ? (g.titleFont - titleSourcePoseFont) / fontSpan
+                        : abs(xSpan) > 0.5 ? (g.capsule.midX - titleSourceCenter.x) / xSpan
+                        : abs(ySpan) > 0.5 ? (g.capsule.midY - titleSourceCenter.y) / ySpan
+                        : titleSourceWasPulse ? 0 : 1
+                    nameLabel.titleBlend = (source, target, min(1, max(0, progress)))
+                }
+            }
             // A truncated title uses the moving capsule's available width, not the destination's truncation.
             // Keep its native drawing inside the pose view so AppKit can draw the whole label and arrow.
-            baseRect.origin.x=0;baseRect.size.width=g.title.width/k
-            nameLabel.frame=baseRect;nameLabel.setBoundsSize(baseRect.size);nameBaseRect=baseRect
+            baseRect.origin.x = 0
+            baseRect.size.width = g.title.width / k
+            if let blend = nameLabel.titleBlend {
+                baseRect.size.height = max(baseRect.height, blend.from.size.height, blend.to.size.height)
+            }
+            nameLabel.frame = baseRect
+            nameLabel.setBoundsSize(baseRect.size)
+            nameBaseRect = baseRect
         }
         let dx=constrained ? 0:baseRect.midX-geometry.title.midX,dy=baseRect.midY-geometry.title.midY
-        let current=CGRect(x:g.title.midX+(dx-baseRect.width/2)*k,y:g.title.midY+(dy-baseRect.height/2)*k,width:baseRect.width*k,height:baseRect.height*k)
+        var current = CGRect(x: g.title.midX + (dx - baseRect.width / 2) * k,
+                             y: g.title.midY + (dy - baseRect.height / 2) * k,
+                             width: baseRect.width * k, height: baseRect.height * k)
+        if let p = nameLabel.titleBlend?.progress {
+            current.origin.x = titleSourcePoint.x + (titleTargetPoint.x - titleSourcePoint.x) * p
+            current.origin.y = titleSourcePoint.y + (titleTargetPoint.y - titleSourcePoint.y) * p - current.height / 2
+            nameLabel.alphaValue = titleSourceOpacity + (titleTargetOpacity - titleSourceOpacity) * p
+        }
         // Canonical, pixel-aligned native glyphs stay laid out once. Their glyph-only parent follows the analytic
         // subpixel pose: rounding the moving native frame held then jumped whole pixels near the spring's tail.
         // Only while the column moves: the island's own motion (expansion, the planets' island) is as it was.
@@ -829,7 +968,7 @@ extension HeaderIsland {
         var pose=CATransform3DMakeTranslation(current.minX-shift,current.minY,0)
         pose=CATransform3DScale(pose,k,k,1);pose=CATransform3DTranslate(pose,-baseRect.minX,-baseRect.minY,0)
         glyphPose.layer?.transform = abs(k-1)<1e-12 && abs(current.minX-baseRect.minX)<1e-9 && abs(current.minY-baseRect.minY)<1e-9 ? CATransform3DIdentity:pose
-        // The arrow follows the name's moving width, as the product's arrowRect does; the name itself takes its end's truncation at once, as there.
+        // The arrow follows the moving title width while the fixed endpoint drawings blend.
         if hostMotion {chevron.setFrameOrigin(CGPoint(x:baseRect.minX+(g.title.maxX+8-current.minX)/k,y:baseRect.minY+(g.titleRow.midY-8-current.minY)/k))}
         let base=nameBaseRect.size,oldK=earlierFontScale ?? lastMotion?.fontScale ?? fontScale
         let oldName:CGRect
@@ -856,6 +995,7 @@ extension HeaderIsland {
     }
     /// Offscreen and scene-owned driving use the same entry as the display link. No fixed 1/60 Timer.
     func sampleMotion(at time:Double) {
+        defer {publishHostPresentation()}
         pulse?.sample(at:time)
         guard !disposed else { return }
         let dt=exposureProfile.frameInterval*motionExposure.shutter
@@ -1175,8 +1315,18 @@ extension HeaderIsland {
         if !active && presentationActive { interactionGeneration+=1 }
         presentationActive=active; orb.setPresentationActive(active && configuration?.active == true)
         if !active { timer?.invalidate(); timer=nil; popover?.close(); stopMotionExposure() }
-        pulse?.setAmbientActive(active)
         render(animated:false); schedule(); syncOutsideMonitor()
+    }
+    /// Independent of ambient policy: preserve semantic state while another full surface owns this column.
+    func setBrowserPresentationSuspended(_ suspended:Bool) {
+        guard browserPresentationSuspended != suspended else { return }
+        browserPresentationSuspended=suspended
+        if suspended {
+            timer?.invalidate();timer=nil;popover?.close();stopMotionExposure();pulse?.suspend()
+            satelliteOpeners.values.forEach{$0.cancel()};setAccessibilityHidden(true)
+        }
+        render(animated:false);schedule();syncOutsideMonitor()
+        publishHostPresentation()
     }
 }
 

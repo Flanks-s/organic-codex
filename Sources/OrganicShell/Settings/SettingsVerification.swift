@@ -59,6 +59,16 @@ import ObjectiveC.runtime
         NSEvent.keyEvent(with:.keyDown,location:.zero,modifierFlags:flags,timestamp:0,windowNumber:0,context:nil,characters:key,charactersIgnoringModifiers:key,isARepeat:false,keyCode:code)!
     }
     static func main() async {
+        exit(await run())
+    }
+    private static func run() async -> Int32 {
+        let archiveReference = SettingsArchiveClock.referenceDate
+        let date = VerificationRaster.date
+        SettingsArchiveClock.referenceDate = date
+        defer { SettingsArchiveClock.referenceDate = archiveReference }
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.collapse = true
+        defer { OrganicFeatureAvailability.current = savedFeatures }
         _=NSApplication.shared;NSApp.appearance=NSAppearance(named:.darkAqua)
         let output=URL(fileURLWithPath:CommandLine.arguments.dropFirst().first ?? "/tmp/sol-settings-results")
         try? FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
@@ -147,9 +157,14 @@ import ObjectiveC.runtime
         let before=s.records("archived").count
         check(await s.execute(s.operation(.unarchive,["id":"a1"])),"Demo unarchive acknowledgement")
         check(s.records("archived").count == before-1,"Demo unarchive removes record")
+        let archivedIDs = s.records("active").compactMap { $0["id"]?.stringValue }
         check(await s.execute(s.operation(.archiveAll)),"Demo archive all")
         check(s.records("active").isEmpty && s.records("archived").contains{$0["id"] == "c2" && $0["running"] == true},"Archive includes running conversations without stopping them")
         check(s.records("archived").contains{$0["id"] == "c1"},"Archive moves inactive conversation")
+        for id in archivedIDs {
+            await s.execute(s.operation(.demo, ["action": "record.update", "collection": "archived",
+                "id": .string(id), "field": "archivedAt", "value": .number(date.timeIntervalSince1970)]))
+        }
         check(!(await s.execute(s.operation(.login))),"Demo cannot call Live login")
         let rule=s.records("rules").first!,ruleID=rule["id"]!
         await s.execute(s.operation(.demo,["action":"record.update","collection":"rules","id":ruleID,"field":"rule","value":"deny"]))
@@ -200,9 +215,20 @@ import ObjectiveC.runtime
         check(w.focusChain.last?.nextKeyView === w.search,"Tab focus wraps to search")
         png(w.snapshot(scale:1),"directory@1x",output);png(w.snapshot(scale:2),"directory@2x",output)
         preferences.set("look.mode","light");s.go("appearance");w.render()
+        let appearanceRows=w.form.rows.filter{$0.spec.kind != .heading && $0.spec.visual.style != .footer}.map{ $0.spec.id }
+        check(appearanceRows == ["look.text","look.theme","look.glass","color.background","color.foreground","look.accent","look.code","look.font","look.size","code.preview","reset.appearance"],"#130 Appearance removes only the mode row and preserves every remaining row in order")
+        check(SettingsPanels.make(s).contains{$0.kind == .heading && $0.title == "Appearance"},"#130 Appearance group heading is retained")
+        let reloaded=SettingsPreferences(defaults:defaults)
+        check(reloaded.nativeLook == preferences.nativeLook,"#130 loading stored Light leaves the resolved look unchanged")
         for scale:CGFloat in [1,2]{png(w.snapshot(scale:scale),"appearance-light@\(Int(scale))x",output)}
         check(w.view.effectiveAppearance.bestMatch(from:[.aqua,.darkAqua]) == .darkAqua,"Light preference remains dark in the dark-only port")
-        preferences.set("look.mode","dark");preferences.set("look.theme","nord");w.render()
+        let display=NativeDisplayOptions.shared,displayState=display.state
+        for contrast in [true,false] {
+            display.setVerificationState(.init(increaseContrast:contrast,reduceTransparency:displayState.reduceTransparency));display.refresh();w.render()
+            check(display.state.increaseContrast==contrast && w.view.effectiveAppearance.name == NativeDisplayOptions.appearance?.name,"#130 Settings follows Native's contrast appearance with legacy Light stored: \(contrast)")
+        }
+        display.setVerificationState(nil);display.refresh()
+        preferences.set("look.theme","nord");w.render()
         check(SettingsDrawing.palette(w.form).canvas.usingColorSpace(.sRGB) == SettingsDrawing.hex("#2e3440").usingColorSpace(.sRGB),"Window theme palette applies")
         for scale:CGFloat in [1,2]{png(w.snapshot(scale:scale),"appearance-nord@\(Int(scale))x",output)}
         preferences.resetAppearance()
@@ -365,7 +391,7 @@ import ObjectiveC.runtime
         await SettingsM9Verification.run(output:output,check:check)
         let report="Settings \(checks) checks / \(failures.count) failures · \(images) PNGs\n"+failures.joined(separator:"\n")+"\nOffscreen AppKit output; no Live backend, visible window, NSColorPanel or native sheet was presented.\n"
         try? report.write(to:output.appendingPathComponent("results.txt"),atomically:true,encoding:.utf8);print(report)
-        exit(failures.isEmpty ? 0:1)
+        return failures.isEmpty ? 0 : 1
     }
 }
 #endif

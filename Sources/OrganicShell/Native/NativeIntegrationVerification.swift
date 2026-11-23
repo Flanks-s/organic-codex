@@ -5,6 +5,9 @@ import ObjectiveC
 /// Compile Core/*.swift and Native/*.swift with -D M1_SELFTEST; no window or NSApplication.run is used.
 @main @MainActor enum M1Verification {
     static func main() throws {
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.dictation = true
+        defer { OrganicFeatureAvailability.current = savedFeatures }
         _ = NSApplication.shared
         let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "/tmp/sol-native-m1")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
@@ -74,7 +77,9 @@ import ObjectiveC
             }
         }
         check(relativeEvents(events) == relativeEvents(sameEvents), "Deterministic relative-clock replay, including every timestamp offset")
-        let deltas = events.filter { $0.method == "item/reasoning/textDelta" || $0.method == "item/agentMessage/delta" }
+        let deltas = events.filter {
+            $0.method == "item/reasoning/summaryTextDelta" || $0.method == "item/agentMessage/delta"
+        }
         check(deltas.allSatisfy { ($0.params["delta"]?.stringValue?.count ?? 0) <= 16 }, "At most 16 characters per tick")
         let replayOrigin=events.first?.time ?? 0
         check(deltas.allSatisfy { let quarters=(($0.time ?? 0)-replayOrigin)*4;return quarters.rounded() == quarters }, "Quarter-second virtual clock relative to the seed origin")
@@ -148,6 +153,66 @@ import ObjectiveC
         transcript.setTextHidden(false, itemID: raw.id)
         check(transcript.snapshot(scale: 1).dataProvider?.data == beforeHiding.dataProvider?.data, "Restoring flight text restores identical pixels")
         func descendants(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants($0) } }
+        do {
+            let live = Conversation(id: "d92", title: "Live timing fixture")
+            live.isLiveConversation = true
+            let clocks = ConversationStore(conversations: [live])
+            func send(_ method: String, _ params: JSONValue) {
+                let change = EventReducer.applyReportingChange(
+                    .init(id: live.revision + 1, time: nil, method: method, params: params), to: live)
+                clocks.changed(live, change: change)
+            }
+            let thought: JSONValue = ["id": "r1", "type": "reasoning", "summary": ["Reasoning"]]
+            let answer: JSONValue = ["id": "a", "type": "agentMessage", "text": "Answer"]
+            send("turn/started", ["turn": ["id": "t", "startedAt": 100]])
+            send("item/completed", ["turnId": "t", "item": thought])
+            send("item/completed", ["turnId": "t", "item": answer])
+            let view = NativeTranscript(conversation: live, store: clocks)
+            view.frame = CGRect(x: 0, y: 0, width: 640, height: 420)
+            check(live.running && view.displayedText(itemID: "a") == "Answer"
+                  && view.flightSource(.workedDivider, itemID: "a", scale: 1) == nil,
+                  "D92 live running turn has a measured answer without a Worked for divider")
+            check(view.displayedText(itemID: "r1") == "Thought", "D92 live reasoning without a clock says Thought")
+            let measured = view.rowConfigurationCount(itemID: "a")
+            let finished: JSONValue = ["turn": ["id": "t", "status": "completed", "completedAt": 121.151]]
+            send("turn/completed", finished)
+            let row = descendants(view).compactMap { $0 as? NativeTranscriptRow }.first { $0.item.id == "a" }
+            let label = row?.flightView(.workedDivider) as? NSTextField
+            check(label?.stringValue == "Worked for 21s" && view.rowConfigurationCount(itemID: "a") > measured,
+                  "D92 live completed turn remeasures its answer with Worked for 21s")
+            for field in ["startedAt", "completedAt"] {
+                let incomplete = Conversation(id: "d92-\(field)", title: "Incomplete clock")
+                incomplete.isLiveConversation = true
+                let raw: JSONValue = .object(["id": "t", "status": "completed", field: 100, "items": [thought, answer]])
+                EventReducer.hydrate(["turns": [raw]], into: incomplete)
+                check(TranscriptPresentation.workedFor(index: 1, items: incomplete.items) == nil,
+                      "D92 live completed turn with only \(field) has no Worked for")
+            }
+            let restored = Conversation(id: "d92-replay", title: "Live replay fixture")
+            restored.backendThreadID = "d92-replay"
+            let replay = HistoryReplay(conversation: restored, cursor: 0, seeded: false)
+            let started: JSONValue = ["id": "r1", "type": "reasoning", "text": "Reasoning", "startedAtMs": 102234]
+            let snapshot: JSONValue = ["turns": [["id": "t", "status": "inProgress", "startedAt": 100,
+                                                "items": [started, answer]]]]
+            let thoughtEnd: JSONValue = ["id": "r1", "type": "reasoning", "text": "Reasoning", "completedAtMs": 106721]
+            EventReducer.hydrate(snapshot, into: restored)
+            replay.apply(.init(id: 1, time: nil, method: "item/completed",
+                               params: ["turnId": "t", "item": thoughtEnd]), through: 2)
+            replay.apply(.init(id: 2, time: nil, method: "turn/completed", params: finished), through: 2)
+            replay.merge(into: restored, snapshot: snapshot)
+            check(SummaryLog(restored, playful: false).stretches.last?.workedFor == "Worked for 21s",
+                  "D92 replay combines snapshot start and replay completion")
+            let item = restored.items[0]
+            let presentation = TranscriptPresentation.presentation(for: item)
+            let parts = TranscriptPresentation.activityParts(item, presentation: presentation)
+            check(parts.map(\.text) == ["Thought for 4s"], "D92 replay reasoning uses its 4487 ms clock")
+            let mock = MockSeed.make().first { $0.id == "F" }!
+            let mockTurn: JSONValue = ["id": "F-t1", "startedAt": 100, "completedAt": 121.151]
+            EventReducer.apply(.init(id: 1, time: nil, method: "turn/completed", params: ["turn": mockTurn]), to: mock)
+            check(TranscriptPresentation.workedFor(index: 5, items: mock.items) == "Worked for 2m 52s",
+                  "D92 mock F-6 keeps the seed divider with real timestamps present")
+            check(TranscriptPresentation.thoughtSeconds(mock.items[1]) == 4, "D92 mock F-2 keeps Thought for 4s")
+        }
         func click(_ title: String, in view: NSView) -> Bool {
             guard let button = descendants(view).compactMap({ $0 as? NSButton }).first(where: { $0.title == title && !$0.isHidden }) else { return false }
             button.performClick(nil); return true
@@ -175,7 +240,8 @@ import ObjectiveC
         check(click("Features only", in: questionView), "Question choice is a native action")
         let inputs = descendants(questionView).compactMap { $0 as? NSTextField }.filter(\.isEditable)
         editField(inputs.last, "Include the context row")
-        check(click("Submit answer", in: questionView) && question.userInput == nil && question.question == nil, "Question fixture submits choice and text")
+        check(click("Submit", in: questionView) && question.userInput == nil && question.question == nil,
+              "Question fixture submits choice and text")
         check(question.items.last?.text == "Features only\nInclude the context row", "Question fixture retains submitted content")
 
         let all = Conversation(id: "all-rows", title: "All row kinds")
@@ -408,20 +474,21 @@ import ObjectiveC
         formView.frame = CGRect(x: 0, y: 0, width: 500, height: 500); formView.refresh()
         var receivedAnswers: [(String, [String: [String]])] = []
         formView.onAnswer = { request, answers in receivedAnswers.append((request.id, answers)) }
-        let submitForm = descendants(formView).compactMap { $0 as? NSButton }.first { $0.title == "Submit answer" }!
-        check(!submitForm.isEnabled && descendants(formView).compactMap { $0 as? NSTextView }.contains { $0.string == "Keep the full outline" }, "Question descriptions are visible; incomplete form cannot submit")
+        let description = descendants(formView).compactMap { $0 as? NSTextView }
+        check(description.contains { $0.string == "Keep the full outline" }, "Question descriptions are visible")
+        check(click("Outline", in: formView), "Selecting an option moves to the next question")
+        let submitForm = descendants(formView).compactMap { $0 as? NSButton }.first { $0.title == "Skip" } ?? NSButton()
         let secret = descendants(formView).compactMap { $0 as? NativeSecureField }.first!
-        check(click("Outline", in: formView) && !submitForm.isEnabled, "Selecting one option does not submit an incomplete form")
-        editField(secret, "   "); check(!submitForm.isEnabled, "Whitespace secret is invalid")
+        editField(secret, "   ")
+        check(submitForm.title == "Skip" && submitForm.isEnabled && receivedAnswers.isEmpty, "Whitespace offers Skip")
         editField(secret, "sensitive answer"); check(submitForm.isEnabled, "All valid answers enable Submit")
         submitForm.performClick(nil)
         check(receivedAnswers.first?.0 == "request-id" && receivedAnswers.first?.1 == ["choice-id": ["Outline"], "secret-id": ["sensitive answer"]], "Structured submit preserves request ID, question IDs and option labels")
-        let freeAnswer = descendants(formView).compactMap { $0 as? NativeLabel }.first { $0.isEditable && $0.identifier?.rawValue == "choice-id" }!
-        editField(freeAnswer, "Own answer")
         formView.refresh(preservingOffset: true)
-        check(freeAnswer.stringValue == "Own answer" && secret.stringValue == "sensitive answer", "Refresh preserves per-question values and secret control identity")
+        check(descendants(formView).contains { $0 === secret } && secret.stringValue == "sensitive answer",
+              "Refresh preserves per-question values and secret control identity")
         formConversation.userInput?.submitting = true; formView.refresh(preservingOffset: true)
-        let waitingSubmit = descendants(formView).compactMap { $0 as? NSButton }.first { $0.title == "Submit answer" }!
+        let waitingSubmit = descendants(formView).compactMap { $0 as? NSButton }.first { $0.title == "Submit" }!
         let answerCount = receivedAnswers.count; waitingSubmit.performClick(nil)
         check(!waitingSubmit.isEnabled && receivedAnswers.count == answerCount && !secret.isEnabled, "Submitting form disables edits and duplicate native submissions")
 
@@ -878,6 +945,34 @@ import ObjectiveC
         let hiddenEditor=leased.proxy(leased.textView,parent:leased)!
         leased.isHidden=true;leased.isHidden=false;hiddenEditor.setAccessibilityValue("stale hidden")
         check(leased.text == "AX current draft","Hidden/shown composer does not revive old editor AX")
+        for mode in [NativeComposerLayout.fullBar, .growing] {
+            leased.layoutMode = mode
+            leased.setFrameSize(CGSize(width: 640, height: mode == .fullBar ? 48 : 120))
+            leased.layoutSubtreeIfNeeded()
+            let host = mode == .fullBar ? "Organic full bar" : "Normie composer"
+            let draft = leased.proxy(leased.textView, parent: leased, adoptParent: false)
+            let children = leased.accessibilityAttributeValue(.children) as? [NativeInteractionProxy] ?? []
+            let send = children.filter { $0.accessibilityLabel() == "Send" }
+            let model = children.filter { $0.accessibilityLabel()?.hasPrefix("Next message model: ") == true }
+            check(leased.accessibilityRole() == .group, "D91 \(host) exports a group")
+            check(send.count == 1 && send.first?.accessibilityRole() == .button,
+                  "D91 \(host) AX children contain one Send button")
+            check(send.first?.source === leased.sendButton && send.first?.accessibilityChildren()?.isEmpty == true,
+                  "D91 \(host) Send exports its view once")
+            check(model.count == 1 && model.first?.accessibilityRole() == .popUpButton,
+                  "D91 \(host) AX children contain one model popup")
+            let scroll = draft?.accessibilityParent() as? NativeInteractionProxy
+            check(draft?.accessibilityLabel() == "Message draft" && draft?.accessibilityRole() == .textArea,
+                  "D91 \(host) draft keeps its focused AX identity")
+            check(scroll?.source === leased.scrollView && scroll?.accessibilityParent() as? NSView === leased,
+                  "D91 \(host) draft parent chain remains scroll area then composer")
+            check(scroll?.accessibilityChildren()?.first as? NativeInteractionProxy === draft,
+                  "D91 \(host) traversal reuses the focused draft")
+        }
+        leased.layoutMode = .fullBar
+        leased.alphaValue = 0
+        let brief = leased.accessibilityAttributeValue(.children) as? [Any] ?? []
+        check(leased.isAccessibilityHidden() && brief.isEmpty, "D91 Brief withdraws the composer AX children")
         let pendingDraft=sessions.draft(),draftView=pendingDraft.composer
         draftView.frame=CGRect(x:0,y:0,width:640,height:48);draftView.verificationAXScreenOrigin = .zero;draftView.layoutSubtreeIfNeeded();draftView.measureNow()
         let oldDraftAX=draftView.proxy(draftView.textView,parent:draftView)!

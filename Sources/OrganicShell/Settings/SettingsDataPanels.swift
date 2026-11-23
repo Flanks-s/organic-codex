@@ -1,5 +1,9 @@
 import AppKit
 
+@MainActor enum SettingsArchiveClock {
+    static var referenceDate: Date?
+}
+
 @MainActor extension SettingsPanelBuilder {
     mutating func archived() {
         heading("Archived Chats");filter("Search archived chats")
@@ -17,7 +21,15 @@ import AppKit
             heading(name,id:"project."+key)
             for c in groups[key] ?? [] {
                 let id=c["id"]?.settingsText ?? "",deviceName=devices.first{$0["id"] == c["deviceID"]}?["name"]?.settingsText ?? "Device"
-                let relative=c["archivedAt"]?.doubleValue.map{Date(timeIntervalSince1970:$0).formatted(.relative(presentation:.named))} ?? "Date not reported"
+                let relative = c["archivedAt"]?.doubleValue.map {
+                    let date = Date(timeIntervalSince1970: $0)
+                    guard let reference = SettingsArchiveClock.referenceDate else {
+                        return date.formatted(.relative(presentation: .named))
+                    }
+                    let formatter = RelativeDateTimeFormatter()
+                    formatter.dateTimeStyle = .named
+                    return formatter.localizedString(for: date, relativeTo: reference)
+                } ?? "Date not reported"
                 info(c["title"]?.settingsText ?? "Untitled","Archived "+relative+" · "+deviceName,id:"archive."+id)
                 command("unarchive."+id,"Unarchive",kind:.unarchive,payload:["id":.string(id),"deviceID":c["deviceID"] ?? .null])
                 if demo {demoCommand("delete."+id,"Delete permanently",action:"remove",payload:["collection":"archived","id":.string(id)],destructive:true,confirm:"Delete this archived prototype chat? This cannot be undone.")}

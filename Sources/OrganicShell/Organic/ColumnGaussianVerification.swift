@@ -91,7 +91,7 @@ import QuartzCore
             let s=AutoScene(size:size,store:store,profile:M10ColumnVerification.profile,scale:scale)
             s.columnExposureEnabled=i==1 || i==2;s.columnZoomStyle=i>=2 ? .gauss:.accum;s.manualSettle=true;s.restOnSnapshot=true;s.ambient=false;return s
         }
-        var clock=CACurrentMediaTime()+3600
+        var clock=VerificationClock.renderOrigin
         for s in scenes {s.now={clock};s.install();s.clock.invalidate()}
         defer{scenes.forEach{$0.disposeTranscriptPresentation()}}
         if name=="card-disappear" {scenes.forEach{$0.columns.forEach{$0.cardBand=52...714}}}
@@ -165,7 +165,7 @@ import QuartzCore
         print("M10.1 \(name) \(scale)x: \(k) frames; prepare \(costs.map{$0["prepareMs"] ?? 0})")
     }
     static func gaussianFixture(scale:CGFloat,output:URL) {
-        let size=CGSize(width:256,height:128),host=CALayer(),clock=SceneClock(),start=CACurrentMediaTime()+3600
+        let size=CGSize(width:256,height:128),host=CALayer(),clock=SceneClock(),start=VerificationClock.renderOrigin
         let text=TextBlock.singleLine("Gaussian · 内容",style:TextStyle(font:.systemFont(ofSize:24),color:.white,lineHeight:32),scale:scale)!
         let asset=M10ColumnGaussianAsset(size:size)
         asset.append([.init(image:text.image,rect:CGRect(origin:CGPoint(x:16,y:40),size:text.size))],to:asset.ink,scale:scale)

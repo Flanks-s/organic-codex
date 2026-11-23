@@ -101,7 +101,13 @@ import ObjectiveC
         customize.onDone = { customResults.append($0) }; customize.onCancel = { customCancels += 1 }
         customize.present(name: parent.title, identity: .assigned(2), level: parent.contextUsed, in: host)
         check(!agents.isShowing && agentDismissals.last == .replaced && host.subviews.compactMap { $0 as? SheetSurface }.count == 1, "A new M4 modal synchronously replaces the prior one; only one shield")
-        check(customize.symbolButtons.count == 13 && customize.tintButtons.count == 13, "All 13 Orb symbols and 13 tints are present")
+        let bodyChoices = BodyIdentityAdapter.choices
+        let bodyTitles = customize.symbolButtons.map(\.title)
+        let tintTitles = OrbTint.allCases.map { String(describing: $0).capitalized }
+        check(bodyChoices.count == 24 && Set(bodyChoices).count == 24 && !bodyChoices.contains("earth") &&
+              bodyTitles == bodyChoices.map(\.capitalized) &&
+              tintTitles.count == 13 && customize.tintButtons.map(\.title) == tintTitles,
+              "Customize presents all 24 conversation bodies and all 13 legacy tints in order")
         check(customize.initialResponder === customize.nameField && customize.nameField.nextKeyView === customize.symbolButtons.first, "Customize owns native field focus and a contained Tab loop")
         customize.selectSymbol(.mars); check(customize.draft.tint == .rust && !customize.tintPicked, "Picking a symbol carries its default tint before a manual color")
         customize.selectTint(.mint); customize.selectSymbol(.jupiter); check(customize.draft.tint == .mint && customize.tintPicked, "Manual tint survives subsequent symbol changes")
@@ -244,9 +250,17 @@ import ObjectiveC
         var nativeCustomResults: [SheetChatCustomization] = [], nativeCustomCancels = 0
         nativeCustomize.onDone = { nativeCustomResults.append($0) }; nativeCustomize.onCancel = { nativeCustomCancels += 1 }
         nativeCustomize.present(name: "Original", identity: .assigned(1), level: 0.4) { $0.present(at: nil) }
-        nativeCustomize.sheet.setName(" Native name "); nativeCustomize.sheet.selectSymbol(.neptune); nativeCustomize.sheet.commit()
-        check(!nativeCustomize.isShowing && nativeCustomResults == [.init(name: "Native name", symbol: .neptune, tint: .indigo)] && nativeCustomCancels == 0, "Native Customize window-sheet returns name/symbol/tint once and closes")
         let oldCustomizeWindow = fakeWindows.last!
+        nativeCustomize.sheet.setName(" Native name ")
+        nativeCustomize.sheet.selectSymbol(.neptune)
+        nativeCustomize.sheet.commit()
+        let expectedCustomization = SheetChatCustomization(name: "Native name", symbol: .neptune, tint: .peach,
+                                                           bodyID: "neptune", tintID: "body.neptune")
+        check(nativeCustomResults == [expectedCustomization] && nativeCustomCancels == 0,
+              "Native Customize Done returns the exact name, body and tint once without cancelling")
+        check(!nativeCustomize.isShowing && nativeCustomize.sheet.superview == nil &&
+              oldCustomizeWindow.dismissals == 1,
+              "Native Customize Done closes the window and detaches the sheet exactly once")
         nativeCustomize.present(name: "Again", identity: .assigned(0), level: 0) { $0.present(at: nil) }; oldCustomizeWindow.onClose()
         check(nativeCustomize.isShowing, "Old native Customize close cannot retire its replacement")
         nativeCustomize.dismiss(); check(nativeCustomCancels == 1 && !nativeCustomize.isShowing, "Native Customize dismiss cancels without committing")

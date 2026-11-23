@@ -1,4 +1,5 @@
 import AppKit
+import ObjectiveC
 import QuartzCore
 
 /// Windowless, synthetic mock-shaped history. Enter only through --selftest's early return.
@@ -39,7 +40,7 @@ import QuartzCore
             let sessions = NativeTranscriptSessions()
             let scene = AutoScene(size: size, store: store, profile: .init(name: "long-selftest", frameInterval: 1/120, mmPerPoint: 0.2, persistenceFrames: 0), scale: 2, transcriptSessions: sessions)
             scene.verificationPresented = true; scene.manualSettle = true; scene.ambient = false
-            var clock = CACurrentMediaTime() + 3600; scene.now = { clock }
+            var clock = VerificationClock.renderOrigin; scene.now = { clock }
             let bench = NormieWorkbench(store: store, sessions: NativeComposerSessions(), current: c.id, transcriptSessions: sessions)
             bench.setTranscriptPresentationActive(false)
             let host = NormieView(frame: CGRect(origin: .zero, size: size))
@@ -118,12 +119,84 @@ import QuartzCore
             sample("mode-normie-source-tile", n, normieTiles)
             results.append(["case": "mode-normie-source-total", "items": n, "milliseconds": normieTiles.reduce(0,+)])
             scene.disposeTranscriptPresentation(); sessions.dispose()
+            if n == 20000 { peekScrollProfiles(c, size: size, check: check) }
         } }
         let report: [String: Any] = ["checks": checks, "failures": failures, "optimized": !_isDebugAssertConfiguration(), "results": results]
         if let json = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) { try? json.write(to: out.appendingPathComponent("long-conversation.json")) }
         print("Long conversation: \(checks) checks, \(failures.count) failures")
         return failures.isEmpty ? 0 : 1
     }
+    private static func peekScrollProfiles(_ c: Conversation, size: CGSize, check: (Bool, String) -> Void) {
+        let anchor = CGRect(x: 1000, y: size.height - 70, width: 50, height: 50)
+        let g = AutoLayout().peek(over: anchor, size: size, satelliteRows: 1, satellite: 19, metrics: .tuned(for: size))
+        let peek = PeekNode(size: size, scale: 2)
+        peek.ambient = false
+        peek.open(c, geometry: g)
+        let reads = countScreenReads(of: peek.view) { peek.scroll(by: 10_000_000) }
+        print("Peek scroll profile reads @20000:", reads)
+        check(reads == 1, "Peek scroll reads one profile @20000 (read \(reads))")
+        peek.clear()
+
+        let profilePeek = PeekNode(size: size, scale: 2)
+        profilePeek.ambient = false
+        profilePeek.open(c, geometry: g)
+        defer { profilePeek.clear() }
+        guard let content = profilePeek.verificationLyricsLayer.sublayers?.first else {
+            check(false, "Peek profile fixture mounts lyrics")
+            return
+        }
+        let first = DisplayProfile(name: "first", frameInterval: 1 / 24, mmPerPoint: 2.7, persistenceFrames: 0)
+        let second = DisplayProfile(name: "second", frameInterval: 1 / 48, mmPerPoint: 5.4, persistenceFrames: 0)
+        for (profile, dy) in [(first, CGFloat(10_000_000)), (second, CGFloat(-10_000_000))] {
+            let previous = content.sublayers ?? []
+            var frames: [M10DockFrame] = []
+            profilePeek.motionProfile = profile
+            profilePeek.onMotionFrame = { frames.append($0) }
+            profilePeek.scroll(by: dy)
+            profilePeek.onMotionFrame = nil
+            let glyphs = frames.filter { $0.name == "peek.scroll.glyph" }
+            if profile.name == "second" {
+                check(frames.contains { $0.name == "peek.scroll.dots" }, "Peek second scroll fixture exposes dots")
+            }
+            check(!glyphs.isEmpty && frames.allSatisfy { $0.mmPerPoint == profile.mmPerPoint },
+                  "Peek \(profile.name) scroll uses current profile for glyph and dots")
+            if M10DockMotion.enabled, !Motion.reduce, !M10DockZoom.gaussian {
+                let entered = (content.sublayers ?? []).filter { layer in !previous.contains { $0 === layer } }
+                let delays = entered.compactMap {
+                    $0.animation(forKey: "m10.dock.instanceDelay") as? CAKeyframeAnimation
+                }
+                let expected = M10DockRowTrail.frames(
+                    distance: 18, response: 0.55, damping: 0.92, profile: profile).count
+                let actual = delays.map { $0.keyTimes?.count ?? 0 }
+                print("Peek \(profile.name) scroll row trail samples:", actual, "expected:", expected)
+                check(!entered.isEmpty && actual.count == entered.count && actual.allSatisfy { $0 == expected },
+                      "Peek \(profile.name) scroll uses current profile for newly entered row trails")
+            }
+        }
+    }
+
+    /// Observe the actual detached-view lookup on this one view and restore AppKit before running other checks.
+    private static func countScreenReads(of target: NSView, during scroll: () -> Void) -> Int {
+        let selector = #selector(getter: NSView.window)
+        guard let method = class_getInstanceMethod(NSView.self, selector) else { return -1 }
+        typealias WindowGetter = @convention(c) (NSView, Selector) -> NSWindow?
+        let original = method_getImplementation(method)
+        let window = unsafeBitCast(original, to: WindowGetter.self)
+        var reads = 0
+        let probe: @convention(block) (NSView) -> NSWindow? = { view in
+            if view === target { reads += 1 }
+            return window(view, selector)
+        }
+        let replacement = imp_implementationWithBlock(probe)
+        _ = method_setImplementation(method, replacement)
+        defer {
+            _ = method_setImplementation(method, original)
+            _ = imp_removeBlock(replacement)
+        }
+        scroll()
+        return reads
+    }
+
     static func peekPixels(to out: URL, check: (Bool, String) -> Void) {
         for scale: CGFloat in [1, 2] { autoreleasepool {
             let c = fixture(96); c.running = false; c.items[c.items.count - 1].status = nil

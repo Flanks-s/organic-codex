@@ -50,6 +50,12 @@ struct HeaderPulseState {
     mutating func focus(_ value: Bool) { focused = value }
     mutating func togglePin() { pinned.toggle() }
     mutating func dismiss() { event = nil; remaining = 0; pinned = false; hovering = false; inside = false; focused = false }
+    var nextDelay: Double {
+        let hover = inside == hovering ? .infinity : (inside ? Self.dwell : Self.grace) - hoverAge
+        let expiry = event != nil && !inside && !pinned && !focused ? remaining : .infinity
+        let update = event != nil && candidateText != nil ? Self.liveEvery - liveAge : .infinity
+        return min(hover, expiry, update)
+    }
     mutating func tick(_ dt: Double) {
         hoverAge += dt
         if inside && !hovering && hoverAge + 1e-9 >= Self.dwell { hovering = true }
@@ -106,6 +112,7 @@ struct PulseTextSwap {
     private(set) var text = ""
     private var next: String?
     private(set) var k = 1.0
+    var busy: Bool { next != nil || k < 1 }
     mutating func put(_ value: String, immediate: Bool = false) {
         if immediate || text.isEmpty { text = value; next = nil; k = 1; return }
         guard (next ?? text) != value else { return }; next = value

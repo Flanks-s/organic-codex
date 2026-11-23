@@ -4,6 +4,11 @@ import Foundation
 /// A geometric approximation of container fusion, applied after the original exposure calculation.
 /// Logical poses and exposure profiles remain unchanged. Only facing glass edges are constrained.
 final class DockGlassTopology {
+    static func actionOffset(in clip: CGRect, rail: CGRect) -> CGPoint {
+        CGPoint(x: min(max(0, clip.minX + 4 - rail.minX), clip.maxX - 4 - rail.maxX),
+                y: min(max(0, clip.minY - rail.minY), clip.maxY - rail.maxY))
+    }
+
     struct Shape {
         let id: String
         let logical: CGRect

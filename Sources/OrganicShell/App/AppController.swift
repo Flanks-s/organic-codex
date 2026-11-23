@@ -17,6 +17,7 @@ import QuartzCore
     let menus = NormieMenuBuilder(context: { NormieMenuContext(supported: []) }, perform: { _, _ in })
     let store = ConversationStore()
     var mock: MockReplay?
+    var liveBrowser: LiveBrowserSource?
     /// What sends, stops and creates: the live Core on a normal launch (f001), the mock over `mock` for demos, tests,
     /// timed runs and --mock.
     var runtime: any ConversationRuntime = MockConversationRuntime(store: ConversationStore())
@@ -33,6 +34,8 @@ import QuartzCore
     }
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        let launchFeatures = OrganicFeatureAvailability.current
+        if o.demoFullScreenCollapse { OrganicFeatureAvailability.current.collapse = true }
         let screen = launchScreen
         let visible = screen.visibleFrame
         let size = CGSize(width: min(o.width, visible.width - 40), height: min(o.height, visible.height - 40))
@@ -44,6 +47,7 @@ import QuartzCore
             let replay = MockReplay(store: store, includeSidebarHistory: true)
             replay.start(live: false)
             mock = replay
+            if o.browserOrbMock { _ = replay.setBrowserMockEnabled(true) }
             runtime = MockConversationRuntime(store: store, replay: replay)
             // PARITY_DRAFT (M9 captures): the same words in every conversation's composer, as the product's copy does.
             if let text = ProcessInfo.processInfo.environment["PARITY_DRAFT"] { for c in store.conversations { c.draft = text } }
@@ -79,6 +83,10 @@ import QuartzCore
         // Each Lab moves a real column on a stage of its own (LabStage), never a window's.
         let debug = DebugTools(store: store, mock: mock, initiallyPaused: o.mockPaused, transitionHost: transitionStage, springHost: springStage)
         debugTools = debug
+        if !liveCore {
+            debug.session.onBrowserMockChanged = { [weak self] in self?.synchronizeBrowserOrbWindows() }
+            debug.session.onBrowserScenario = { [weak self] in self?.front?.browserOwner?.playScenario($0) }
+        }
         // The panel's layout, morph and spring values reach every window's scene (DEBUG-MOCK-S4; f009).
         tuningHost.windows = { [weak self] in self?.windows ?? [] }
         tuningBinding = debug.bindTuning(to: tuningHost)
@@ -92,6 +100,7 @@ import QuartzCore
         NSApp.helpMenu = menus.helpMenu
         presentRestoredWindows(saved)
         if o.live { mock?.start(live: true) }
+        startDemoAutoplay()
         for lab in o.labs {
             switch lab {
             case "--orb-lab": debug.toggleOrbLab()
@@ -99,6 +108,14 @@ import QuartzCore
             case "--spring-lab": debug.toggleSpringLab()
             default: debug.showSpotlightLab()
             }
+        }
+        if o.debugPanel {
+            debug.toggleDebug()
+            if let panel = debug.controller(.debug).window {
+                let frame = (front?.window.screen ?? launchScreen).visibleFrame
+                panel.setFrameTopLeftPoint(NSPoint(x: frame.maxX - panel.frame.width, y: frame.maxY))
+            }
+            front?.window.makeKeyAndOrderFront(nil)
         }
         if o.demo { toggleDemo() }
         if o.demoHover { demoHover() }
@@ -154,6 +171,11 @@ import QuartzCore
             for (t, run) in steps { DispatchQueue.main.asyncAfter(deadline: .now() + t) { MainActor.assumeIsolated { run() } } }
         }
         if o.demoFullScreenCollapse {
+            let savedFeatures = launchFeatures
+            OrganicFeatureAvailability.current.collapse = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                OrganicFeatureAvailability.current = savedFeatures
+            }
             // Full screen, then Collapse: it leaves full screen first and collapses after; Restore goes back (COLLAPSE-SPEC §1, §6).
             func log(_ step: String) {
                 func find(_ m: NSMenu?) -> NSMenuItem? {
@@ -271,6 +293,11 @@ import QuartzCore
             } }
         }
         if o.demoCollapse {
+            let savedFeatures = OrganicFeatureAvailability.current
+            OrganicFeatureAvailability.current.collapse = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
+                OrganicFeatureAvailability.current = savedFeatures
+            }
             // ⌥⌘↓, show another member in the strip, then me dragged to the rail's end: back (f050–f053).
             let steps: [(Double, String, () -> Void)] = [
                 (1.0, "collapse", { self.main.command(.collapse, tag: 0) }),
@@ -289,6 +316,11 @@ import QuartzCore
             }
         }
         if o.demoCollapseNew {
+            let savedFeatures = OrganicFeatureAvailability.current
+            OrganicFeatureAvailability.current.collapse = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 10) {
+                OrganicFeatureAvailability.current = savedFeatures
+            }
             // Collapsed: the overlay's New Chat, type, Esc (back to the shown chat, words kept), ⌘N, send: the new
             // conversation joins and shows; then the sub-agents sheet from the rows (COLLAPSE-SPEC §3, §4).
             func draft() -> NativeComposer { self.scene.composers.draft().composer }
@@ -460,6 +492,7 @@ import QuartzCore
 
     func applicationWillTerminate(_ n: Notification) {
         isTerminating = true
+        liveBrowser?.dispose(); liveBrowser = nil
         save()
         // The live runtime saves its presentation and stops reading; the Core keeps running what it runs.
         // Quitting redraws nothing: its state changes would refresh every workbench on the way out.

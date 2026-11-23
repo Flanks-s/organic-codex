@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py native. Kept, not deleted (#181).
 """M9 remaining sidebar/card parity: private HEAD export, incremental debug only, no window/backend."""
 from pathlib import Path
 import argparse, hashlib, json, os, subprocess, sys

@@ -1,0 +1,11 @@
+selftest
+island-layer SELFTEST_COLUMN_WORK=1 SELFTEST_ISLAND_LAYER_ONLY=1
+long-conversation SELFTEST_LONG_CONVERSATION=1
+window-lifetime SELFTEST_WINDOW_LIFETIME=1
+no-window SELFTEST_NO_WINDOW=1
+m11-1-check !zsh tools/m11/m11-1-check.sh "$out/m11-1-check"
+core !python3 tools/m11/core-4954-check.py "$out/core" --cache .core-gate
+component-island !M11_CHECK_PACKAGE=.component-gate/island python3 tools/m11/component-check.py island "$out/component-island"
+seal-default SELFTEST_M08_SEAL=1 SELFTEST_M08_SEAL_MODE=default
+seal-enabled SELFTEST_M08_SEAL=1 SELFTEST_M08_SEAL_MODE=enabled
+sidechat-pane SELFTEST_SIDECHAT_PANE=1

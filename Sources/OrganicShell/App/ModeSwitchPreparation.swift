@@ -577,6 +577,7 @@ struct ModePreparationKey: Equatable {
     private let usePresentation:Bool
     private let opaqueBody:Bool
     private let photoInk:Bool
+    private let colorSpaceOverride:CGColorSpace?
     private let normalizeRootOpacity:Bool
     private struct AlphaMask {let image:CGImage,rect:CGRect}
     private var maskImages:[ObjectIdentifier:CGImage]=[:]
@@ -595,8 +596,8 @@ struct ModePreparationKey: Equatable {
     private var tiles:[ModeSurfacePicture.Tile]=[]
     private(set) var lastStepSeconds=0.0015
     var ready:Bool {!indexing && tiles.count == rects.count}
-    init(_ root:NSView,scale:CGFloat,includeWindowFrame:Bool=true,presentation:Bool=false,excluding:[NSView]=[],detached:[(view:NSView,rect:CGRect,clip:CGRect)]=[],normalizeRootOpacity:Bool=false,opaqueBody:Bool=false,photoInk:Bool=false) {
-        self.root=root;self.scale=scale;self.opaqueBody=opaqueBody;self.photoInk=photoInk;usePresentation=presentation;self.normalizeRootOpacity=normalizeRootOpacity
+    init(_ root:NSView,scale:CGFloat,includeWindowFrame:Bool=true,presentation:Bool=false,excluding:[NSView]=[],detached:[(view:NSView,rect:CGRect,clip:CGRect)]=[],normalizeRootOpacity:Bool=false,opaqueBody:Bool=false,photoInk:Bool=false,detachedOpacityBoundary:NSView?=nil,colorSpace:CGColorSpace?=nil) {
+        self.root=root;self.scale=scale;self.opaqueBody=opaqueBody;self.photoInk=photoInk;colorSpaceOverride=colorSpace;usePresentation=presentation;self.normalizeRootOpacity=normalizeRootOpacity
         excludedViews=Set(excluding.map(ObjectIdentifier.init))
         source=includeWindowFrame ? root.window?.contentView?.superview ?? root:root
         let captureSource=source
@@ -639,7 +640,14 @@ struct ModePreparationKey: Equatable {
             for i in views.indices {
                 let entry=views[i],v=entry.view
                 func point(_ p:CGPoint)->CGPoint {
-                    if let detached=entry.detachedRoot,let destination=entry.rect {let q=v.convert(p,to:detached);return CGPoint(x:q.x+destination.minX,y:q.y+destination.minY)}
+                    if let detached=entry.detachedRoot,let destination=entry.rect {
+                        let q=v.convert(p,to:detached)
+                        if detachedOpacityBoundary != nil {
+                            let y=detached.isFlipped == root.isFlipped ? q.y:detached.bounds.minY+detached.bounds.maxY-q.y
+                            return CGPoint(x:q.x-detached.bounds.minX+destination.minX,y:y-detached.bounds.minY+destination.minY)
+                        }
+                        return CGPoint(x:q.x+destination.minX,y:q.y+destination.minY)
+                    }
                     let model=v.convert(v.bounds,to:root),q=v.convert(p,to:root)
                     guard presentation else {return q}
                     let shown=M10SidebarExposure.presentedRect(v,in:root)
@@ -648,11 +656,23 @@ struct ModePreparationKey: Equatable {
                 let o=point(.zero),x=point(CGPoint(x:1,y:0)),y=point(CGPoint(x:0,y:1))
                 views[i].frozenTransform=CGAffineTransform(a:x.x-o.x,b:x.y-o.y,c:y.x-o.x,d:y.y-o.y,tx:o.x,ty:o.y)
                 var alpha=normalizeRootOpacity && v === source ? 1:(presentation ? CGFloat(v.layer?.presentation()?.opacity ?? Float(v.alphaValue)):v.alphaValue),parent=v.superview
-                while let p=parent,p !== source.superview {
+                while let p=parent,p !== (entry.detachedRoot == nil ? source.superview:(detachedOpacityBoundary ?? source.superview)) {
                     if !(normalizeRootOpacity && p === source) {alpha *= presentation ? CGFloat(p.layer?.presentation()?.opacity ?? Float(p.alphaValue)):p.alphaValue}
                     parent=p.superview
                 }
                 views[i].frozenOpacity=alpha
+                if let detached=entry.detachedRoot,let destination=entry.rect,let boundary=detachedOpacityBoundary {
+                    var clips:[CGRect]=[],ancestor=v.superview
+                    while let p=ancestor,p !== boundary {
+                        if p is NSClipView || p.layer?.masksToBounds == true {
+                            var rect=p.convert(p.bounds,to:detached)
+                            if detached.isFlipped != root.isFlipped {rect.origin.y=detached.bounds.minY+detached.bounds.maxY-rect.maxY}
+                            clips.append(rect.offsetBy(dx:destination.minX-detached.bounds.minX,dy:destination.minY-detached.bounds.minY))
+                        }
+                        ancestor=p.superview
+                    }
+                    views[i].frozenClips=clips
+                }
                 if opaqueBody {
                     var clips:[CGRect]=[],ancestor=v.superview
                     while let parent=ancestor,parent !== source.superview {
@@ -748,7 +768,7 @@ struct ModePreparationKey: Equatable {
     }
     private func paint(_ rect:CGRect)->CGImage {
         let w=max(1,Int(ceil(rect.width*scale))),h=max(1,Int(ceil(rect.height*scale)))
-        let space=root.window?.colorSpace?.cgColorSpace ?? (opaqueBody ? NSColorSpace.genericRGB.cgColorSpace!:CGColorSpaceCreateDeviceRGB())
+        let space=colorSpaceOverride ?? root.window?.colorSpace?.cgColorSpace ?? (opaqueBody ? NSColorSpace.genericRGB.cgColorSpace!:CGColorSpaceCreateDeviceRGB())
         let c=CGContext(data:nil,width:w,height:h,bitsPerComponent:8,bytesPerRow:w*4,space:space,bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)!
         if opaqueBody {c.setFillColor(NativePalette.canvas.withAlphaComponent(1).cgColor);c.fill(CGRect(x:0,y:0,width:w,height:h))}
         c.translateBy(x:0,y:CGFloat(h));c.scaleBy(x:scale,y:-scale);c.translateBy(x:-rect.minX,y:-rect.minY);c.clip(to:rect)
@@ -895,4 +915,143 @@ extension ModeSurfacePicture {
         guard !clip.isNull,!clip.isEmpty,let ink else {return nil}
         return .init(kind:kind,rect:rect,inkRect:inkRect,clip:clip,ink:ink,style:style,tint:tint,radius:radius,appearance:appearance)
     }
+}
+
+/// A finite attachment to the outgoing body picture. Materials remain native; ink is immutable.
+/// Callers freeze their own model/input before retaining surfaces and release at the handoff endpoint.
+@MainActor final class ModeDepartureSurfaces {
+    enum Plane {case behindMaterial,material,foreground}
+    struct Surface {
+        let view:NSView,plane:Plane
+        init(_ view:NSView,plane:Plane = .foreground) {self.view=view;self.plane=plane}
+    }
+    @MainActor private final class PicturePlane:NSView {
+        override var isFlipped:Bool {true}
+        override func hitTest(_ point:NSPoint)->NSView? {nil}
+    }
+    @MainActor final class Lease {
+        let picture:NSView,started:Double,duration:Double
+        let sourceViews:[NSView]
+        let captureMS:Double
+        private let hidden:[Bool],viewHidden:[Bool]
+        private var expiry:DispatchWorkItem?
+        private(set) var released=false
+        var exclusions:[NSView] {released ? []:sourceViews+[picture]}
+        fileprivate init(surfaces:[Surface],in host:NSView,at time:Double,duration:Double,spacing:CGFloat) {
+            started=time;self.duration=duration
+            let begin=CACurrentMediaTime(),scale=host.window?.backingScaleFactor ?? 2
+            var seen=Set<ObjectIdentifier>()
+            let shown=surfaces.filter {surface in
+                let v=surface.view
+                return seen.insert(ObjectIdentifier(v)).inserted && !v.isHiddenOrHasHiddenAncestor
+                    && v.layer?.isHidden != true && v.alphaValue>0 && v.bounds.width>0 && v.bounds.height>0
+            }
+            // A registered ancestor already owns all of its descendants, including glass content ink.
+            let roots=shown.filter {entry in !shown.contains {$0.view !== entry.view && entry.view.isDescendant(of:$0.view)}}
+            sourceViews=roots.map(\.view);hidden=sourceViews.map {$0.layer?.isHidden ?? false};viewHidden=sourceViews.map(\.isHidden)
+            // Orb canvases and shadow hosts span the scene, but their visible ink belongs to these materials.
+            // Crop the attachment to small registered surfaces plus 32 pt for their shadows/satellites.
+            let footprints=roots.filter {$0.view.bounds.width<host.bounds.width-1 || $0.view.bounds.height<host.bounds.height-1}
+            let tight=footprints.reduce(CGRect.null) {$0.union($1.view.convert($1.view.bounds,to:host))}
+            let bounds=(tight.isNull ? host.bounds:tight.insetBy(dx:-32,dy:-32)).intersection(host.bounds)
+            let photo=PicturePlane(frame:bounds.isNull ? .zero:bounds);photo.wantsLayer=true;picture=photo
+            photo.identifier = .init("mode.departure.picture")
+            photo.setAccessibilityElement(false);photo.setAccessibilityHidden(true)
+            let container=NSGlassEffectContainerView(frame:photo.bounds),content=PicturePlane(frame:photo.bounds)
+            container.spacing=spacing;container.contentView=content;photo.addSubview(container)
+            var glasses:Set<ObjectIdentifier>=[]
+            @MainActor func material(_ v:NSView) {
+                guard !v.isHidden,v.layer?.isHidden != true,v.alphaValue>0 else{return}
+                if let glass=v as? NSGlassEffectView,glasses.insert(ObjectIdentifier(glass)).inserted {
+                    let clone=NSGlassEffectView(frame:glass.convert(glass.bounds,to:host).offsetBy(dx:-photo.frame.minX,dy:-photo.frame.minY))
+                    clone.identifier = .init("mode.departure."+(glass.identifier?.rawValue ?? "glass"))
+                    if clone.style != glass.style {clone.style=glass.style}
+                    clone.tintColor=glass.tintColor;clone.cornerRadius=glass.cornerRadius
+                    if host.effectiveAppearance.name != glass.effectiveAppearance.name {clone.appearance=glass.effectiveAppearance}
+                    content.addSubview(clone)
+                    return
+                }
+                v.subviews.forEach(material)
+            }
+            roots.forEach {material($0.view)}
+            // Use the same own-draw boundary as body photos. Never cacheDisplay or rasterize a glass backdrop.
+            for plane in [Plane.behindMaterial,.material,.foreground] {
+                let selected=roots.filter {$0.plane == plane}
+                guard !selected.isEmpty,!photo.bounds.isEmpty else{continue}
+                let inkRoot=PicturePlane(frame:photo.bounds)
+                let entries=selected.map {entry in
+                    (view:entry.view,rect:entry.view.convert(entry.view.bounds,to:host).offsetBy(dx:-photo.frame.minX,dy:-photo.frame.minY),clip:photo.bounds)
+                }
+                let builder=ModeSurfaceBuilder(inkRoot,scale:scale,includeWindowFrame:false,presentation:true,detached:entries,photoInk:true,detachedOpacityBoundary:host.window?.contentView?.superview,colorSpace:host.window?.colorSpace?.cgColorSpace)
+                while !builder.ready {builder.step()}
+                guard let ink=builder.finish()?.flattened() else{continue}
+                let image=CALayer();image.frame=photo.bounds;image.contents=ink;image.contentsScale=scale;image.isGeometryFlipped=true
+                let inkPlane=PicturePlane(frame:photo.bounds);inkPlane.wantsLayer=true;inkPlane.layer?.addSublayer(image)
+                inkPlane.identifier = .init("mode.departure.ink."+String(describing:plane))
+                inkPlane.layer?.name="mode.departure.sources:"+selected.compactMap {$0.view.identifier?.rawValue}.joined(separator:"|")
+                if plane == .behindMaterial {photo.addSubview(inkPlane,positioned:.below,relativeTo:container)}
+                else {photo.addSubview(inkPlane)}
+            }
+            captureMS=(CACurrentMediaTime()-begin)*1000
+            CATransaction.begin();CATransaction.setDisableActions(true)
+            host.addSubview(photo)
+            // The material group, ink and shadow all receive this one finite source opacity.
+            photo.layer?.allowsGroupOpacity=true
+            let fade=CABasicAnimation(keyPath:"opacity");ModeSignposts.frameRange(fade)
+            fade.fromValue=1;fade.toValue=0
+            fade.timingFunction=CAMediaTimingFunction(name:.easeInEaseOut)
+            fade.beginTime=photo.layer?.convertTime(time,from:nil) ?? time;fade.duration=duration
+            fade.fillMode = .both;fade.isRemovedOnCompletion=false
+            photo.layer?.opacity=0;photo.layer?.add(fade,forKey:"mode.departure.fade")
+            sourceViews.forEach {$0.isHidden=true;$0.layer?.isHidden=true}
+            CATransaction.commit()
+            let work=DispatchWorkItem { [weak self] in self?.picture.removeFromSuperview() }
+            expiry=work
+            DispatchQueue.main.asyncAfter(deadline:.now()+max(0,time+duration-CACurrentMediaTime()),execute:work)
+        }
+        /// This is the actual photo/material hierarchy, not the notification model's retirement phase.
+        var screenState:[String:Any] {
+            let attached=picture.window != nil && !picture.isHiddenOrHasHiddenAncestor
+            var opacity=Double(picture.layer?.presentation()?.opacity ?? picture.layer?.opacity ?? 0)
+            var parent=picture.superview
+            let boundary=picture.window?.contentView?.superview
+            while let p=parent,p !== boundary {opacity *= Double(p.layer?.presentation()?.opacity ?? Float(p.alphaValue));parent=p.superview}
+            @MainActor func count(_ v:NSView)->Int {(v is NSGlassEffectView ? 1:0)+v.subviews.reduce(0){$0+count($1)}}
+            let visibleSources=sourceViews.filter {v in
+                guard v.window != nil,!v.isHiddenOrHasHiddenAncestor else{return false}
+                var node:NSView?=v
+                while let current=node,current !== v.window?.contentView?.superview {
+                    if current.layer?.isHidden == true || current.alphaValue<=0 || current.layer?.opacity==0 {return false}
+                    node=current.superview
+                }
+                return true
+            }.count
+            return ["attached":attached,"opacity":attached ? opacity:0,"glassCount":count(picture),"visibleSources":visibleSources,"captureMS":captureMS,"started":started,"duration":duration,"released":released]
+        }
+        func release() {
+            guard !released else{return};released=true;expiry?.cancel();expiry=nil
+            CATransaction.begin();CATransaction.setDisableActions(true)
+            picture.removeFromSuperview()
+            for (index,view) in sourceViews.enumerated() {view.isHidden=viewHidden[index];view.layer?.isHidden=hidden[index]}
+            CATransaction.commit()
+        }
+        isolated deinit {expiry?.cancel();picture.removeFromSuperview();if !released {for (index,view) in sourceViews.enumerated() {view.isHidden=viewHidden[index];view.layer?.isHidden=hidden[index]}}}
+    }
+    private final class WeakLease {weak var value:Lease?;init(_ lease:Lease) {value=lease}}
+    private static var active:[WeakLease]=[]
+    private var leases:[Lease]=[]
+    var exclusions:[NSView] {leases.flatMap(\.exclusions)}
+    var screenStates:[[String:Any]] {leases.map(\.screenState)}
+    /// A source cannot be unhidden by a later native/flight writer while its photo owns that surface.
+    static func retains(_ view:NSView)->Bool {
+        active.contains {$0.value.map {!$0.released && $0.sourceViews.contains(where:{$0 === view})} ?? false}
+    }
+    func retain(_ surfaces:[Surface],in host:NSView,at time:Double,duration:Double=0.22,spacing:CGFloat=10)->Lease {
+        Self.active.removeAll {$0.value == nil || $0.value?.released == true}
+        let lease=Lease(surfaces:surfaces,in:host,at:time,duration:duration,spacing:spacing)
+        leases.append(lease);Self.active.append(WeakLease(lease));return lease
+    }
+    /// Release source suppression only at an admitted content endpoint, never at photo-fade completion.
+    func finish() {leases.forEach {$0.release()};leases=[]}
+    isolated deinit {leases.forEach {$0.release()}}
 }

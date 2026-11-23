@@ -202,6 +202,7 @@ import CoreText
     /// Native, over the column, when there is a window; tests keep the drawn header. With it, the state goes in its
     /// nameplate and no longer under the brief (DECISIONS #2).
     var island: HeaderIsland?
+    var browserAttachment: BrowserColumnAttachment?
     var islandVariant = HeaderIslandVariant.brief
     var islandFrom = HeaderIslandVariant.brief
 
