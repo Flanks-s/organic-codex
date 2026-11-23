@@ -89,19 +89,31 @@ class StreamTransport:
 
 class StdioTransport(StreamTransport):
     @classmethod
-    async def start(cls, argv, *, env=None, cwd=None):
+    async def start(cls, argv, *, env=None, cwd=None, stderr_probe=None):
         process = await asyncio.create_subprocess_exec(
             *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, env=env, cwd=cwd, limit=MAX_FRAME + 1)
         result = cls(process.stdout, process.stdin)
         result.process = process
         result.stderr_bytes = 0
+        result.stderr_verified = asyncio.Event()
+
         async def drain():
+            tail = b""
+            expected = json.dumps(stderr_probe, ensure_ascii=False)[1:-1].encode() if stderr_probe else b""
             while True:
                 data = await process.stderr.read(65536)
                 if not data:
                     break
                 result.stderr_bytes += len(data)
+                if stderr_probe is not None:
+                    if not result.stderr_verified.is_set():
+                        lines = (tail + data).split(b"\n")
+                        tail = lines.pop()[-65536:]
+                        if any(expected in line and b"diagnostic_database_unavailable" in line for line in lines):
+                            result.stderr_verified.set()
+                            tail = b""
+                    continue
                 log=paths.logs/(pathlib.Path(argv[0]).name+'-'+str(process.pid)+'.stderr.log')
                 with log.open('ab') as f:f.write(data)
                 log.chmod(0o600)
@@ -237,10 +249,13 @@ class UnixWebSocketTransport:
 
 
 class RpcClient:
-    def __init__(self, transport, *, notifications=None, requests=None, disconnected=None, jsonrpc=False):
+    def __init__(self, transport, *, notifications=None, requests=None, disconnected=None, jsonrpc=False,
+                 private_diagnostics=False):
         self.transport = transport
         self.notifications, self.requests, self.disconnected = notifications, requests, disconnected
         self.jsonrpc = jsonrpc
+        self.private_diagnostics = private_diagnostics
+        self.failure_count = 0
         self.pending = {}
         self.server_tasks = set()
         self.sequence = 0
@@ -280,7 +295,7 @@ class RpcClient:
         except asyncio.TimeoutError as exc:
             raise RpcFailure(-32001, "官方后端响应超时", sent=sent) from exc
         except RpcFailure as exc:
-            if exc.code not in (-32601, -32602) and sent:
+            if sent:
                 exc.sent = True
             raise
         except (OSError, ConnectionError) as exc:
@@ -290,6 +305,11 @@ class RpcClient:
 
     async def notify(self, method, params=None):
         await self.send({"method": method, "params": params or {}})
+
+    def report_failure(self, where, exception):
+        self.failure_count += 1
+        if not self.private_diagnostics:
+            diagnostic(where, exception)
 
     async def serve_request(self, message):
         try:
@@ -303,9 +323,17 @@ class RpcClient:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            diagnostic('serve_request',exc)
+            self.report_failure('serve_request', exc)
             if not self.closed:
-                await self.send({"id": message["id"], "error": {"code": -32603, "message": type(exc).__name__+': '+str(exc)}})
+                detail = "App Server callback failed"
+                if not self.private_diagnostics:
+                    detail = type(exc).__name__ + ": " + str(exc)
+                await self.send({"id": message["id"], "error": {"code": -32603, "message": detail}})
+
+    def finish_request(self, task):
+        self.server_tasks.discard(task)
+        if self.private_diagnostics and not task.cancelled() and task.exception() is not None:
+            self.failure_count += 1
 
     async def read_loop(self):
         try:
@@ -319,7 +347,7 @@ class RpcClient:
                 if "method" in value and "id" in value:
                     task = asyncio.create_task(self.serve_request(value))
                     self.server_tasks.add(task)
-                    task.add_done_callback(self.server_tasks.discard)
+                    task.add_done_callback(self.finish_request)
                 elif "method" in value:
                     if self.notifications is not None:
                         await self.notifications(value)
@@ -336,7 +364,7 @@ class RpcClient:
         except asyncio.CancelledError:
             return
         except Exception as exc:
-            diagnostic('read_loop',exc)
+            self.report_failure('read_loop', exc)
         finally:
             was_open = not self.closed
             self.closed = True

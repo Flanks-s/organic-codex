@@ -27,7 +27,7 @@ import QuartzCore
                 check(lyrics.mask.map(ObjectIdentifier.init)==maskID,"M11.22 scroll reuses the gradient mask \(tag)")
             }
             let p=peek.header.geometry.planet.offsetBy(dx:header!.minX,dy:0)
-            check(peek.view.hitTest(CGPoint(x:p.midX,y:p.midY)) === peek.view,"M11.22 M11.12 passive header hit owner retained \(tag)")
+            check(peek.view.hitTest(peek.view.convert(CGPoint(x:p.midX,y:p.midY),to:nil)) === peek.header.planetButton,"M11.25 M11.12 native planet hit owner retained \(tag)")
             peek.fadeLyrics();peek.retract();peek.clear();peek.open(c,geometry:g)
             check(lyrics.mask.map(ObjectIdentifier.init)==maskID,"M11.22 open/close reuses the gradient mask \(tag)")
             check((peek.verificationHalo.mask.contents as AnyObject?) === haloMask,"M11.22 fog mask cache untouched \(tag)")

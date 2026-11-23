@@ -8,7 +8,14 @@ import QuartzCore
         HeaderIsland.forceMotionTexturesForVerification=true
         defer {HeaderIsland.forceMotionTexturesForVerification=false}
         var checks=0,failures:[String]=[],reports:[[String:Any]]=[]
-        @MainActor func check(_ value:Bool,_ message:String) {checks+=1;if !value {failures.append(message);print("FINDING",message)}}
+        @MainActor func check(_ value:Bool,_ message:String) {
+            checks += 1
+            if message.hasPrefix("split-cold") { print("SPLIT COLD", value ? "PASS" : "FAIL", message) }
+            if !value {
+                failures.append(message)
+                print("FINDING", message)
+            }
+        }
         @MainActor func counts()->[String:Int] {Dictionary(M10ColumnWorkTrace.events.map{($0.name,1)},uniquingKeysWith:+)}
         @MainActor func drain() {
             let until=Date().addingTimeInterval(0.15)
@@ -39,7 +46,8 @@ import QuartzCore
             if shared {scene.setTranscriptPresentationActive(true)}
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false;scene.columnExposureEnabled=enabled
             var time=CACurrentMediaTime()+3600;scene.now={time};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
-            defer {scene.disposeTranscriptPresentation()}
+            var disposed = false
+            defer { if !disposed { scene.disposeTranscriptPresentation() } }
             @MainActor func settle() {time=max(time,scene.transitionEnd+0.1);scene.clock.onFrame?(time);scene.settle();CATransaction.flush()}
             settle()
             scene.onCreate={text,_ in Conversation(id:"work-first-send",title:text)}
@@ -109,13 +117,191 @@ import QuartzCore
             check(frameCaptures==0,"Auto display-link frames never capture viewport \(tag)")
             try? M10ColumnWorkTrace.write(to:out.appendingPathComponent("cold-auto-\(tag).json"))
             reports.append(["case":"cold-auto","shared":shared,"scale":scale,"enabled":enabled,"counts":cold,"prepare":preparation,"frameCaptures":frameCaptures])
+            settle()
+            scene.enterFocused(scene.current, reason: "split-cold-setup")
+            settle()
+            guard let left = scene.columns.first,
+                  let incoming = scene.order.first(where: { $0 != scene.current }) else {
+                check(false, "split-cold fixture has focused column and bank \(tag)")
+                return
+            }
+            let conversation = left.conversation
+            for n in 0..<30 {
+                conversation.items.append(.init(id: "split-cold-\(n)", kind: .assistant,
+                                                text: String(repeating: "Synthetic text ", count: 30), running: false))
+            }
+            conversation.revision += 1
+            store.changed(conversation)
+            left.renderDisplay(fullWidth: scene.fullWidth(0, scene.layout),
+                               briefWidth: scene.briefWidth(0, scene.layout), force: true)
+            left.native.scrollToEnd()
+            let clip = left.native.scrollView.contentView
+            clip.scroll(to: CGPoint(x: 0, y: max(0, clip.bounds.minY - 100)))
+            left.native.scrollView.reflectScrolledClipView(clip)
+            let offset = left.native.scrollOffset.y, oldWidth = left.native.frame.width
+            let id = conversation.id
+            @MainActor func waitForTarget(_ targetID: String? = nil) -> Bool {
+                let waitingID = targetID ?? id
+                let deadline = Date().addingTimeInterval(2)
+                while scene.deferredTargets[waitingID] != nil && Date() < deadline {
+                    _ = RunLoop.main.run(mode: .default, before: Date().addingTimeInterval(0.002))
+                }
+                return scene.deferredTargets[waitingID] == nil
+            }
+            M10ColumnWorkTrace.reset()
+            let splitRoot = M10ColumnWorkTrace.scope("probe.split-cold")
+            let opened = scene.openInSplit(incoming, reason: "split-cold")
+            splitRoot.end()
+            let events = M10ColumnWorkTrace.events
+            let targetWidth = scene.fullWidth(0, scene.layout)
+            let captures = events.filter { $0.name == "column.snapshot" && $0.fields["id"] as? String == id }
+            let targetHits = captures.filter { abs(($0.fields["width"] as? CGFloat ?? -1) - targetWidth) < 0.5/scale }
+            guard let right = scene.columns.first(where: { $0.conversation.id == incoming }),
+                  let rightSlot = scene.columns.firstIndex(where: { $0 === right }) else {
+                check(false, "split-cold incoming column exists \(tag)")
+                return
+            }
+            let rightWidth = scene.fullWidth(rightSlot, scene.layout)
+            let incomingCaptures = events.filter {
+                $0.name == "column.snapshot" && $0.fields["id"] as? String == incoming
+            }
+            check(incomingCaptures.isEmpty, "split-cold incoming has no callback snapshot \(tag)")
+            check(scene.deferredTargets[incoming] != nil, "split-cold incoming target deferred \(tag)")
+            check(opened && scene.isMoving, "split-cold opens and moves \(tag)")
+            check(targetHits.isEmpty, "split-cold no target-width snapshot in callback \(tag)")
+            check(abs(left.native.frame.width - oldWidth) < 0.5/scale, "split-cold native width unchanged \(tag)")
+            check(scene.deferredTargets[id] != nil, "split-cold target deferred \(tag)")
+            let departure = captures.filter { abs(($0.fields["width"] as? CGFloat ?? -1) - oldWidth) < 0.5/scale }
+            let incomingMs = incomingCaptures.reduce(0.0) { $0 + ($1.end-$1.start)*1000 }
+            let makeMs = events.filter { $0.name == "scene.makeColumn" }
+                .reduce(0.0) { $0 + ($1.end-$1.start)*1000 }
+            let admitMs = events.filter { $0.name == "scene.admitUnmountedTranscripts" }
+                .reduce(0.0) { $0 + ($1.end-$1.start)*1000 }
+            conversation.items.append(.init(id: "split-cold-update", kind: .assistant,
+                                            text: "New content", running: false))
+            conversation.revision += 1
+            store.changed(conversation)
+            right.conversation.items.append(.init(id: "split-cold-right-update", kind: .assistant,
+                                                  text: "New incoming content", running: false))
+            right.conversation.revision += 1
+            store.changed(right.conversation)
+            _ = scene.prepare(members: scene.members, current: scene.current, scheme: scene.scheme, at: scene.now())
+            check(scene.deferredTargets[id] != nil, "split-cold uncommitted prepare retains target \(tag)")
+            if enabled { time = scene.transitionEnd + 0.1 }
+            if enabled { scene.settle() }
+            check(waitForTarget(), "split-cold target delivered within two seconds \(tag)")
+            check(waitForTarget(incoming), "split-cold incoming target delivered within two seconds \(tag)")
+            let delivery = M10ColumnWorkTrace.events.last {
+                $0.name == "scene.deferred.deliver" && $0.fields["id"] as? String == id
+            }
+            let incomingDelivery = M10ColumnWorkTrace.events.last {
+                $0.name == "scene.deferred.deliver" && $0.fields["id"] as? String == incoming
+            }
+            check(delivery != nil && incomingDelivery != nil && delivery!.start < incomingDelivery!.start,
+                  "split-cold visible column delivers before incoming column \(tag)")
+            settle()
+            check(scene.deferredTargets.isEmpty, "split-cold all deferred targets retired \(tag)")
+            check(!left.native.isHidden && abs(left.native.frame.width-targetWidth) <= 0.5/scale,
+                  "split-cold native released at target width \(tag)")
+            check(abs(left.native.scrollOffset.y-offset) <= 0.51, "split-cold preserves reading offset \(tag)")
+            check(left.native.renderedRevision == conversation.revision, "split-cold renders newest revision \(tag)")
+            check(!right.native.isHidden && abs(right.native.frame.width-rightWidth) <= 0.5/scale,
+                  "split-cold incoming native released at target width \(tag)")
+            check(right.native.renderedRevision == right.conversation.revision,
+                  "split-cold incoming renders newest revision \(tag)")
+            let splitMs = (events.first!.end-events.first!.start)*1000
+            let departureMs = departure.reduce(0.0) { $0 + ($1.end-$1.start)*1000 }
+            let deliveryMs = delivery.map { ($0.start-events.first!.start)*1000 } ?? -1
+            let incomingDeliveryMs = incomingDelivery.map { ($0.start-events.first!.start)*1000 } ?? -1
+            reports.append(["case":"split-cold", "tag":tag, "openMs":splitMs, "incomingMs":incomingMs,
+                            "departureCount":departure.count, "departureMs":departureMs,
+                            "deliveryMs":deliveryMs, "incomingDeliveryMs":incomingDeliveryMs,
+                            "makeColumnMs":makeMs, "admitMs":admitMs, "settledBeforeDelivery":enabled])
+            scene.ungraft(incoming, reason: "split-cold-follow")
+            settle()
+            left.native.scrollToEnd()
+            check(scene.openInSplit(incoming, reason: "split-cold-follow"), "split-cold follow opens \(tag)")
+            check(waitForTarget(), "split-cold follow delivers \(tag)")
+            settle()
+            check(left.native.shouldFollowEnd && left.native.isAtEnd, "split-cold preserves follow end \(tag)")
+            scene.ungraft(incoming, reason: "split-cold-wheel")
+            settle()
+            left.native.scrollToEnd()
+            clip.scroll(to: CGPoint(x: 0, y: max(0, clip.bounds.minY - 100)))
+            left.native.scrollView.reflectScrolledClipView(clip)
+            _ = scene.openInSplit(incoming, reason: "split-cold-wheel")
+            let pendingWheel = scene.deferredTargets[id] != nil
+            let wheel = NSEvent(cgEvent: CGEvent(scrollWheelEvent2Source: nil, units: .line,
+                                                wheelCount: 1, wheel1: 1, wheel2: 0, wheel3: 0)!)!
+            let wheelPoint = CGPoint(x: left.rect.sample(0).rect.midX, y: left.nativeArea.midY)
+            var routed = true
+            for _ in 0..<3 { routed = scene.transcriptWheel(wheel, at: wheelPoint) && routed }
+            let queued = left.transcriptHandoff.events.count == 3
+            let deliveredWheel = waitForTarget()
+            let targetOffset = left.native.scrollOffset.y
+            settle()
+            let actualWheel = left.native.scrollOffset.y
+            let queueCleared = left.transcriptHandoff.events.isEmpty
+            left.native.scrollOffset.y = targetOffset
+            for _ in 0..<3 { left.native.scrollView.scrollWheel(with: wheel) }
+            let directWheel = left.native.scrollOffset.y
+            let wheelDetail = "pending=\(pendingWheel) routed=\(routed) queued=\(queued) delivered=\(deliveredWheel)"
+            let wheelOffsets = "clear=\(queueCleared) start=\(targetOffset) actual=\(actualWheel) direct=\(directWheel)"
+            check(pendingWheel && routed && queued && deliveredWheel && queueCleared &&
+                  directWheel < targetOffset - 0.51 && abs(actualWheel-directWheel) < 0.51,
+                  "split-cold pending wheel replays three \(tag) \(wheelDetail) \(wheelOffsets)")
+            scene.ungraft(incoming, reason: "split-cold-interrupt")
+            settle()
+            _ = scene.openInSplit(incoming, reason: "split-cold-interrupt")
+            scene.ungraft(incoming, reason: "split-cold-interrupt")
+            settle()
+            check(waitForTarget() && !left.hasFullReflow, "split-cold interrupted target retired \(tag)")
+            check(abs(left.native.frame.width-scene.fullWidth(0, scene.layout)) <= 0.5/scale,
+                  "split-cold interrupted width correct \(tag)")
+            M10ColumnWorkTrace.reset()
+            _ = scene.openInSplit(incoming, reason: "split-cold-fallback")
+            let bothPending = scene.deferredTargets[id] != nil && scene.deferredTargets[incoming] != nil
+            // Make only the old-width native visible after admission, so its idle reflow rejects the source.
+            left.native.isHidden = false
+            let leftRetired = waitForTarget()
+            let rightRetired = waitForTarget(incoming)
+            let deliveredIDs = M10ColumnWorkTrace.events.filter { $0.name == "scene.deferred.deliver" }
+                .compactMap { $0.fields["id"] as? String }
+            settle()
+            check(bothPending && leftRetired && rightRetired && !deliveredIDs.contains(id)
+                  && deliveredIDs.contains(incoming) && scene.deferredTargets.isEmpty,
+                  "split-cold one source fallback continues incoming delivery \(tag)")
+            scene.ungraft(incoming, reason: "split-cold-fallback")
+            settle()
+            conversation.items.append(.init(id: "split-cold-large", kind: .assistant,
+                                            text: String(repeating: "x", count: 70_000), running: false))
+            conversation.revision += 1
+            left.renderDisplay(fullWidth: scene.fullWidth(0, scene.layout),
+                               briefWidth: scene.briefWidth(0, scene.layout), force: true)
+            left.native.scrollToEnd()
+            M10ColumnWorkTrace.reset()
+            _ = scene.openInSplit(incoming, reason: "split-cold-large")
+            check(scene.deferredTargets[id] == nil && (counts()["column.snapshot"] ?? 0) > 0,
+                  "split-cold unsupported row remains synchronous \(tag)")
+            settle()
+            scene.ungraft(incoming, reason: "split-cold-dispose")
+            settle()
+            conversation.items.removeLast()
+            conversation.revision += 1
+            left.renderDisplay(fullWidth: scene.fullWidth(0, scene.layout),
+                               briefWidth: scene.briefWidth(0, scene.layout), force: true)
+            _ = scene.openInSplit(incoming, reason: "split-cold-dispose")
+            check(scene.deferredTargets[id] != nil, "split-cold dispose starts pending task \(tag)")
+            disposed = true
+            scene.disposeTranscriptPresentation()
+            check(scene.deferredTargets.isEmpty, "split-cold dispose cancels tasks \(tag)")
         }}}}
         for autoScale:CGFloat in [1,2] {for enabled in [false,true] {autoreleasepool {
             let store=ConversationStore()
             let replay=MockReplay(store:store);replay.start(live:false)
             let scene=AutoScene(size:size,store:store,profile:.init(name:"Built-in fixture",frameInterval:1/120,mmPerPoint:0.2,persistenceFrames:0),scale:autoScale)
             scene.verificationPresented=true;scene.manualSettle=true;scene.ambient=false;scene.columnExposureEnabled=enabled
-            var time=CACurrentMediaTime()+3600;scene.now={time};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
+            var time=VerificationClock.renderOrigin;scene.now={time};scene.install(members:MockSeed.windowMembers);scene.clock.invalidate()
             defer {scene.disposeTranscriptPresentation()}
             M10ColumnWorkTrace.reset();scene.showCaptures(true)
             check((counts()["column.viewport"] ?? 0)>0,"explicit capture comparison prepares bitmaps \(enabled)")

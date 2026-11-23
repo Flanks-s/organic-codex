@@ -27,11 +27,13 @@ extension ColumnNode {
             input.noticeColumnWidth=width+12
         }
         island.configure(input)
+        if let browserAttachment { island.setBrowserPresentationSuspended(browserAttachment.covers) }
     }
 
     /// Ambient motion held or let go (f202): the header's planet and dots, the brief's "…".
     func setAmbientRunning(_ on: Bool) {
         island?.setPresentationActive(on)
+        if let browserAttachment { island?.setBrowserPresentationSuspended(browserAttachment.covers) }
         for layer in briefLayers.values { for case let d as DotsLayer in layer.sublayers ?? [] { d.setRunning(on) } }
     }
 
@@ -41,7 +43,7 @@ extension ColumnNode {
         island.endMotion()
         island.setFrameOrigin(CGPoint(x: r.minX, y: 0))
         island.alphaValue = 1
-        island.isHidden = !shown
+        island.isHidden = !shown || browserAttachment?.covers == true
     }
 
     /// A transition starts towards `variant`: the island is laid out for it once, and moves there frame by frame.
@@ -53,7 +55,7 @@ extension ColumnNode {
         islandFrom = islandVariant
         island.beginMotion()
         configureIsland(variant, width: width)
-        island.isHidden = false
+        island.isHidden = browserAttachment?.covers == true
     }
 
     // MARK: The first send's header rise (f078)
@@ -90,6 +92,7 @@ extension ColumnNode {
     /// Driver A, one frame: the header between its two variants. Between brief and full it follows the form; between
     /// variants of the same fullness (Focused ↔ Split), the column's width.
     func islandFrame(rect r: CGRect, form f: Double, presence p: Double, earlierRect: CGRect? = nil, earlierForm: Double? = nil) {
+        if browserAttachment?.covers == true { island?.isHidden = true; return }
         // Rising from the seed, the header stays opaque (it takes the seed's place in the same frame; the column fades in).
         guard let island, promotion == nil else { island?.alphaValue = 1; return }
         func pose(_ r:CGRect,_ f:Double)->(HeaderIslandGeometry,CGFloat) {

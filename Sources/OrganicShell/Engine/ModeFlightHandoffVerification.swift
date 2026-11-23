@@ -6,6 +6,8 @@ import QuartzCore
 @MainActor enum ModeFlightHandoffVerification {
     static func run(to output: URL) throws -> Int32 {
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        let clock=ModeContentVerificationClock()
+        defer {clock.restore()}
         var checks=0,failures:[String]=[],facts:[[String:Any]]=[]
         func check(_ value: Bool,_ name: String) { checks+=1;if !value { failures.append(name);print("FAIL: "+name) } }
         let size=CGSize(width:1280,height:820),profile=ModeOrreryFlightVerification.profile
@@ -210,7 +212,9 @@ import QuartzCore
                 let workbench=NormieWorkbench(store:store,sessions:scene.composers,current:store.conversations.first?.id,transcriptSessions:sessions)
                 _=workbench.composerForHandoff();scene.install();scene.settle()
                 let shell=WindowShell(organic:root,scene:scene,workbench:workbench,mode:.organic);_=shell.view
-                var now=CACurrentMediaTime();shell.flight.manualTime={now};shell.flight.verificationServerMotion=true
+                var now=ModeContentWorkBoundary.verificationNow!()
+                shell.flight.manualTime={now}
+                shell.flight.verificationServerMotion=true
                 shell.verificationFlightSettle(asOrganic:!forward)
                 shell.prepareModeSwitch(reason:"m1131b.fixture")
                 shell.verificationFlightToggle(toOrganic:forward)

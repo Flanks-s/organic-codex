@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): historical comparison. Kept, not deleted (#181).
 """M10.1 static pixels, isolated inputs and retained debug objects. Never launches an App."""
 from pathlib import Path
 import argparse,subprocess,json,hashlib,os

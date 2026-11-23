@@ -1,0 +1,58 @@
+{
+  "version": "org.organic.bodies.v2",
+  "restZ": 0.8,
+  "night": 0.28,
+  "soft": 0.3,
+  "haze": 0.7,
+  "limb": 0.22,
+  "rim": 0.075,
+  "ringInner": 1.18,
+  "ringOuter": 2.33,
+  "supersampling": 2,
+  "bakeMax": 56,
+  "bodyMotion": "static",
+  "framesPerDirection": 1,
+  "eventRotation": false,
+  "ambientAnimation": false,
+  "phase": {
+    "floor": 0.14,
+    "umbra": 2.6,
+    "umbraSoft": 0.1,
+    "unknownLitRange": [
+      0.45,
+      0.8
+    ],
+    "unknownPeriod": 4,
+    "hazeFade": 0.4,
+    "waitRGB": [
+      0.62,
+      0.48,
+      0.1
+    ],
+    "waitLow": 0.7,
+    "waitPeriod": 2.4,
+    "waitFade": 0.35,
+    "doneRise": 0.28,
+    "doneFall": 0.62,
+    "doneGain": 0.18,
+    "failRGB": [
+      0.8,
+      0.19,
+      0.09
+    ],
+    "failSweep": 0.8,
+    "failEdge": 0.22,
+    "cancelLevel": 0.36,
+    "cancelFloor": 16,
+    "cancelFade": 0.5,
+    "fractionResponse": 0.5,
+    "version": "org.organic.body-phase.v1",
+    "unknownEventGain": 0.14,
+    "unknownEventDuration": 0.90,
+    "diffuseBase": 0.74,
+    "diffuseGain": 0.26
+  },
+  "directionBins": 32,
+  "atlasBudget": 67108864,
+  "highDefinitionBudget": 33554432
+}

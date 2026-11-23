@@ -19,6 +19,11 @@ struct FocusLayout: Equatable {
 
     init() {}
 
+    /// An explicit pair uses half-window columns; single Focused retains the original reading-width layout.
+    static func explicitPair(size: CGSize, bankCount: Int, metrics: AutoLayout.Metrics) -> AutoLayout? {
+        SplitPresentationLayout.geometry(size: size, bankCount: bankCount, metrics: metrics)
+    }
+
     /// How many segments Split has room for at a width: each needs FocusLayout's narrowest, 220 pt, and the window's
     /// other `members` become orbs beside the capsule, which need room too, at the 0.6 size they may close up to
     /// (2026-10-25 Astra r3: at 720 pt, three segments left the orbs outside the window).

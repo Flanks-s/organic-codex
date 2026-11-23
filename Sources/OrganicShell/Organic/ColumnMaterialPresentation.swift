@@ -83,6 +83,10 @@ extension ColumnNode {
 
     func beginFullReflow(_ reflow: ColumnFullReflow) {
         fullReflow?.layer.removeFromSuperlayer();fullReflow?.overlayLayer?.removeFromSuperlayer();fullReflow = reflow
+        if reflow.target == nil {
+            transcriptClip.frame = reflow.area
+            shapeFade(transcriptClip.mask, reflow.area.size)
+        }
         if let overlay=reflow.overlayLayer {overlay.position=nativeArea.origin;inkMaterial.addSublayer(overlay)}
         transcriptClip.addSublayer(reflow.layer); transcript.opacity = 0; transcriptClip.opacity = 1
         if let bounds=reflow.clipBounds {
@@ -102,7 +106,7 @@ extension ColumnNode {
     func fullReflowTracks(_ reflow: ColumnFullReflow, timeline: Timeline, rects: [CGRect]) -> [Track] {
         var tracks = reflow.tracks(timeline)
         let bounds = rects.map { r -> NSValue in
-            let b=reflow.clipBounds ?? CGRect(origin:.zero,size:reflow.target.area.size)
+            let b=reflow.clipBounds ?? CGRect(origin:.zero,size:reflow.area.size)
             return NSValue(rect:CGRect(x:0,y:b.minY,width:r.width,height:b.height))
         }
         tracks.appendIf(timeline.track(transcriptClip, "bounds", bounds, smooth: true))

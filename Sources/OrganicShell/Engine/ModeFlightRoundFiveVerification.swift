@@ -6,6 +6,8 @@ import QuartzCore
 @MainActor enum ModeFlightRoundFiveVerification {
     static func run(to output:URL) throws -> Int32 {
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        let clock=ModeContentVerificationClock()
+        defer {clock.restore()}
         var checks=0,failures:[String]=[],facts:[String:Any]=[:]
         func check(_ value:Bool,_ name:String) {checks+=1;if !value {failures.append(name);print("FAIL: "+name)}}
         let size=CGSize(width:1280,height:820),row=ModeOrreryFlightVerification.rows[0],real=ModeOrreryFlightVerification.real[0]
@@ -55,9 +57,10 @@ import QuartzCore
         // A native mount on the final allowed probe must retain its one-frame completion fence.
         let finalProbe=ModeFlight();finalProbe.manualTime={1500};finalProbe.resize(to:size)
         var readyAt=Double.infinity
-        finalProbe.destinationOwnerVisible={_ in CACurrentMediaTime()>=readyAt}
+        finalProbe.destinationOwnerVisible={_ in clock.now>=readyAt}
         finalProbe.start(toOrganic:true,avatar:avatars,initials:"LL",tokens:[],composer:nil,reduceMotion:false)
-        finalProbe.advance(at:finalProbe.duration+1.1);readyAt=CACurrentMediaTime()+1.96
+        finalProbe.advance(at:finalProbe.duration+1.1)
+        readyAt=clock.now+1.96
         RunLoop.main.run(until:Date(timeIntervalSinceNow:2.15))
         check(!finalProbe.running && !finalProbe.verificationOwnerProbeActive,"R1 native mount on the final bounded probe completes its exposure fence")
         finalProbe.shutdown()
@@ -167,7 +170,9 @@ import QuartzCore
         check(pictureBefore != shell.verificationFlightDeviceKey,"R5 device online status invalidates cached source pixels")
         check(preparedBefore != shell.verificationPreparationDeviceKey,"R5 device online status also invalidates prepared source pixels")
         facts["deviceKeyBefore"]=pictureBefore;facts["deviceKeyAfter"]=shell.verificationFlightDeviceKey
-        var now=CACurrentMediaTime();shell.flight.manualTime={now};shell.flight.verificationServerMotion=true
+        var now=ModeContentWorkBoundary.verificationNow!()
+        shell.flight.manualTime={now}
+        shell.flight.verificationServerMotion=true
         shell.verificationFlightSettle(asOrganic:false);shell.prepareModeSwitch(reason:"round5.turn")
         shell.verificationFlightToggle(toOrganic:true);shell.verificationFlightAdmit()
         now+=0.28;shell.flight.advance(at:0.28);shell.verificationFlightToggle(toOrganic:false)

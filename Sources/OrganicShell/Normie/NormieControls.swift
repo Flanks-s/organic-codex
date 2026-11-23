@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor enum NormieDrawing {
     static var background: NSColor { NativePalette.canvas }
-    static func identity(_ c:Conversation)->OrbIdentity {let assigned=OrbIdentity.assigned(c.identityIndex);return OrbIdentity(symbol:OrbCelestialBody.allCases.first{String(describing:$0).caseInsensitiveCompare(c.identitySymbol ?? "") == .orderedSame} ?? assigned.symbol,tint:OrbTint.allCases.first{String(describing:$0).caseInsensitiveCompare(c.identityTint ?? "") == .orderedSame} ?? assigned.tint)}
+    static func identity(_ c:Conversation)->OrbIdentity { BodyIdentityAdapter.identity(index:c.identityIndex,symbol:c.identitySymbol,tint:c.identityTint) }
     static func pixel(_ value: CGFloat, scale: CGFloat) -> CGFloat { (value * max(1, scale)).rounded()/max(1, scale) }
     static func rect(_ r: CGRect, scale: CGFloat) -> CGRect {
         let x = pixel(r.minX, scale: scale), y = pixel(r.minY, scale: scale)
@@ -98,13 +98,10 @@ import AppKit
 }
 
 @MainActor final class NormiePlanetView: NormieView {
-    var identity = OrbIdentity.assigned(0) { didSet { needsDisplay = true } }
+    var identity = OrbIdentity.assigned(0) { didSet { if identity != oldValue { needsDisplay = true } } }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard let cg = NSGraphicsContext.current?.cgContext else { return }
-        cg.addPath(OrbCelestialGlyph(symbol: identity.symbol).path(in: bounds.insetBy(dx: 1, dy: 1)).cgPath)
-        cg.setStrokeColor(identity.tint.color.cgColor); cg.setLineWidth(bounds.width/24*2.2)
-        cg.setLineCap(.round); cg.setLineJoin(.round); cg.strokePath()
+        BodyFaceDrawing.draw(identity.resolvedBodyID,in:bounds)
     }
 }
 

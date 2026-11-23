@@ -46,6 +46,7 @@ extension AutoScene {
          size.width.hashValue,size.height.hashValue,NativeAppearance.revision,NativeDisplayOptions.shared.revision,
          Motion.reduce ? 1:0,Look.playful ? 1:0,scheme.mode == .auto ? 0:1,scheme.draft ? 1:0,
          scheme.split.hashValue,scheme.left.hashValue,scheme.right.hashValue,scheme.parked.hashValue,members.map(ObjectIdentifier.init).hashValue]
+        + [Int(truncatingIfNeeded: structureOwner.generation), scheme.splitPresentationVersion]
         + columns.map(\.conversation.revision) + columns.map{prewarmNativeState($0)}
     }
 
@@ -93,6 +94,7 @@ extension AutoScene {
     }
     private var idlePrewarmAllowed:Bool {
         guard !modeHandoffActive,presented,transcriptSessions == nil || transcriptsPresented,
+              deferredTargets.isEmpty,
               !isMoving,draftColumn?.isMoving != true,!columns.isEmpty,scheme.mode == .auto,
               !dock.hasPeek,drag == nil,!clock.keepRunning,pressedButtons()==0,!columns.contains(where:{$0.isPromoting}),
               pendingRenders.isEmpty,pendingMovingRenders.isEmpty,!renderScheduled,!movingRenderScheduled,

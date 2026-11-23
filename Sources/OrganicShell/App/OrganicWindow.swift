@@ -6,6 +6,9 @@ import AppKit
 @MainActor final class OrganicWindow: NSObject, NSWindowDelegate {
     let window: NSWindow
     let scene: AutoScene
+    var browserOwner: BrowserOrbWindowOwner?
+    var browserApp: AppController? { app }
+    var browserCanPresent: Bool { !isClosed && collapsed == nil }
     let shell: WindowShell
     let workbench: NormieWorkbench
     let transcriptSessions: NativeTranscriptSessions
@@ -13,6 +16,11 @@ import AppKit
     let actions = NormieActions()
     private weak var app: AppController?
     private var workbenchDisposed = false
+    private var sidechatObservation: UUID?
+    private var sidechatRuntime: SidechatRuntime?
+    private var sidechatOwned: [String: SidechatRuntime.Chat] = [:]
+    private var sidechatOpenEpoch = 0
+    private var sidechatConfirmation: SidechatPanePresentation?
     /// Retire source editor callbacks before a target installs its own. Final close must not withdraw the moved
     /// editor's target bindings through Normie's retained reference to that same composer.
     func prepareConversationTransfer(_ id: String, closing: Bool) {
@@ -38,7 +46,7 @@ import AppKit
         transcriptSessions = NativeTranscriptSessions(store: store)
         for session in transferredTranscripts { precondition(transcriptSessions.adopt(session), "A new window must adopt the released transcript before constructing hosts") }
         let size = frame.size
-        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+        window = ModeContentWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false, screen: screen)
         window.contentMinSize = CGSize(width: 560, height: 520)
         window.titlebarAppearsTransparent = true
@@ -86,6 +94,20 @@ import AppKit
             case .signOut: self.command(.signOut, tag: 0)
             }
         }
+        scene.sunHover?.command = { [weak self] action in
+            guard let self, !self.isClosed else { return }
+            switch action {
+            case .search: self.command(.search, tag: 0)
+            case .sidebar: self.command(.sidebar, tag: 0)
+            case .profile: self.command(.profile, tag: 0)
+            case .settings: self.command(.settings, tag: 0)
+            case .shortcuts: self.command(.shortcuts, tag: 0)
+            case .collapse: self.command(.collapse, tag: 0)
+            case .signOut: self.command(.signOut, tag: 0)
+            case .newChat, .conversation: break
+            }
+        }
+        scene.sunHover?.bindAccountUsage(app.observeAccountUsage)
         scene.onStatus = { [weak self] in self?.statusText() ?? "" }
         // Sends and stops go to the app's runtime (mock or live) and finish on their receipts (CORE-M7 App 接线).
         scene.onSubmit = { [weak app] c, request, finish in
@@ -120,10 +142,41 @@ import AppKit
             guard let app, let self, let fork = app.runtime.fork(c, at: item.id) else { return }
             (app.windows.first { $0.scene.members.contains { $0.id == fork.id } } ?? self).reveal(fork.id)
         }
+        scene.onForkWhole = { [weak app, weak self] c, _, finish in
+            Task { @MainActor [weak self] in
+                guard let self, !self.isClosed, let runtime = app?.runtime else { return }
+                let result: Result<Conversation, Error>
+                do { result = .success(try await runtime.forkWhole(c)) }
+                catch { result = .failure(error) }
+                guard !self.isClosed else { return }
+                finish(result)
+            }
+        }
         actions.revertTranscript = { [weak app] c, item in app?.runtime.revert(item, in: c) }
         // Live: what Normie does to a conversation goes to the Core (CORE-M7 App 接线): seen (which reads its history),
         // pin, archive, rename, fork, compact, commit. The mock keeps its local handling.
         if let live = app.live {
+            sidechatRuntime = live.sidechats
+            scene.sidechatEligible = { [weak live] c in
+                live?.sidechats.available == true && c.backendThreadID != nil && !c.archived && c.isLiveConversation
+            }
+            scene.onSidechat = { [weak self, weak live] c in
+                guard let self, let live else { return }
+                self.openSidechat(c, runtime: live.sidechats)
+            }
+            sidechatObservation = live.sidechats.observe { [weak self, weak live] _ in
+                guard let self, let live else { return }
+                self.updateSidechat(runtime: live.sidechats)
+            }
+            let confirm: @MainActor ([SidechatRuntime.CloseTarget]) async -> Bool = { [weak app] targets in
+                guard let app else { return false }
+                let owner = app.windows.first { window in
+                    targets.contains { window.sidechatOwned[$0.id] != nil }
+                } ?? app.windows.first { $0.window.isKeyWindow }
+                return await owner?.confirmSidechats(targets) ?? false
+            }
+            live.sidechats.confirmArchive = confirm
+            app.liveSettings.confirmSidechatClosure = confirm
             // The sidebar's Show More reads the Core's next history page; the Core keeps the cursor (f015).
             actions.hasMoreHistory = { [weak live] in live?.hasMoreHistory() ?? false }
             actions.loadMoreHistory = { [weak live] finish in
@@ -148,6 +201,12 @@ import AppKit
         }
         // The Status inspector's sub-agent rows open their read-only windows (AP23).
         actions.subAgent = { [weak self] c, s in self?.scene.subAgentWindows.present(subagentID: s.id, of: c) }
+        actions.referencePreview = { [weak app] target, c in
+            await app?.liveArtifacts.referencePreview(target, in: c) ?? .init(state: .unavailable, message: "Preview is unavailable.")
+        }
+        actions.referenceWeb = { [weak app] url in
+            if let open = app?.liveArtifacts.onOpenURL { open(url) } else { NSWorkspace.shared.open(url) }
+        }
         // A new draft starts with General ▸ Default access, once per draft editor (AP11).
         actions.configureComposer = { [weak app] composer, c in
             guard c == nil, let app, !OrganicWindow.defaulted.contains(ObjectIdentifier(composer)) else { return }
@@ -168,6 +227,7 @@ import AppKit
         shell.installToolbar(in: window)
         scene.islandActions = actions
         scene.onUndoArchive = { [weak self] in self?.workbench.undoArchive() ?? false }
+        scene.onSplitEligibilityChanged = { [weak self] in self?.refreshSplitCommand() }
         if !bare { scene.install(members: members) }
         // Menu commands act on what Organic shows (Split: the segment being typed into), told at rest.
         workbench.memberOrder = scene.order
@@ -175,10 +235,14 @@ import AppKit
         // (OWC searchChats, renameChat; app audit AP04, AP05, AP17); the window title follows what shows (AP16).
         shell.onModeChange = { [weak self] mode in
             guard let self else { return }
+            self.browserOwner?.modeChanged(mode)
             self.actions.externalCommands = mode == .organic ? Self.windowCommands.union(Self.organicCommands) : Self.windowCommands
+            self.refreshSplitCommand()
             DispatchQueue.main.async { [weak self] in self?.shell.refreshTitle() }
         }
         if !normie { actions.externalCommands = Self.windowCommands.union(Self.organicCommands) }
+        refreshSplitCommand()
+        reconcileBrowserOrb()
         titleObservation = store.observe { [weak self] c in
             guard let self, c.id == (self.shell.mode == .normie ? self.workbench.selectedConversation?.id : self.scene.focusTarget) else { return }
             self.shell.refreshTitle()
@@ -283,6 +347,14 @@ import AppKit
         }
     }
 
+    func refreshSplitCommand() {
+        if !isClosed && shell.mode == .organic && scene.canSplitWithNext {
+            actions.externalCommands.insert(.split)
+        } else {
+            actions.externalCommands.remove(.split)
+        }
+    }
+
     func statusText() -> String {
         var s = "Organic Shell v2 · Auto · \(scene.profile.summary) · 曝光 \(scene.exposure.enabled ? "开" : "关") \(Int(scene.exposure.shutter * 360))° · 堵主线程 \(scene.blockMain ? "开" : "关")"
         if let last = scene.lastSwitch {
@@ -295,6 +367,7 @@ import AppKit
 
     func click(_ p: CGPoint) {
         guard !isClosed else { return }
+        browserOwner?.prepareForSceneInput()
         if scene.isMe(at: p) { scene.meClicked(); return }
         if scene.isFocused, let i = scene.column(at: p) { scene.focusColumn(i); return }
         if let c = scene.orb(at: p) { scene.land(c.id, reason: "click") }
@@ -310,6 +383,8 @@ import AppKit
 
     /// Menu commands the window owns rather than the workbench (NormieActions.externalCommands).
     func command(_ command: NormieCommand, tag: Int) {
+        browserOwner?.prepareForSceneInput()
+        defer { reconcileBrowserOrb() }
         if shell.modeContentInputBlocked,[NormieCommand.newChat,.focus,.attach,.inspector,.terminal,.moveWindow,.mergeWindows].contains(command) {return}
         guard !isClosed else { return }
         switch command {
@@ -387,6 +462,8 @@ import AppKit
     /// To the screen's right third (at least 320 pt), floating, showing `id`; the window's arrangement is kept to come
     /// back to. Refused (a beep) without a member to show, or when already collapsed.
     func collapseToSide(_ id: String?, fromFullScreen: Bool = false) {
+        guard OrganicFeatureAvailability.current.collapse else { return }
+        browserOwner?.retire();browserOwner=nil
         // The draft has no command target (WindowModel commandTarget): nothing to collapse to.
         if shell.mode == .organic, scene.composingNew { NSSound.beep(); return }
         if window.styleMask.contains(.fullScreen), let id, collapsed == nil {
@@ -415,6 +492,10 @@ import AppKit
         let size = window.contentRect(forFrameRect: target).size
         let strip = CollapseStrip(store: scene.store, sessions: scene.composers, members: scene.members, shown: id, scale: screen.backingScaleFactor,
                                   transcriptSessions: transcriptSessions)
+        strip.sunHoverBadge = { [weak scene] changed in
+            scene?.sunHover?.refreshData(changed: changed)
+            return scene?.sunHover?.badge
+        }
         strip.frame = CGRect(x: shell.view.bounds.width - size.width, y: 0, width: size.width, height: size.height)
         strip.onRestore = { [weak self] in self?.restoreFromSide() }
         strip.onSelect = { [weak self] id in _ = self?.workbench.select(id) }
@@ -476,18 +557,27 @@ import AppKit
         if c.fullScreen { window.toggleFullScreen(nil) }
     }
 
-    func key(_ e: NSEvent) -> Bool {
+    func key(_ e: NSEvent, collapseHoverPoint: CGPoint? = nil) -> Bool {
         guard !isClosed else { return false }
+        if browserOwner?.full == true,e.keyCode == 53 {browserOwner?.toggleFull();return true}
+        browserOwner?.prepareForSceneInput()
         // Space while a dock node is held: Collapse to it (f050; not while typing: the root only sees keys no editor took).
-        if e.keyCode == 49, !e.isARepeat, e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty, let id = scene.pressedNode {
-            scene.cancelDrag(); collapseToSide(id); return true
+        if OrganicFeatureAvailability.current.collapse, e.keyCode == 49, !e.isARepeat,
+           e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty, let id = scene.pressedNode {
+            scene.cancelDrag()
+            collapseToSide(id)
+            return true
         }
         // With Settings' "collapse on hover + Space" on, pointing at a bar or orb in Auto is enough (the root only sees
         // Space when no input has the keyboard; OrganicWindowController collapseOnHoverSpace).
-        if e.keyCode == 49, !e.isARepeat, e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+        if OrganicFeatureAvailability.current.collapse, e.keyCode == 49, !e.isARepeat,
+           e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
            UserDefaults.standard.bool(forKey: "settings.collapseOnHoverSpace"), shell.mode == .organic, !scene.isFocused,
-           let id = scene.dockNode(at: root.convert(window.mouseLocationOutsideOfEventStream, from: nil)), id != DockNode.meID {
-            collapseToSide(id); return true
+           let id = scene.dockNode(at: collapseHoverPoint
+                                  ?? root.convert(window.mouseLocationOutsideOfEventStream, from: nil)),
+           id != DockNode.meID {
+            collapseToSide(id)
+            return true
         }
         // ⇧⌘Return: Focused on the full conversation, and back (MainMenu Focus).
         if e.keyCode == 36, e.modifierFlags.intersection([.command, .shift, .control, .option]) == [.command, .shift] {
@@ -537,6 +627,7 @@ import AppKit
     /// input, whatever asks, and its end is scheduled for what is left (OWC updateAmbient; app audit AP22).
     private var lastInput = 0.0
     private func updateAmbient(idle _: Bool = false) {
+        browserOwner?.visibilityChanged()
         let left = 8 - (CACurrentMediaTime() - lastInput)
         let visible = window.occlusionState.contains(.visible) && !window.isMiniaturized
         let running = visible && window.isKeyWindow && left > 0
@@ -556,6 +647,7 @@ import AppKit
     }
     /// In full screen the menu says what Collapse will do first (OWC:809-812).
     private func titleCollapseItem(fullScreen: Bool) {
+        guard OrganicFeatureAvailability.current.collapse else { return }
         func find(_ menu: NSMenu?) -> NSMenuItem? {
             for item in menu?.items ?? [] {
                 if item.identifier?.rawValue == "shortcut.collapse" { return item }
@@ -573,6 +665,8 @@ import AppKit
         collapseToSide(id, fromFullScreen: true)
     }
     func windowDidResignKey(_ n: Notification) {
+        scene.sunHover?.retire()
+        scene.orbTrash.suspend()
         updateAmbient(); scene.updateEditing()
         // A held node goes home when the window loses key, as a header's does. A tear is already between windows.
         if !scene.isTearing { scene.cancelDrag() }
@@ -584,10 +678,129 @@ import AppKit
 
     // MARK: NSWindowDelegate
 
+    private func sidechatError(_ error: Error, parent: Conversation) {
+        let rect = scene.orbPose(parent.id) ?? scene.nativePlane.bounds
+        scene.orbToast.present(error.localizedDescription, anchor: CGPoint(x: rect.midX, y: rect.midY),
+                               in: scene.overlayPlane)
+    }
+
+    private func openSidechat(_ parent: Conversation, runtime: SidechatRuntime) {
+        guard scene.sidechatEligible?(parent) == true, let thread = parent.backendThreadID else { return }
+        if scene.sidechatParentID != parent.id { scene.foldSidechat() }
+        sidechatOpenEpoch += 1
+        let epoch = sidechatOpenEpoch
+        Task { @MainActor [weak self] in
+            do {
+                let chat = try await runtime.open(parentID: thread)
+                guard let self, !self.isClosed, self.sidechatOpenEpoch == epoch,
+                      self.shell.mode == .organic,
+                      self.scene.sidechatEligible?(parent) == true,
+                      self.scene.members.contains(where: { $0 === parent }) else {
+                    try? await runtime.close(chat)
+                    return
+                }
+                self.sidechatOwned[chat.id] = chat
+                self.scene.openSidechat(parent: parent, chat: chat) { [weak self] host in
+                    host.pane.onDraft = { text in runtime.edit(chat, text: text) }
+                    host.pane.onSend = { [weak self] in
+                        Task { @MainActor in
+                            do { try await runtime.send(chat) }
+                            catch { self?.sidechatError(error, parent: parent) }
+                        }
+                    }
+                    host.pane.onStop = { [weak self] in
+                        Task { @MainActor in
+                            do { try await runtime.stop(chat) }
+                            catch { self?.sidechatError(error, parent: parent) }
+                        }
+                    }
+                    host.pane.onSendToMain = { [weak self, weak host] in
+                        Task { @MainActor in
+                            do {
+                                _ = try await runtime.sendToMain(chat)
+                                host?.acceptQuoteReceipt()
+                                self?.scene.sidechatMotionChanged()
+                            } catch {
+                                host?.pane.rejectSendToMain()
+                                self?.sidechatError(error, parent: parent)
+                            }
+                        }
+                    }
+                    host.onClose = { [weak self] in
+                        self?.sidechatOwned[chat.id] = nil
+                        Task { @MainActor [weak self] in
+                            try? await runtime.close(chat)
+                            if self?.scene.sidechatChatID == chat.id { self?.scene.removeSidechat() }
+                        }
+                    }
+                }
+                if self.scene.sidechatChatID != chat.id {
+                    self.sidechatOwned[chat.id] = nil
+                    try? await runtime.close(chat)
+                }
+            } catch {
+                guard let self, !self.isClosed, self.sidechatOpenEpoch == epoch else { return }
+                self.sidechatError(error, parent: parent)
+            }
+        }
+    }
+
+    private func updateSidechat(runtime: SidechatRuntime) {
+        guard let id = scene.sidechatChatID, let host = scene.sidechatPane else { return }
+        guard let chat = sidechatOwned[id], runtime.chats[id] === chat else {
+            sidechatOwned[id] = nil
+            scene.removeSidechat()
+            return
+        }
+        let title = scene.sidechatParentID.flatMap { scene.conversation($0)?.title } ?? ""
+        host.pane.apply(chat, parentTitle: title)
+    }
+
+    private func confirmSidechats(_ targets: [SidechatRuntime.CloseTarget]) async -> Bool {
+        guard !isClosed, sidechatConfirmation == nil else { return false }
+        let existing = shell.mode == .organic ? scene.sidechatPane : nil
+        let host = existing ?? SidechatPanePresentation()
+        guard !host.confirmation.isShowing else { return false }
+        if existing == nil {
+            let container = shell.mode == .organic ? scene.overlayPlane : shell.view
+            host.frame = container.bounds
+            host.autoresizingMask = [.width, .height]
+            container.addSubview(host, positioned: .above, relativeTo: nil)
+            sidechatConfirmation = host
+        }
+        let names = targets.map { target in
+            target.parentID.flatMap { scene.store.backendConversation($0)?.title } ?? "Sidechat"
+        }
+        return await withCheckedContinuation { continuation in
+            host.confirmClosure(title: "Close sidechats?", names: names) { [weak self, weak host] accepted in
+                if let self, let host, self.sidechatConfirmation === host {
+                    self.sidechatConfirmation = nil
+                    host.dispose()
+                }
+                continuation.resume(returning: accepted)
+            }
+        }
+    }
+
     private(set) var isClosed = false
     func windowWillClose(_ n: Notification) {
         guard !isClosed else { return }
         isClosed = true
+        sidechatOpenEpoch += 1
+        sidechatConfirmation?.dispose()
+        sidechatConfirmation = nil
+        scene.removeSidechat(restore: false)
+        if let runtime = sidechatRuntime {
+            if let id = sidechatObservation { runtime.removeObserver(id) }
+            let chats = Array(sidechatOwned.values)
+            sidechatOwned.removeAll()
+            Task {
+                for chat in chats { try? await runtime.close(chat) }
+            }
+        }
+        sidechatRuntime = nil
+        browserOwner?.retire();browserOwner=nil
+        scene.orbTrash.close()
         app?.closing(self)
         shell.flight.shutdown()
         shell.clearTranscriptStandIns()

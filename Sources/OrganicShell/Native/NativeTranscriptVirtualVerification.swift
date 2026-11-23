@@ -170,7 +170,8 @@ import AppKit
         menuRow.menuDidClose(menuRow.menu!); transcript.scrollOffset = .zero; transcript.scrollToEnd()
         check(row("interactive-0") == nil, "Virtual closing a menu allows its offscreen cell to recycle")
         let question = transcript.scrollView.documentView!.subviews.compactMap { $0 as? NativeTranscriptCard }.first { $0.accessibilityLabel()?.contains("Question") == true } ?? transcript.scrollView.documentView!.subviews.compactMap { $0 as? NativeTranscriptCard }.last!
-        let field = question.subviews.compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == "explanation" }!
+        let body = question.subviews.compactMap { ($0 as? NSScrollView)?.documentView }.first!
+        let field = body.subviews.compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == "explanation" }!
         field.stringValue = "Unsubmitted multiline\nanswer"; question.controlTextDidChange(.init(name: NSControl.textDidChangeNotification, object: field))
         transcript.scrollOffset = .zero
         check(question.superview != nil && field.stringValue == "Unsubmitted multiline\nanswer", "Virtual unsubmitted question input pins its native card outside the viewport")

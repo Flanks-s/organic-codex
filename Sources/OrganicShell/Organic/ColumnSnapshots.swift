@@ -64,7 +64,8 @@ extension ColumnNode {
                 native.restoreFlightVisibility(continued);native.isHidden=hidden;native.layer?.isHidden=layerHidden
             }
         }
-        let work=M10ColumnWorkTrace.scope("column.snapshot",["id":conversation.id]);defer{work.end()}
+        let work = M10ColumnWorkTrace.scope("column.snapshot", ["id": conversation.id, "width": fullWidth])
+        defer { work.end() }
         resolveIdleRowConfiguration()
         displayWidths=(fullWidth,briefWidth)
         let layout=M10ColumnWorkTrace.scope("column.snapshot.layout")
@@ -327,6 +328,17 @@ extension ColumnNode {
     }
     /// Background preparation never lays out a different native viewport between display frames.
     /// Unmounted/offscreen source rows and cold geometry retain the ordinary synchronous transition fallback.
+    func canPrepareTargetInIdle(fullWidth: CGFloat, contentTop: CGFloat) -> Bool {
+        func supported(_ view: NSView) -> Bool {
+            if view.isHidden || view.layer?.isHidden == true || view.layer?.mask?.bounds.isEmpty == true { return true }
+            return String(describing: type(of: view)) != "ToolsTerminalView" && view.subviews.allSatisfy(supported)
+        }
+        return ownsNative && native.modeRowLargestText <= Self.idleRowTextLimit && native.subviews.allSatisfy(supported)
+    }
+    func expectedTargetArea(fullWidth: CGFloat, contentTop: CGFloat) -> CGRect {
+        let top = contentTop - 18
+        return CGRect(x: 0, y: top, width: fullWidth, height: logicalBottom + 22 - top)
+    }
     func idleSnapshot(fullWidth:CGFloat,briefWidth:CGFloat,contentTop:CGFloat?=nil,idle:M11IdlePreparation) async throws ->Snapshot {
         let top=contentTop ?? fullContentTop
         let expected=CGSize(width:(fullWidth*scale).rounded()/scale,height:((logicalBottom+22-(top-18))*scale).rounded()/scale)

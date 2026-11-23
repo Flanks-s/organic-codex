@@ -6,6 +6,9 @@ import QuartzCore
 /// Synthetic, offscreen components only; never starts the normal application lifecycle or orders a window.
 @main enum OrbVerification {
     @MainActor static func main() throws {
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.collapse = true
+        defer { OrganicFeatureAvailability.current = savedFeatures }
         OrbDisplayEnvironment.shared.setOverride(.init()); defer { OrbDisplayEnvironment.shared.setOverride(nil) }
         let directory = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "/tmp/orb-verification", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)

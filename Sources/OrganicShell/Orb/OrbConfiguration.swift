@@ -68,6 +68,7 @@ struct OrbSatellite: Equatable {
     var pace: Double = 0
     var done = false
     var finishedOrder: Int?
+    var bodyPhase: BodyPhaseEvent? = nil
 }
 
 enum OrbSatelliteMode: Equatable {
@@ -91,6 +92,11 @@ struct OrbConfiguration: Equatable {
     var content: OrbContent
     /// Endpoint coordinates. Hover MUST keep this constant and call setFrame instead.
     var drawingSize: CGFloat
+    /// Logical endpoint size, independent of drawing headroom or hover magnification.
+    var bodyOuter: CGFloat? = nil
+    var bodyVisible = true
+    var bodyUnknown = false
+    var bodyPhase: BodyPhaseEvent? = nil
     var context: Double = 0
     var identityLiquid = true
     var running = false
@@ -117,6 +123,10 @@ struct OrbConfiguration: Equatable {
     /// Configure on backing changes, never on each geometry sample. Text has 2× magnification headroom.
     var backingScale: CGFloat = 2
     var appearance:Appearance = .dark
+    /// LL-only inputs. Identity and seed decorations ignore them.
+    var meLabel: String?
+    var meLabelVisible = true
+    var meBadgeAtCorner = false
 
     var liquidLevel: Double? {
         switch content {

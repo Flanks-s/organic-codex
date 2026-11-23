@@ -93,24 +93,29 @@ import AppKit
     var formBodyButton=false,usesSmallIconLabel=false
     static func ink(_ base:NSColor,opacity:CGFloat)->NSColor{base.withAlphaComponent(base.alphaComponent*opacity)}
     var recordingShortcut=false{didSet{if recordingShortcut != oldValue{syncRecording()};needsDisplay=true}}
-    private var heldRecordingAnimation: CAAnimation?
+    private var flashedRecording = false
     private lazy var animationVisibility = OrbAnimationVisibilityObservation(view:self) { [weak self] in self?.syncRecording() }
     override func viewDidMoveToWindow(){super.viewDidMoveToWindow();if recordingShortcut { animationVisibility.rebind() };syncRecording()}
     override func viewDidMoveToSuperview(){super.viewDidMoveToSuperview();if recordingShortcut { animationVisibility.rebind() };syncRecording()}
     private func syncRecording(){
         let enabled = recordingShortcut && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if enabled { if !animationVisibility.isObserving { animationVisibility.rebind() } } else { animationVisibility.stop(); heldRecordingAnimation = nil }
+        if !recordingShortcut { flashedRecording = false }
+        if enabled { if !animationVisibility.isObserving { animationVisibility.rebind() } }
+        else { animationVisibility.stop() }
         guard enabled, window != nil else { layer?.removeAnimation(forKey:"shortcut.recording"); return }
         if layer == nil { wantsLayer = true; animationVisibility.rebind() }
         guard let layer else { return }
         guard OrbAnimationVisibility.state(layer:layer, view:self).isVisible else {
             layer.removeAnimation(forKey:"shortcut.recording"); return
         }
-        guard layer.animation(forKey:"shortcut.recording") == nil else { return }
-        if let heldRecordingAnimation { layer.add(heldRecordingAnimation,forKey:"shortcut.recording"); return }
-        let animation=CABasicAnimation(keyPath:"opacity");animation.fromValue=1;animation.toValue=0.55;animation.duration=0.7;animation.autoreverses=true;animation.repeatCount = .infinity;animation.timingFunction=CAMediaTimingFunction(name:.easeInEaseOut)
-        animation.beginTime = layer.convertTime(CACurrentMediaTime(),from:nil)
-        heldRecordingAnimation = animation
+        guard !flashedRecording else { return }
+        flashedRecording = true
+        let animation = CABasicAnimation(keyPath: "opacity")
+        animation.fromValue = 1
+        animation.toValue = 0.55
+        animation.duration = 0.7
+        animation.autoreverses = true
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         layer.add(animation,forKey:"shortcut.recording")
     }
     var switchTrackRect:CGRect{CGRect(x:0,y:(bounds.height-15)/2,width:36,height:15)}

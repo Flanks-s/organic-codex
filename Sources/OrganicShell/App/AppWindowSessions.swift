@@ -87,10 +87,11 @@ extension AppController {
         let visible = screen.visibleFrame
         let size = CGSize(width: min(o.width, visible.width - 40), height: min(o.height, visible.height - 40))
         let latest = store.conversations.filter { !$0.archived }.max { $0.updated < $1.updated }
-        // Automated mock recipes keep their established working set; normal empty launches show the latest chat.
-        let members = automated && live == nil ? MockSeed.windowMembers : latest.map { [$0.id] } ?? []
+        // Automated recipes and explicit mock launches use the mock working set.
+        let mockWorkingSet = (automated || o.mockLaunch) && live == nil
+        let members = mockWorkingSet ? MockSeed.windowMembers : latest.map { [$0.id] } ?? []
         return SavedWindow(frame: [visible.midX - size.width / 2, visible.midY - size.height / 2, size.width, size.height],
-                           normie: automated && live == nil ? o.normie : true, members: members,
+                           normie: mockWorkingSet ? o.normie : true, members: members,
                            current: members.first ?? "", composingNew: members.isEmpty)
     }
 
@@ -98,7 +99,13 @@ extension AppController {
         guard presentsWindows else { return }
         for w in windows.dropFirst().reversed() { w.show(focus: w.shell.mode == .normie) }
         windows.first.map { $0.show(focus: $0.shell.mode == .normie) }
-        for (w, record) in zip(windows, records) where record.saved.collapsed == true {
+        restoreCollapsedWindows(records)
+    }
+
+    /// Kept separate from presentation so hidden-window checks exercise the same restoration callback.
+    func restoreCollapsedWindows(_ records: [WindowRestoration]) {
+        for (w, record) in zip(windows, records)
+        where OrganicFeatureAvailability.current.collapse && record.saved.collapsed == true {
             let saved = record.saved
             DispatchQueue.main.async { [weak w] in
                 guard let w, !w.isClosed else { return }
@@ -107,21 +114,17 @@ extension AppController {
         }
     }
 
-    /// What a saved window was besides its members: Focused and its split (each grafted in, then settled at once, before
-    /// anything shows), the split member whose editor had the keyboard, and New Chat with its unsent words, project and
+    /// Restore a normalized Split in one transaction before presentation, plus the saved editor and unsent draft.
+    /// Draft words, project and device remain on their existing restoration path.
     /// device (f003; product LocalPresentationState WindowState).
     func restoreArrangement(_ s: SavedWindow, in w: OrganicWindow, files: [Attachment] = []) {
-        let held = Set(w.scene.members.map(\.id))
-        if s.layout == "focused", let split = s.split?.filter(held.contains), let lead = split.first {
-            w.scene.enterFocused(lead, reason: "restore"); w.scene.settle()
-            for (i, id) in split.enumerated().dropFirst() { w.scene.graft(id, at: i, reason: "restore"); w.scene.settle() }
-            // Graft selects its new pane. Restore the saved current at rest without changing split order or orb banks.
-            if split.contains(s.current), w.scene.current != s.current {
-                w.scene.current = s.current
-                w.scene.resize(to: w.scene.sceneView.bounds.size, live: false)
-            }
-            if let focus = s.splitFocus, held.contains(focus), let c = store.conversation(focus) {
-                DispatchQueue.main.async { [weak w] in guard let w, !w.isClosed else { return }; w.scene.composer(for: c).focus() }
+        if s.layout == "focused" {
+            w.scene.restoreSplit(s)
+            if let focus = s.splitFocus, w.scene.scheme.split.contains(focus), let c = store.conversation(focus) {
+                DispatchQueue.main.async { [weak w] in
+                    guard let w, !w.isClosed else { return }
+                    w.scene.composer(for: c).focus()
+                }
             }
         }
         guard s.composingNew == true else { return }

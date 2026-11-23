@@ -6,6 +6,8 @@ import QuartzCore
 @MainActor enum ModeFlightRoundFourVerification {
     static func run(to output:URL,reference:URL) throws -> Int32 {
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        let clock=ModeContentVerificationClock()
+        defer {clock.restore()}
         var checks=0,failed=0,failures:[String]=[],categories:[String:Int]=[:],facts:[String:Any]=[:]
         func check(_ value:Bool,_ name:String) {checks+=1;if !value {failed+=1;categories[String(name.prefix(2)),default:0]+=1;if failures.count<1000 {failures.append(name);print("FAIL: "+name)}}}
         let size=CGSize(width:1280,height:820),rows=ModeOrreryFlightVerification.rows,real=ModeOrreryFlightVerification.real
@@ -187,7 +189,9 @@ import QuartzCore
         _=workbench.composerForHandoff();scene.install();scene.settle()
         let shell=WindowShell(organic:root,scene:scene,workbench:workbench,mode:.organic);_=shell.view
         defer {shell.disposeModePreparation();shell.flight.shutdown();workbench.dispose();scene.disposeTranscriptPresentation();sessions.dispose();replay.stopPlayback()}
-        var now=CACurrentMediaTime();shell.flight.manualTime={now};shell.flight.verificationServerMotion=true
+        var now=ModeContentWorkBoundary.verificationNow!()
+        shell.flight.manualTime={now}
+        shell.flight.verificationServerMotion=true
         shell.verificationFlightSettle(asOrganic:false);_=workbench.select("A")
         shell.prepareModeSwitch(reason:"m1131d.normie.A")
         shell.verificationFlightToggle(toOrganic:true);shell.verificationFlightAdmit()
@@ -293,7 +297,7 @@ import QuartzCore
             native.frame=CGRect(x:0,y:0,width:96,height:64);native.backgroundColor=NSColor.blue.cgColor
             curtain.frame=native.frame;curtain.backgroundColor=NSColor.green.cgColor;curtain.opacity=1
             root.addSublayer(native);root.addSublayer(curtain)
-            let epoch=CACurrentMediaTime()+3600
+            let epoch=VerificationClock.renderOrigin
             let fade=original.copy() as! CAAnimation;fade.beginTime=epoch+content.delay
             curtain.add(fade,forKey:"mode.source.turn")
             let renderer=OffscreenRenderer(size:CGSize(width:96,height:64),host:root,scale:scale)
@@ -343,7 +347,7 @@ import QuartzCore
                     let glass=CALayer();glass.frame=CGRect(x:24,y:24,width:16,height:16);glass.backgroundColor=NSColor(white:0.2,alpha:1).cgColor;glass.zPosition=7
                     root.addSublayer(glass);root.addSublayer(ink)
                     let renderer=OffscreenRenderer(size:CGSize(width:64,height:64),host:root,scale:scale)
-                    return renderer.render(at:CACurrentMediaTime()+3600)
+                    return renderer.render(at:VerificationClock.renderOrigin)
                 }
                 // The oracle only changes ordering; it never recaptures or redraws the native glyph.
                 check(render(actual.zPosition) == render(7.01),"A5 owned bitmap readback preserves board front-to-back order \(scale)x \(time)")

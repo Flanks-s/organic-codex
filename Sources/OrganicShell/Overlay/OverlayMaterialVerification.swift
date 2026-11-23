@@ -58,7 +58,20 @@ import AppKit
                     let clock=OverlayManualClock(),scene=SceneClock(),mount=CALayer()
                     let size=scenario.hasPrefix("peek") ? CGSize(width:520,height:130):CGSize(width:1080,height:900)
                     let renderer=OverlayM101Renderer(size:size,root:mount,scale:scale)
-                    let host=OverlayView(frame:CGRect(origin:.zero,size:size)),picker=OverlayModelPicker(clock:clock),send=OverlaySendOptions(clock:clock)
+                    let hostFrame = CGRect(origin: .zero, size: size)
+                    let host: OverlayView
+                    if scenario.hasPrefix("peek") {
+                        let surface = OverlaySurface(clock: clock)
+                        surface.frame = hostFrame
+                        surface.appearance = nil
+                        // Keep the spring and glyph exposure on the renderer's clock.
+                        surface.sceneTime = { renderer.origin + clock.now }
+                        host = surface
+                    } else {
+                        host = OverlayView(frame: hostFrame)
+                    }
+                    let picker = OverlayModelPicker(clock: clock)
+                    let send = OverlaySendOptions(clock: clock)
                     host.wantsLayer=true
                     var settings=ModelSettings();settings.modelID="g61sol";settings.effort = .ultra
                     picker.configure(settings:settings,models:ModelCatalog.mockModels)
@@ -73,8 +86,17 @@ import AppKit
                         else {
                             // Product Peek's 18pt / .55 response / .92 damping, with no container or filter copies.
                             for (key,from) in [("transform.translation.y",18.0),("opacity",0.0)] {
-                                let a=CASpringAnimation(keyPath:key),w=2*Double.pi/0.55;a.mass=1;a.stiffness=w*w;a.damping=2*0.92*w;a.duration=a.settlingDuration
-                                a.fromValue=from;a.toValue=key == "opacity" ? 1:0;a.beginTime=renderer.origin;a.fillMode = .backwards;v.motionLayer.add(a,forKey:"peek.fixture."+key)
+                                let a = CASpringAnimation(keyPath: key)
+                                let w = 2 * Double.pi / 0.55
+                                a.mass = 1
+                                a.stiffness = w * w
+                                a.damping = 2 * 0.92 * w
+                                a.duration = a.settlingDuration
+                                a.fromValue = from
+                                a.toValue = key == "opacity" ? 1 : 0
+                                a.beginTime = v.motionLayer.convertTime(renderer.origin, from: nil)
+                                a.fillMode = .backwards
+                                v.motionLayer.add(a, forKey: "peek.fixture." + key)
                             }
                             if variant == "accum" {v.accumulate(enabled:true)}
                         }

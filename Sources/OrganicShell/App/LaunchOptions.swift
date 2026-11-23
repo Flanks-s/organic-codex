@@ -14,6 +14,9 @@ struct Options {
     var live = true
     /// --mock: the mock conversations even on a normal launch (demos, tests and timed runs always use them).
     var mock = false
+    /// Explicit mock launch and optional startup Debug panel.
+    var mockLaunch = false, debugPanel = false
+    var browserOrbMock = false
     /// --live-core: the live Core in a timed or scripted run too (to test it; windows are still neither saved nor restored).
     var liveCore = false
     /// --mock-paused: the mock, held still (no playback; the Debug panel starts paused), for frames that must not change.
@@ -93,7 +96,12 @@ struct Options {
             case "--quit-after": o.quitAfter = Double(next())
             case "--output": o.output = next()
             case "--no-stream": o.live = false
-            case "--mock": o.mock = true
+            case "--mock":
+                o.mock = true
+                o.mockLaunch = true
+            case "--debug-panel": o.debugPanel = true
+            case "--browser-orb-mock", "--browser-orb-mock=true": o.browserOrbMock = true
+            case "--browser-orb-mock=false": o.browserOrbMock = false
             case "--mock-paused": o.mock = true; o.mockPaused = true; o.live = false
             case "--orb-lab", "--transition-lab", "--spring-lab", "--spotlight-lab": o.mock = true; o.labs.append(a[i])
             case "--settings-tour": o.mock = true; o.demoSettings = true

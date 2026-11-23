@@ -18,7 +18,7 @@ import AppKit
     var targetClip = CGRect.zero
     var sourceClipFrame: CGRect
     var targetClipFrame = CGRect.zero
-    var sourceModel: NSImage
+    var sourceModel: NSImage?
     var targetModel: NSImage?
     let duration = 0.20
 }
@@ -33,12 +33,17 @@ extension NativeComposer {
     func beginSegmentTransition(at now: Double) {
         guard !isComposing else { return }
         sampleSegmentTransition(at: now)
+        let image = splitOwnsPresentation ? nil : modelButton.segmentImage()
+        if !splitOwnsPresentation && image == nil {
+            finishSegmentTransition()
+            return
+        }
         (scrollView.contentView as? NativeComposerSegmentClipView)?.held = true
         segmentTransition = NativeComposerSegmentMotion(before: segmentViews.map {
             .init(view: $0, rect: $0.frame,
                   opacity: $0.isHidden ? 0 : $0.alphaValue, hidden: $0.isHidden)
         }, began: now, sourceFrame: frame, sourceClip:scrollView.contentView.bounds, sourceClipFrame:scrollView.contentView.frame,
-            sourceModel: NSImage(cgImage:NativeViewBitmap.capture(modelButton,scale:controlScale),size:modelButton.bounds.size))
+            sourceModel: image)
     }
 
     func commitSegmentTransition(at now: Double) {
@@ -46,8 +51,12 @@ extension NativeComposer {
         transition.targetFrame = frame
         transition.targetClipFrame = scrollView.bounds
         transition.targetClip = (scrollView.contentView as? NativeComposerSegmentClipView)?.normalized(scrollView.contentView.bounds) ?? scrollView.contentView.bounds
-        modelButton.segmentBlend = nil
-        transition.targetModel = NSImage(cgImage:NativeViewBitmap.capture(modelButton,scale:controlScale),size:modelButton.bounds.size)
+        if !splitOwnsPresentation {
+            guard let image = modelButton.segmentImage(blended: false) else {
+                return finishSegmentTransition()
+            }
+            transition.targetModel = image
+        }
         transition.after = segmentViews.map {
             .init(view: $0, rect: $0.frame, opacity: $0.isHidden ? 0 : 1, hidden: $0.isHidden)
         }
@@ -60,6 +69,7 @@ extension NativeComposer {
     }
 
     func sampleSegmentTransition(at now: Double) {
+        if splitOwnsPresentation && isComposing { return }
         guard let transition = segmentTransition, !transition.after.isEmpty else {
             if layoutMode == .fullBar, segment != nil, let clip = scrollView.contentView as? NativeComposerSegmentClipView {
                 clip.held = true
@@ -87,8 +97,8 @@ extension NativeComposer {
         }
         scrollView.contentView.frame = blend(transition.sourceClipFrame,transition.targetClipFrame)
         scrollView.contentView.bounds = blend(transition.sourceClip,transition.targetClip)
-        if let target = transition.targetModel {
-            modelButton.segmentBlend = .init(from:transition.sourceModel,to:target,progress:k)
+        if !splitOwnsPresentation, let source = transition.sourceModel, let target = transition.targetModel {
+            modelButton.segmentBlend = .init(from:source,to:target,progress:k)
         }
         CATransaction.commit()
         if k >= 1 { finishSegmentTransition() }

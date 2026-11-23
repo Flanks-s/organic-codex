@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 struct CoreArtifact: Identifiable, Equatable, Sendable {
     let raw: JSONValue
@@ -51,6 +52,7 @@ struct CoreArtifact: Identifiable, Equatable, Sendable {
     private weak var runtime: (any ConversationRuntime)?
     var onShow: ((Section, Conversation?) -> Void)?
     var onChange: (() -> Void)?
+    var onBrowserMutated: (() -> Void)?
     private var observers:[UUID:()->Void]=[:]
     func observe(_ callback:@escaping ()->Void)->UUID { let id=UUID(); observers[id]=callback; return id }
     func removeObserver(_ id:UUID) { observers[id]=nil }
@@ -138,6 +140,93 @@ struct CoreArtifact: Identifiable, Equatable, Sendable {
         components.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
         return components.string!
     }
+    enum ArtifactRead<Value: Sendable>: Sendable {
+        case unread, loading, empty, content(Value), failed(any Error)
+        var failure: (any Error)? {
+            if case .failed(let error) = self { error } else { nil }
+        }
+    }
+    struct ArtifactScope: Equatable, Sendable {
+        let thread: String
+        let endpoint: String
+        let mapped: Set<String>
+
+        func admits(_ artifact: CoreArtifact) -> Bool {
+            !thread.isEmpty && !artifact.id.isEmpty &&
+                (artifact.threadID == thread || (artifact.threadID == nil && mapped.contains(artifact.id)))
+        }
+    }
+
+    struct ArtifactTarget: Equatable, Sendable {
+        let scope: ArtifactScope
+        let artifact: CoreArtifact
+    }
+    private func artifactClient(_ scope: ArtifactScope) throws -> any CoreTransport {
+        try Task.checkCancellation()
+        guard !scope.thread.isEmpty, !scope.endpoint.isEmpty, endpointIdentity == scope.endpoint else {
+            throw CoreWire.failure("The artifact source changed.")
+        }
+        return try requiredClient()
+    }
+    func readArtifacts(_ scope: ArtifactScope) async -> ArtifactRead<[CoreArtifact]> {
+        do {
+            let client = try artifactClient(scope)
+            let route = scope.mapped.isEmpty ? path("/preview/artifacts", query: ["threadId": scope.thread]) :
+                "/preview/artifacts"
+            let result = try await client.request(path: route)
+            _ = try artifactClient(scope)
+            guard let values = result.arrayValue else { throw URLError(.cannotParseResponse) }
+            let owned = values.map(CoreArtifact.init(raw:)).filter(scope.admits)
+            return owned.isEmpty ? .empty : .content(owned)
+        } catch { return .failed(error) }
+    }
+
+    func readArtifact(_ target: ArtifactTarget) async -> ArtifactRead<Data> {
+        do {
+            let client = try artifactClient(target.scope)
+            let artifact = target.artifact
+            guard target.scope.admits(artifact), !artifact.sha.isEmpty, !artifact.previewUnavailable else {
+                throw CoreWire.failure("This artifact has no verified preview version.")
+            }
+            if let bytes = artifact.raw["bytes"]?.intValue, bytes > Self.contentLimit {
+                throw CoreWire.failure("Artifact exceeds 32 MiB.")
+            }
+            let content = try await client.request(path: path("/preview/content", query: ["id": artifact.id]))
+            _ = try artifactClient(target.scope)
+            let received = CoreArtifact(raw: content)
+            guard received.id == artifact.id, received.sha == artifact.sha, received.mime == artifact.mime,
+                  received.threadID == artifact.threadID, target.scope.admits(received) else {
+                throw CoreWire.failure("The artifact version changed.")
+            }
+            guard let encoded = content["dataBase64"]?.stringValue,
+                  encoded.utf8.count <= (Self.contentLimit+2)/3*4,
+                  let data = Data(base64Encoded: encoded), data.count <= Self.contentLimit else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+            guard digest == artifact.sha else { throw CoreWire.failure("The artifact bytes changed.") }
+            return data.isEmpty ? .empty : .content(data)
+        } catch { return .failed(error) }
+    }
+
+    func artifactURL(_ target: ArtifactTarget) async throws -> URL {
+        guard localPathsAvailable, !target.artifact.sha.isEmpty else {
+            throw CoreWire.failure("The local artifact version is unavailable.")
+        }
+        let listing = await readArtifacts(target.scope)
+        let artifact = target.artifact
+        guard localPathsAvailable, case .content(let values) = listing,
+              values.contains(where: {
+                  $0.id == artifact.id && $0.sha == artifact.sha && $0.path == artifact.path &&
+                      $0.threadID == artifact.threadID
+              }),
+              artifact.path.hasPrefix("/") else {
+            if let error = listing.failure { throw error }
+            throw CoreWire.failure("The artifact path or version changed.")
+        }
+        return URL(fileURLWithPath: artifact.path)
+    }
+
     private func merge(_ raw: JSONValue, refreshSelection:Bool=true) {
         var metadata = raw.objectValue ?? [:]
         if let source = generatedArtifacts.values.first(where: { $0.id == raw["id"]?.stringValue }) {
@@ -181,6 +270,32 @@ struct CoreArtifact: Identifiable, Equatable, Sendable {
                 selectedData = data; error = nil
             } catch { if loadingID == token { loadingAnnotations=false; annotationEvents=[]; self.error = error.localizedDescription } }
         }
+    }
+    /// Independent, read-only transport. Never changes Tools selection, annotations, draft or busy state.
+    func referencePreview(_ target: ReferenceTarget, in conversation: Conversation) async -> TranscriptReferencePreview {
+        guard case .file = target, let thread = conversation.backendThreadID, let client else {
+            return .init(state: .unavailable, message: "No registered preview is available for this target.")
+        }
+        let endpoint = endpointIdentity, location = target.fileLocation
+        do {
+            let listing = try await client.request(path: "/preview/artifacts")
+            let candidates = (listing.arrayValue ?? []).map(CoreArtifact.init(raw:))
+            guard let artifact = candidates.first(where: { $0.path == location.path && ($0.threadID == nil || $0.threadID == thread) }),
+                  !artifact.previewUnavailable, artifact.bytes <= Self.contentLimit else {
+                return .init(state: .unavailable, message: "This target is not available through the registered preview transport.")
+            }
+            guard artifact.mime.hasPrefix("text/") || ["application/json", "application/javascript", "application/xml"].contains(artifact.mime) else {
+                return .init(state: .unavailable, message: "This format has no read-only text preview here.")
+            }
+            let content = try await client.request(path: path("/preview/content", query: ["id": artifact.id]))
+            guard endpointIdentity == endpoint, !Task.isCancelled,
+                  let encoded = content["dataBase64"]?.stringValue, encoded.utf8.count <= (Self.contentLimit+2)/3*4,
+                  let data = Data(base64Encoded: encoded), data.count <= Self.contentLimit,
+                  let text = String(data: data, encoding: .utf8) else {
+                return .init(state: .unavailable, message: "The preview could not be read as UTF-8 text.")
+            }
+            return .init(state: .ready, text: text, message: "Read-only preview")
+        } catch { return .init(state: .unavailable, message: "The preview transport could not read this target.") }
     }
     func addAnnotation() {
         guard let selected, !selected.previewUnavailable, !comment.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -260,7 +375,11 @@ struct CoreArtifact: Identifiable, Equatable, Sendable {
     }
     func openBrowser() {
         perform { [self] in
-            let result = try await requiredClient().request("POST", path: "/browser/open", body: ["url": .string(browserURL)])
+            let client = try requiredClient()
+            let result: JSONValue
+            do { result = try await client.request("POST", path: "/browser/open", body: ["url": .string(browserURL)]) }
+            catch { onBrowserMutated?(); throw error }
+            onBrowserMutated?()
             selectedTabID = result["tabId"]?.stringValue ?? ""
             tabs = try await requiredClient().request(path: "/browser/tabs")["tabs"]?.arrayValue ?? []
         }
@@ -268,7 +387,10 @@ struct CoreArtifact: Identifiable, Equatable, Sendable {
     func closeBrowserTab() {
         guard !selectedTabID.isEmpty else { return }; let id = selectedTabID
         perform { [self] in
-            _ = try await requiredClient().request("POST", path: "/browser/close", body: ["tabId": .string(id)])
+            let client = try requiredClient()
+            do { _ = try await client.request("POST", path: "/browser/close", body: ["tabId": .string(id)]) }
+            catch { onBrowserMutated?(); throw error }
+            onBrowserMutated?()
             tabs.removeAll { $0["tabId"]?.stringValue == id }; if selectedTabID == id { selectedTabID = ""; browserImage = nil; browserSnapshot = "" }
         }
     }

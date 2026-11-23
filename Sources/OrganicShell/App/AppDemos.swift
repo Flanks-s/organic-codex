@@ -2,6 +2,29 @@ import AppKit
 import QuartzCore
 
 extension AppController {
+    func startDemoAutoplay() {
+        guard let value = ProcessInfo.processInfo.environment["ORGANIC_DEMO_AUTOPLAY"], !value.isEmpty,
+              mock != nil, live == nil else { return }
+        let parsed = Double(value) ?? 0
+        let interval = parsed >= 3 ? parsed : 8
+        let events: [MockInjection] = [.approval, .question, .complete, .errorStopped,
+                                       .addSatellite, .satelliteDone, .contextUp]
+        var tick = 0
+        Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                defer { tick += 1 }
+                guard let self, let mock = self.mock, let window = self.front else { return }
+                let ids = window.scene.members.map(\.id).sorted()
+                guard !ids.isEmpty else { return }
+                let id = ids[tick % ids.count]
+                let event = events[tick % events.count]
+                let ok = mock.inject(event, into: id)
+                print("demo-autoplay tick=\(tick) event=\(event.rawValue) target=\(id) ok=\(ok)")
+                fflush(stdout)
+            }
+        }
+    }
+
     /// For the Labs: the Transition Lab exports its 22-form filmstrip and plays both ways; then the Spring Lab plays its
     /// real column and measures it. Each window's number goes to the output for recording it on its own.
     func demoLabs() {
@@ -509,6 +532,8 @@ extension AppController {
     }
 
     func demoAudit2() {
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.collapse = true
         func after(_ t: Double, _ step: String, _ f: @escaping @MainActor () -> [String: Any]) {
             DispatchQueue.main.asyncAfter(deadline: .now() + t) { MainActor.assumeIsolated {
                 var e = f(); e["step"] = step; self.composeLog.append(e)
@@ -565,7 +590,10 @@ extension AppController {
         after(12.0, "AP02 inspector", { self.shell.setMode(.normie, animated: false); w().workbench.requestInspector(shown: true)
             return ["shown": w().shell.inspectorShown, "workbench": w().workbench.inspectorVisible] })
         after(12.6, "AP02 again", { w().workbench.requestInspector(shown: true); return ["shown": w().shell.inspectorShown] })
-        after(13.0, "end", { [:] })
+        after(13.0, "end", {
+            OrganicFeatureAvailability.current = savedFeatures
+            return [:]
+        })
     }
 
     func demoHover() {
@@ -739,6 +767,8 @@ extension AppController {
     /// the columns; press the current brief's (7.9 then 8 pt) and carry it left; carry the full one out to the Dock's
     /// overflow; carry one and Esc; a short press opens Customize. Headers are looked up anew for each leg.
     func demoDragHeader() {
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.windowTear = true
         M104HeaderOrbDragging.install(in: scene) // idempotent; for scenes the window has not wired yet
         let drag = { self.scene.dock.headerOrbDragging }
         func island(full: Bool) -> HeaderIsland? {
@@ -782,6 +812,7 @@ extension AppController {
         press(10.5, full: true); carry(from: 10.8, seconds: 0.7) { CGPoint(x: size.width / 2, y: self.lastHeaderDragPoint.y) }
         at(11.7) { drag()?.cancel() }
         press(13.2, full: true); drop(13.3)
+        at(13.5) { OrganicFeatureAvailability.current = savedFeatures }
     }
     var lastHeaderDragPoint: CGPoint { get { Self.headerDragPoint } set { Self.headerDragPoint = newValue } }
     func demoDrag() {
@@ -1019,6 +1050,9 @@ extension AppController {
     /// Tear with a synthetic pointer: the first orb pulled up off the dock (it tears), carried left onto the desktop and
     /// dropped (a window grows); then the next orb carried onto that window and dropped (it merges).
     func demoTear() {
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.windowTear = true
+        OrganicFeatureAvailability.current.conversationOrbTear = true
         var t = 1.0
         func at(_ dt: Double, _ step: String, _ run: @escaping () -> Void) {
             t += dt
@@ -1058,7 +1092,7 @@ extension AppController {
             return self.main.root.convert(self.main.window.convertPoint(fromScreen: c), from: nil)
         }, over: 0.7, label: "over the new window")
         at(0.2, "drop on it", { _ = self.scene.pointerUp(last) })
-        at(1.5, "rest", {})
+        at(1.5, "rest", { OrganicFeatureAvailability.current = savedFeatures })
     }
 
     /// me carried onto the second bar and dropped: Focused on it; then carried up out of the capsule: Auto again.
