@@ -2,6 +2,19 @@ import AppKit
 import UserNotifications
 
 extension AppController {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let live, live.sidechats.needsShutdown else { return .terminateNow }
+        Task { @MainActor in
+            await live.sidechats.shutdown()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    /// B-stage window entry point; retain and cancel the token with the window. A-stage adds no subscribers.
+    func observeAccountUsage(_ change: @escaping (AccountUsage) -> Void) -> AccountUsageObservation {
+        store.observeAccountUsage(change)
+    }
     /// The app keeps arrivals in the store even when there is no presentation owner.
     func watchArrivals() { store.onAdd = { [weak self] c in self?.front?.scene.admit(c, reason: "arrival") } }
 
@@ -10,14 +23,27 @@ extension AppController {
         core = service
         let live = LiveConversationRuntime(store: store, client: service.client, service: service)
         self.live = live
+        installLiveBrowser(client: service.client)
+        connectBrowserMutations()
         runtime = live
         // Shown in any window (a column, Normie's selection, the strip): its reads are kept current.
         live.isShown = { [weak self] id in
             self?.windows.contains { w in w.strip?.shown == id || (w.shell.mode == .normie ? w.workbench.selectedConversation?.id == id : w.scene.members.contains { $0.id == id }) } ?? false
         }
-        live.onStateChange = { [weak self] in self?.windows.forEach { $0.workbench.refresh() } }
+        live.onStateChange = { [weak self] in self?.liveBrowser?.connectionChanged(self?.live?.isConnected == true); self?.windows.forEach { $0.workbench.refresh() } }
+        // Settings owns its own Usage snapshot, not ConversationStore's quota fields.
+        // A local read/clear refreshes legacy quota visuals and invalidates the Settings cache.
+        // This Settings-only notification never enters the runtime stream or advances its cursor.
+        live.onAccountUsageChange = { [weak self] in
+            guard let self else { return }
+            self.windows.forEach { window in
+                window.scene.dock.refreshOrbs()
+                if window.scene.meController.isQuotaPresented { window.scene.meController.update(window.scene.meModel()) }
+            }
+            self.liveSettings.receive(.init(id: 0, time: nil, method: "account/rateLimits/updated", params: [:]))
+        }
         // One SSE stream: Settings, artifacts and terminals hear it from the runtime.
-        live.onEvent = { [weak self] e in self?.liveSettings.receive(e); self?.liveArtifacts.receive(e); self?.liveTerminals.receive(e) }
+        live.onEvent = { [weak self] e in self?.liveSettings.receive(e); self?.liveArtifacts.receive(e); self?.liveTerminals.receive(e); self?.liveBrowser?.receive(e) }
         // Revert's native confirmation belongs to the window (CORE-M7): the runtime reviews, the window asks.
         live.onRevertRequested = { [weak self, weak live] card, c in
             live?.revertReviewed(card, in: c) { paths, staged, worktree in
@@ -25,6 +51,11 @@ extension AppController {
             }
         }
         connectLive()
+    }
+
+    /// Tools keeps its own tab selection; only its mutation result invalidates the shared browser list.
+    func connectBrowserMutations() {
+        liveArtifacts.onBrowserMutated = { [weak self] in self?.liveBrowser?.noteShellMutation() }
     }
 
     private func connectLive() {
@@ -222,7 +253,7 @@ extension AppController {
 
     /// Keyboard Shortcuts (f142): the menus take the keys set for their commands and ⌘1–9 its choice (Sol's
     /// NormieMenuBuilder.applyShortcuts); Send Message's keys go to every composer (SettingsModel.sendKeys: none set
-    /// is ⌘↩, and plain ↩ then adds a line).
+    /// is ↩, and ⇧↩ adds a line).
     func applyShortcuts() {
         guard let p = settings?.session.preferences else { return }
         var bindings: [String: String] = [:]
@@ -249,11 +280,10 @@ extension AppController {
         for w in windows { w.scene.lookChanged(change) }
     }
 
-    /// "⌘↩", "↩", "⇧↩", "⌥↩", "⌃↩" as the composer's shortcut; anything else (a letter key) is not one the composer
-    /// can take, and leaves ⌘↩.
+    /// Map the configured shortcut to a composer key; an unsupported key falls back to Return.
     static func sendShortcut(_ combo: String) -> NativeComposerSendShortcut {
         let (key, modifiers) = NormieMenuBuilder.keyEquivalent(combo)
-        guard let code = keyCode(key) else { return .commandReturn }
+        guard let code = keyCode(key) else { return .return }
         return NativeComposerSendShortcut(keyCode: code, modifiers: modifiers)
     }
 

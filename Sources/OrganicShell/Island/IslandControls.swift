@@ -17,7 +17,24 @@ import AppKit
     required init?(coder:NSCoder) { fatalError("init(coder:) is not supported") }
 }
 @MainActor final class IslandLabel: NativeLabel {
+    var titleBlend: (from: NSImage, to: NSImage, progress: CGFloat)? { didSet { needsDisplay = true } }
+    func titleImage(scale: CGFloat, blended: Bool = true) -> NSImage? {
+        let saved = titleBlend
+        if !blended { titleBlend = nil }
+        defer { titleBlend = saved }
+        guard let image = M10DockPicture.draw(self, scale: scale, plates: false) else { return nil }
+        return NSImage(cgImage: image, size: bounds.size)
+    }
     override func draw(_ dirtyRect:NSRect) {
+        if let blend = titleBlend {
+            for (image, alpha) in [(blend.from, 1 - blend.progress), (blend.to, blend.progress)] where alpha > 0 {
+                let rect = CGRect(x: bounds.minX, y: bounds.midY - image.size.height / 2,
+                                  width: image.size.width, height: image.size.height)
+                image.draw(in: rect, from: .zero, operation: .sourceOver, fraction: alpha,
+                           respectFlipped: true, hints: [.interpolation: NSImageInterpolation.none])
+            }
+            return
+        }
         // NSTextFieldCell reserves horizontal insets even for labels. Draw at the measured glyph origin
         // so a fitting title (especially New Chat) never loses its last glyph to a cell inset.
         let paragraph=NSMutableParagraphStyle(); paragraph.alignment=alignment; paragraph.lineBreakMode=lineBreakMode
@@ -30,6 +47,9 @@ import AppKit
 @MainActor final class IslandButton: NSControl {
     var invoke:(()->Void)?, doubleClick:(()->Void)?, focus:((Bool)->Void)?
     var beginPointerGesture: ((NSEvent) -> (any IslandOrbDragGesture)?)?
+    var routePointerDown: ((NSEvent) -> Bool)?
+    var cancelRoutedPointer: (() -> Bool)?
+    var routesContextInput: (() -> Bool)?
     private var pointerGesture: (any IslandOrbDragGesture)?
     /// The gesture can outlive a leaving/hidden column. Its local event monitor calls this on every exit.
     func endPointerGesture() { pointerGesture=nil; pressed=false; needsDisplay=true }
@@ -105,6 +125,7 @@ import AppKit
     override func mouseExited(with event:NSEvent) { hovered=false; needsDisplay=true }
     override func mouseDown(with event:NSEvent) {
         guard participates && isEnabled && NativePointerShield.permits(self,localPoint:convert(event.locationInWindow,from:nil)) else { return }
+        if routePointerDown?(event) == true { return }
         if event.clickCount>1, let doubleClick { doubleClick(); return }
         pressed=true; needsDisplay=true
         if let gesture=beginPointerGesture?(event) {
@@ -124,9 +145,20 @@ import AppKit
             }
         } else { pressed=false; performClick(self) }
     }
-    override func mouseDragged(with event:NSEvent) { pointerGesture?.dragged(with:event) }
-    override func mouseUp(with event:NSEvent) { pointerGesture?.released(with:event) }
-    override func cancelOperation(_ sender:Any?) { pointerGesture?.cancel(); endPointerGesture() }
+    override func mouseDragged(with event:NSEvent) { if routePointerDown?(event) != true { pointerGesture?.dragged(with:event) } }
+    override func rightMouseDown(with event:NSEvent) {
+        if routePointerDown?(event) != true { super.rightMouseDown(with:event) }
+    }
+    override func menu(for event: NSEvent) -> NSMenu? {
+        // AppKit asks this before mouseDown for Control-click. Leave routing to the shared input owner.
+        if event.modifierFlags.contains(.control), routesContextInput?() == true { return nil }
+        return super.menu(for:event)
+    }
+    override func mouseUp(with event:NSEvent) { if routePointerDown?(event) != true { pointerGesture?.released(with:event) } }
+    override func cancelOperation(_ sender:Any?) {
+        if cancelRoutedPointer?() != true { pointerGesture?.cancel() }
+        endPointerGesture()
+    }
     override func performClick(_ sender:Any?) { if participates && isEnabled && !isHiddenOrHasHiddenAncestor { invoke?() } }
     override func accessibilityPerformPress() -> Bool {
         guard participates && isEnabled && !isHiddenOrHasHiddenAncestor else { return false }; performClick(self); return true

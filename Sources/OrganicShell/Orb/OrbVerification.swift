@@ -6,6 +6,9 @@ import QuartzCore
 /// Synthetic, offscreen components only; never starts the normal application lifecycle or orders a window.
 @main enum OrbVerification {
     @MainActor static func main() throws {
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.collapse = true
+        defer { OrganicFeatureAvailability.current = savedFeatures }
         OrbDisplayEnvironment.shared.setOverride(.init()); defer { OrbDisplayEnvironment.shared.setOverride(nil) }
         let directory = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "/tmp/orb-verification", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -141,7 +144,7 @@ import QuartzCore
         check(c.backView.isAccessibilityHidden() && c.frontView.isAccessibilityHidden(), "no duplicate AX")
         let wobble = c.verificationMotionLayers[3].animation(forKey: "wobble")
         check(wobble == nil, "M11.47 running liquid has no idle loop")
-        check(c.verificationLiquidLevel == configuration.context, "running identity liquid keeps the reported context waterline")
+        check(c.verificationLiquidLevel == nil, "textured identity hides the context liquid")
         notes.append(String(format: "setFrame ×100: %.3f ms total; %.3f µs/call (CPU mutation time, no render-server flush)", elapsed, elapsed*10))
         notes.append("setFrame deltas: layout=0, glyphPaths=0, liquidPaths=0, badgePaths=0, glowPaths=0, orbitBuilds=0, textLayouts=0")
 
@@ -179,7 +182,7 @@ import QuartzCore
         let loopBegin = p.verificationMotionLayers[3].animation(forKey: "wobble")?.beginTime
         configuration.context = 0.7; configuration.compactions += 1; p.configure(configuration)
         check(p.verificationMotionLayers[3].animation(forKey: "wobble")?.beginTime == loopBegin, "context change does not restart wobble")
-        check(p.verificationSpinnerLayer.animation(forKey: "spin")?.duration == 0.9, "compaction spins liquid once over 0.9 s")
+        check(p.verificationSpinnerLayer.animation(forKey:"spin") == nil,"textured identity has no compaction spin")
 
         let rowOrb = OrbComponent(id: "rows")
         var rowConfig = fixtures[0].1
@@ -205,7 +208,7 @@ import QuartzCore
         var badgeConfig = OrbConfiguration(content: .identity(.assigned(4)), drawingSize: 32, context: 0.8)
         b.configure(badgeConfig)
         let alpha = b.verificationLiquidColors.map { $0.alpha }
-        check(alpha == [0.5, 0.78], "context 0.8 uses deep alpha")
+        check(alpha == [0.24, 0.42], "hidden identity liquid does not deepen")
         badgeConfig.context = 0.79; b.configure(badgeConfig)
         check(b.verificationLiquidColors.map { $0.alpha } == [0.24, 0.42], "ordinary liquid alpha")
         badgeConfig.badge = OrbBadge(tone: .red, symbol: .error); badgeConfig.redUnseen = true; badgeConfig.redEvents = 1
@@ -286,9 +289,11 @@ import QuartzCore
         let finite=OrbComponent(id:"finite-feedback")
         var feedback=fixtures[0].1;feedback.ambient=true;feedback.activitySerial=1;finite.configure(feedback)
         feedback.activitySerial=2;finite.configure(feedback)
-        check(finite.verificationMotionLayers[3].animation(forKey:"eventSettle") != nil,"live activity submits finite feedback")
+        check(finite.verificationMotionLayers[3].animation(forKey:"eventSettle") == nil,"textured activity has no wave")
         feedback.identityLiquid=false;feedback.activitySerial=3;finite.configure(feedback)
-        check(finite.verificationLiquidLevel == 0 && finite.verificationMotionLayers[3].animation(forKey:"eventSettle") == nil,"disabled liquid cannot leak a finite wave at the bottom edge")
+        check(finite.verificationLiquidLevel == nil &&
+              finite.verificationMotionLayers[3].animation(forKey:"eventSettle") == nil,
+              "disabled textured liquid cannot leak a wave")
         feedback.identityLiquid=true;feedback.activitySerial=4;finite.configure(feedback)
         finite.setPresentationActive(false);feedback.activitySerial=5;finite.configure(feedback)
         check(finite.verificationMotionLayers[3].animation(forKey:"eventSettle") == nil,"a hidden new event clears stale paused feedback")

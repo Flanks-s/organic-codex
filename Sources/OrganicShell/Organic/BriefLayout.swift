@@ -15,8 +15,55 @@ import AppKit
         case activity(String)
         /// A finished stretch's narration, from its answer's lead.
         case segment(String)
+        case cover(BlockSource)
+        case step(BlockSource, quote: QuoteAnchor?)
+        case blockLyric(BlockSource)
     }
-    enum Kind: Equatable { case note, lyric, activity, state, dots }
+    enum Kind: Equatable { case note, lyric, activity, state, dots, cover, step }
+
+    struct BlockSource: Hashable {
+        let blockID: String
+        let itemID: String
+        let revision: Int
+        /// UTF-16 in the source item. The step quote carries its own, independent source.
+        let range: NSRange
+    }
+
+    struct QuoteAnchor: Hashable {
+        let source: StepQuote.Source
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(source.kind.rawValue)
+            hasher.combine(source.itemID)
+            hasher.combine(source.requestID)
+            hasher.combine(source.revision)
+            hasher.combine(source.field)
+            hasher.combine(source.range)
+        }
+    }
+
+    struct Cover {
+        struct Variant {
+            let size: CGSize
+            let image: CGImage?
+        }
+
+        /// Stable preparation identity shared by both sizes.
+        let id: String
+        let current: Variant
+        let old: Variant
+    }
+
+    struct RichBlock {
+        let source: BlockSource
+        let cover: Cover
+        let stepQuote: StepQuote
+        let lyric: Paraphrase?
+    }
+
+    /// Caller-supplied blocks in display order, keyed by SummaryLog.Stretch.id.
+    typealias RichProjection = [String: [RichBlock]]
+
     struct Part {
         let id: String
         let anchor: Anchor?
@@ -36,19 +83,39 @@ import AppKit
         /// Dots the brief draws itself, and where, part-local: the "…" of a stretch with nothing to say yet, or an
         /// activity's compact dots in place of the transcript's spinner.
         let dots: (size: DotsLayer.Size, frame: CGRect)?
+        var resourceID: String?
+        var stepQuote: StepQuote?
+    }
+
+    struct RichRow {
+        let top: CGFloat
+        let height: CGFloat
+    }
+
+    private enum RichMetrics {
+        static let currentGap: CGFloat = 8
+        static let thumbnailTop: CGFloat = 2
+        static let thumbnailRow: CGFloat = 24
+        static let oldGap: CGFloat = 3
+        static let stepTop: CGFloat = 4
+        static let stepLeading: CGFloat = 44
+        static let tileGap: CGFloat = 8
     }
 
     let parts: [Part]
     let height: CGFloat
     let lyricStyle: TextStyle
     let lineCount: Int
+    let richRows: [Int: RichRow]
 
     /// `width` is the brief's text width (the column less 20 a side); `showsState` puts the state under the latest line
     /// when no column header island says it (product: `headerTop == nil`).
     /// `room`: how tall the brief can be seen. Only the lines that can reach it are laid out: the brief is bottom-aligned
     /// and clipped, so the rest of a long conversation never shows, and laying it out grew with every stretch (a 14-minute
     /// session took 200 ms per update, user 10-30). `drawsText`: false when the caller redraws every note and lyric itself.
-    init(_ log: SummaryLog, width: CGFloat, columnWidth: CGFloat, scale: CGFloat, showsState: Bool, room: CGFloat? = nil, drawsText: Bool = true, lastLineIsCurrent: Bool = true) {
+    init(_ log: SummaryLog, width: CGFloat, columnWidth: CGFloat, scale: CGFloat, showsState: Bool,
+         room: CGFloat? = nil, drawsText: Bool = true, lastLineIsCurrent: Bool = true,
+         rich: RichProjection? = nil) {
         let style = Look.lyric(columnWidth: columnWidth)
         lyricStyle = style
         let size = style.font.pointSize, lineGap = (size * 0.62).rounded()
@@ -56,6 +123,7 @@ import AppKit
         // The shortest line is one row of text and its gap; two more so a partly clipped top line still draws.
         if let room { lines = Array(lines.suffix(Int((room / (size + lineGap)).rounded(.up)) + 2)) }
         var parts: [Part] = [], y: CGFloat = 0
+        var richRows: [Int: RichRow] = [:]
 
         func note(_ id: String, _ text: String, trailing: Bool, anchor: Anchor?, at top: CGFloat, current: Bool) -> Part {
             let block = TextBlock(text, style: Look.briefNote, width: width, maxLines: 1)
@@ -75,9 +143,49 @@ import AppKit
                         current: current, image: image?.image, block: block, dots: nil)
         }
 
+        func richParts(_ block: RichBlock, at top: CGFloat, current: Bool) -> (parts: [Part], bottom: CGFloat) {
+            let id = "rich:" + block.source.blockID
+            let material = current ? block.cover.current : block.cover.old
+            let coverTop = current ? top : top + RichMetrics.thumbnailTop
+            let cover = Part(id: id + ".cover", anchor: .cover(block.source), kind: .cover,
+                             frame: CGRect(origin: CGPoint(x: 0, y: coverTop), size: material.size),
+                             current: current, image: material.image, block: nil, dots: nil,
+                             resourceID: block.cover.id)
+            var parts = [cover]
+            let bottom: CGFloat
+            let gap: CGFloat
+            if current {
+                bottom = cover.frame.maxY
+                gap = RichMetrics.currentGap
+            } else {
+                let x = min(width, max(RichMetrics.stepLeading, cover.frame.maxX + RichMetrics.tileGap))
+                let slot = CGRect(x: x, y: top + RichMetrics.stepTop, width: max(0, width - x),
+                                  height: ColumnBriefTypography.stepHeight)
+                let quoteAnchor: QuoteAnchor? = if case .original(_, let source) = block.stepQuote {
+                    QuoteAnchor(source: source)
+                } else {
+                    nil
+                }
+                let paragraph = drawsText ? ColumnBriefTypography.paragraph(step: block.stepQuote, width: slot.width)
+                    : nil
+                parts.append(Part(id: id + ".step", anchor: .step(block.source, quote: quoteAnchor), kind: .step,
+                                  frame: slot, current: false, image: paragraph?.image(scale: scale), block: nil,
+                                  dots: nil, stepQuote: block.stepQuote))
+                bottom = max(top + RichMetrics.thumbnailRow, cover.frame.maxY, slot.maxY)
+                gap = RichMetrics.oldGap
+            }
+            guard let narration = block.lyric else { return (parts, bottom) }
+            var words = lyric(id + ".lyric", narration.text, trailing: false, anchor: .blockLyric(block.source),
+                              at: bottom + gap, current: current)
+            words.paraphrase = narration
+            parts.append(words)
+            return (parts, words.frame.maxY)
+        }
+
         for (index, line) in lines.enumerated() {
             let current = lastLineIsCurrent && index == lines.count - 1
             var row: [Part] = []
+            var richBottom: CGFloat?
             let id: String
             switch line {
             case .goal(let goal):
@@ -94,7 +202,15 @@ import AppKit
                     row.append(note(id + ".note", worked, trailing: false, anchor: stretch.answerID.map(Anchor.worked), at: 0, current: current))
                     top = row[0].frame.maxY + 3
                 }
-                if let narration = stretch.narration {
+                if let blocks = rich?[id], !blocks.isEmpty {
+                    for (offset, block) in blocks.enumerated() {
+                        let blockCurrent = current && offset == blocks.count - 1
+                        let placement = richParts(block, at: top, current: blockCurrent)
+                        row += placement.parts
+                        richBottom = placement.bottom
+                        top = placement.bottom + lineGap
+                    }
+                } else if let narration = stretch.narration {
                     let anchor: Anchor? = stretch.answerID != nil && !narration.lead.isEmpty ? .segment(stretch.id) : nil
                     var part = lyric(id + ".main", narration.text, trailing: false, anchor: anchor, at: top, current: current)
                     part.answerID = stretch.answerID; part.paraphrase = narration
@@ -106,18 +222,21 @@ import AppKit
                 }
             }
             if current {
-                let at = (row.map(\.frame.maxY).max() ?? 0) + 7
+                let at = (richBottom ?? row.map(\.frame.maxY).max() ?? 0) + 7
                 if log.state == .running, let activity = log.activity {
                     row.append(Self.activity(id + ".activity", activity, dots: !log.waiting, width: width, at: at, scale: scale))
                 } else if showsState, let state = Self.stateNote(log.state, waiting: log.waiting) {
                     row.append(Self.state(id + ".state", state, width: width, at: at, scale: scale))
                 }
             }
-            let height = row.map(\.frame.maxY).max() ?? 0
+            let measured = row.map(\.frame.maxY).max() ?? 0
+            let height = richBottom.map { max(measured, $0) } ?? measured
+            if richBottom != nil { richRows[index] = RichRow(top: y, height: height) }
             parts += row.map { var p = $0; p.frame.origin.y += y; p.line = index; return p }
             y += height + lineGap
         }
         self.parts = parts
+        self.richRows = richRows
         lineCount = lines.count
         height = lines.isEmpty ? 0 : y - lineGap
     }

@@ -117,6 +117,10 @@ import AppKit
             rep.size = size
         }
         if let bytes = rep.bitmapData { memset(bytes, 0, rep.bytesPerRow * rep.pixelsHigh) }
+        #if M1138_CAPTURE
+        if SplitRealwinCapture.enabled { SplitRealwinCapture.beginBitmapObservation() }
+        defer { if SplitRealwinCapture.enabled { SplitRealwinCapture.endBitmapObservation() } }
+        #endif
         view.cacheDisplay(in: rect, to: rep)
         // The rep's image reads the rep's own buffer, which may be gone by the time Core Animation draws a layer
         // showing it. Copy into an image that owns its pixels, same colour space.
@@ -132,6 +136,22 @@ import AppKit
 /// Transcript-only read-only TextKit surface. Keep the older NativeReadOnlyTextView API intact for other clients.
 @MainActor final class NativeTranscriptTextView: NSTextView {
     private(set) var isTrackingSelection = false
+    override var writablePasteboardTypes: [NSPasteboard.PasteboardType] {
+        super.writablePasteboardTypes + [DragAttachmentPayload.quoteType]
+    }
+    /// NSTextView keeps its existing plain-text/RTF writer and native drag gesture.
+    override func writeSelection(to pasteboard: NSPasteboard, type: NSPasteboard.PasteboardType) -> Bool {
+        guard type == DragAttachmentPayload.quoteType else { return super.writeSelection(to: pasteboard, type: type) }
+        guard NativeInteractionSurface.permits(self) else { return false }
+        var parent = superview
+        while let view = parent {
+            if let row = view as? NativeTranscriptRow {
+                return DragAttachmentPayload.writeQuotes(row.dragAttachmentQuotes(), to: pasteboard)
+            }
+            parent = view.superview
+        }
+        return false
+    }
     override func mouseDown(with event: NSEvent) {
         isTrackingSelection = true
         defer { isTrackingSelection = false }

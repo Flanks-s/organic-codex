@@ -17,7 +17,7 @@ extension JSONValue {
     static let standard:[String:JSONValue] = [
         "general.access":"auto","general.preventSleep":true,"general.folder":"~/Documents/Codex","general.openIn":"default","general.language":"system",
         "notifications.done":"banner","notifications.approval":"sound","notifications.error":"banner","notifications.cloud":"email","notifications.inactive":true,"notifications.badge":true,"notifications.bounce":false,
-        "look.mode":"dark","look.accent":"multi","look.custom":"","look.theme":"canopy","look.code":"match","look.glass":"tinted","look.background":"","look.foreground":"","look.font":"sf","look.size":12,"look.text":1,
+        "look.accent":"multi","look.custom":"","look.theme":"canopy","look.code":"match","look.glass":"tinted","look.background":"","look.foreground":"","look.font":"sf","look.size":12,"look.text":1,
         "organic.playfulSummaries":true,"organic.forceClickPeek":true,"organic.identityLiquid":true,"organic.fullyFocused":false,"organic.organicFullBleed":true,"organic.simulateReduceMotion":false,"organic.compareNeverAsk":false,
         "collapseOnHoverSpace":false,"numberShortcuts":"chats","followUpDefault":"steer","coreNotifications":true
     ]
@@ -63,11 +63,14 @@ extension JSONValue {
         onChange?(key,value); NotificationCenter.default.post(name:Self.changed,object:self,userInfo:["key":key])
     }
     func resetAppearance() { for (key,value) in Self.standard where key.hasPrefix("look.") { set(key,value) } }
-    func effectiveKey(_ id:String) -> String { let key=self["keys."+id].settingsText; return id == "send" && key.isEmpty ? "⌘↩":key }
+    func effectiveKey(_ id:String) -> String {
+        let key=self["keys."+id].settingsText
+        return id == "send" && key.isEmpty ? "↩":key
+    }
     @discardableResult func assignKey(_ id:String,_ combo:String) -> String? {
         guard NativeSettingsCatalog.shortcuts.contains(where:{ $0.id == id }) else { return "Unknown command." }
         if !combo.isEmpty && !["⌘","⌃","⌥"].contains(where:combo.contains) && id != "send" { return "Use at least one of ⌘, ⌃ or ⌥." }
-        let wanted=id == "send" && combo.isEmpty ? "⌘↩":combo
+        let wanted=id == "send" && combo.isEmpty ? "↩":combo
         if !wanted.isEmpty {
             if let other=NativeSettingsCatalog.shortcuts.first(where:{ $0.id != id && effectiveKey($0.id) == wanted }) { return "\(wanted) is already used by \(other.name)." }
             if let command=fixedCommand?(wanted) ?? SettingsKeyCodec.fixedCommand(wanted,menu:NSApp.mainMenu) { return "\(wanted) is already used by \(command)." }

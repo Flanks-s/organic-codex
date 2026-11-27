@@ -16,6 +16,9 @@ import Synchronization
         }
     }
     static func run(defaults: UserDefaults, screen: NSScreen, check: (Bool, String) -> Void) {
+        let savedFeatures = OrganicFeatureAvailability.current
+        OrganicFeatureAvailability.current.collapse = true
+        defer { OrganicFeatureAvailability.current = savedFeatures }
         let catalog = ModelCatalog.models
         defer { ModelCatalog.models = catalog }
         let visible = screen.visibleFrame

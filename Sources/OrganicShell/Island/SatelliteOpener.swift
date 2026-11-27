@@ -82,7 +82,7 @@ import QuartzCore
         let click = !wasDragging && admitted() && button.map { $0.bounds.contains($0.convert(event.locationInWindow, from: nil)) } == true
         finishInput()
         if shouldOpen {
-            NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+            OrganicHaptics.perform(.generic)
             open?(screen)
         } else if click { open?(nil) }
         rebound()

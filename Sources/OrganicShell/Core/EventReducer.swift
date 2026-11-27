@@ -19,10 +19,32 @@ import Foundation
         default: kind = .tool(.toolCall)
         }
         let content = item["content"]?.arrayValue ?? []
-        var text = item["text"]?.stringValue ?? content.compactMap { $0["text"]?.stringValue }.joined(separator: "\n")
+        let position = c.transcriptItemIndex(id)
+        let previous = position.map { c.items[$0] }
+        let sameItem = previous?.rowKind == kind && previous?.turnID == turnID
+        var text: String
+        var reasoning: ReasoningParts?
+        var quoteFields: ItemQuoteFields?
         if type == "reasoning" {
-            text = item["text"]?.stringValue ?? (item["summary"]?.arrayValue ?? []).compactMap { $0.stringValue ?? $0["text"]?.stringValue }.joined(separator: "\n")
-            if text.isEmpty { text = content.compactMap { $0.stringValue ?? $0["text"]?.stringValue }.joined(separator: "\n") }
+            reasoning = reasoningParts(item, previous: sameItem ? previous?.reasoning : nil, completed: completed)
+            text = reasoning?.publicText ?? ""
+        } else {
+            text = item["text"]?.stringValue ?? content.compactMap { $0["text"]?.stringValue }.joined(separator: "\n")
+        }
+        if type == "webSearch" {
+            let action = item["action"]
+            let queries = action?["queries"]?.arrayValue?.compactMap(\.stringValue).joined(separator: "\n")
+            text = [item["query"]?.stringValue, action?["query"]?.stringValue, queries, text]
+                .compactMap { $0 }.first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? ""
+        }
+        if type == "imageView" {
+            quoteFields = .image(field: "path", text: item["path"]?.stringValue)
+        } else if type == "imageGeneration" {
+            if let prompt = item["revisedPrompt"]?.stringValue, !prompt.isEmpty {
+                quoteFields = .image(field: "revisedPrompt", text: prompt)
+            } else {
+                quoteFields = .image(field: "savedPath", text: item["savedPath"]?.stringValue)
+            }
         }
         if type == "contextCompaction" { text = "Context compacted" }
         if type == "dynamicToolCall" || type == "mcpToolCall" {
@@ -37,6 +59,7 @@ import Foundation
         }
         if type == "fileChange", item["changes"]?.arrayValue != nil {
             let changes = item["changes"]?.arrayValue ?? []
+            quoteFields = .fileChanges(changes.map { $0["path"]?.stringValue })
             text = changes.map { value in
                 let path = value["path"]?.stringValue ?? "File"
                 let diff = value["diff"]?.stringValue ?? ""
@@ -53,13 +76,31 @@ import Foundation
         if text.isEmpty && kind == .tool(.toolCall) { text = item["tool"]?.stringValue ?? type }
         let rawStatus = item["status"]?.stringValue
         let status: String? = ["failed", "declined", "cancelled", "interrupted", "waiting", "changes", "changes-reverted"].contains(rawStatus ?? "") ? rawStatus : completed || rawStatus == "completed" ? nil : rawStatus == "inProgress" ? "running" : rawStatus ?? (kind == .user ? nil : "running")
-        let row = TranscriptItem(id: id, turnID: turnID, kind: kind, text: text, status: status, timestamp: time.map(Date.init(timeIntervalSince1970:)))
-        if let i = c.transcriptItemIndex(id) {
+        var row = TranscriptItem(id: id, turnID: turnID, kind: kind, text: text, status: status,
+                                 timestamp: time.map(Date.init(timeIntervalSince1970:)))
+        row.reasoning = reasoning
+        row.quoteFields = quoteFields
+        if type == "agentMessage" {
+            row.phase = item["phase"]?.stringValue.flatMap(TranscriptItem.Phase.init(rawValue:))
+        }
+        if c.usesLiveTiming, kind == .assistant { row.coreTiming = c.turnTimes[turnID] ?? .init() }
+        if c.usesLiveTiming, kind == .reasoning {
+            row.coreTiming = .init(started: item["startedAtMs"]?.doubleValue,
+                                   completed: item["completedAtMs"]?.doubleValue)
+        }
+        if let i = position, let previous {
             var updated = row
             // An item/started replay must never erase text restored from thread/read.
-            if !completed && updated.text.isEmpty && !c.items[i].text.isEmpty { updated.text = c.items[i].text }
-            updated.revision = c.items[i].revision
-            updated.timestamp = c.items[i].timestamp ?? updated.timestamp
+            if kind != .reasoning, !completed, updated.text.isEmpty { updated.text = previous.text }
+            if type == "agentMessage", sameItem, item["phase"]?.stringValue == nil {
+                updated.phase = previous.phase
+            }
+            if !completed, sameItem {
+                updated.quoteFields = updated.quoteFields ?? previous.quoteFields
+            }
+            updated.revision = previous.revision
+            updated.timestamp = previous.timestamp ?? updated.timestamp
+            if kind == .reasoning { updated.coreTiming = row.coreTiming?.filling(from: c.items[i].coreTiming) }
             if updated != c.items[i] { updated.revision += 1; c.items[i] = updated }
         } else { c.items.append(row) }
         if type == "contextCompaction" { c.compactions = c.items.filter { $0.rowKind == .notice(.info) && $0.text == "Context compacted" }.count }
@@ -78,7 +119,52 @@ import Foundation
         }
     }
 
-    static func hydrate(_ thread: JSONValue, into c: Conversation) {
+    private static func reasoningParts(_ item: JSONValue, previous: ReasoningParts?,
+                                       completed: Bool) -> ReasoningParts {
+        func parts(_ key: String, fallback: [Int: String]) -> [Int: String] {
+            guard let values = item[key]?.arrayValue, completed || !values.isEmpty else { return fallback }
+            return Dictionary(uniqueKeysWithValues: values.enumerated().compactMap { index, value in
+                (value.stringValue ?? value["text"]?.stringValue).map { (index, $0) }
+            })
+        }
+        return .init(summary: parts("summary", fallback: previous?.summary ?? [:]),
+                     content: parts("content", fallback: previous?.content ?? [:]))
+    }
+
+    private static func applyReasoning(_ p: JSONValue, method: String, turnID: String, to c: Conversation) {
+        guard let id = p["itemId"]?.stringValue else { return }
+        let raw = method == "item/reasoning/textDelta"
+        let added = method == "item/reasoning/summaryPartAdded"
+        guard let delta = added ? "" : p["delta"]?.stringValue else { return }
+        let part = p[raw ? "contentIndex" : "summaryIndex"]?.intValue ?? 0
+        guard part >= 0 else { return }
+        if added, c.activeTurnID != turnID { return }
+        let existing = c.transcriptItemIndex(id)
+        var row = existing.map { c.items[$0] }
+            ?? TranscriptItem(id: id, turnID: turnID, kind: .reasoning, text: "", status: "running")
+        guard row.rowKind == .reasoning, !added || row.running else { return }
+        if row.reasoning == nil {
+            row.reasoning = ReasoningParts(summary: row.text.isEmpty ? [:] : [0: row.text])
+        }
+        if raw {
+            row.reasoning?.content[part, default: ""] += delta
+        } else if added {
+            if row.reasoning?.summary[part] == nil { row.reasoning?.summary[part] = "" }
+        } else {
+            row.reasoning?.summary[part, default: ""] += delta
+            row.text = row.reasoning?.publicText ?? ""
+            row.revision += 1
+        }
+        if let existing {
+            c.items[existing] = row
+        } else {
+            if c.usesLiveTiming { row.coreTiming = .init() }
+            c.items.append(row)
+        }
+        c.pace = 0.4
+    }
+
+    static func hydrate(_ thread: JSONValue, into c: Conversation, phaseEvent: CoreEvent? = nil) {
         c.running = false; c.activeTurnID = nil
         if let name = thread["name"]?.stringValue, !name.isEmpty { c.title = name }
         c.cwd = thread["cwd"]?.stringValue ?? c.cwd
@@ -86,6 +172,8 @@ import Foundation
         for turn in thread["turns"]?.arrayValue ?? [] {
             guard let id = turn["id"]?.stringValue else { continue }
             let running = turn["status"]?.stringValue == "inProgress"
+            c.turn(id, started: turn["startedAt"]?.doubleValue,
+                   completed: running ? nil : turn["completedAt"]?.doubleValue)
             c.satellites = []; c.satellitesRetired = !running
             for item in turn["items"]?.arrayValue ?? [] {
                 upsert(item, turnID: id, in: c, completed: !running || item["status"]?.stringValue == "completed", time: turn["startedAt"]?.doubleValue)
@@ -114,6 +202,7 @@ import Foundation
         let recovered = turns.first { $0["id"]?.stringValue == c.activeTurnID } ?? turns.last { ["completed","failed","interrupted"].contains($0["status"]?.stringValue ?? "") }
         c.notices.restore(in: c, started: recovered?["startedAt"]?.doubleValue, ended: recovered?["completedAt"]?.doubleValue,
                           confirmedTurn: recovered?["id"]?.stringValue, status: recovered?["status"]?.stringValue)
+        c.phaseFacts.restore(thread,in:c,eventID:phaseEvent?.id)
     }
 
     static func approval(_ p: JSONValue, in c: Conversation) {
@@ -126,10 +215,12 @@ import Foundation
                 guard let id = value["id"]?.stringValue else { return nil }
                 return .init(id: id, header: value["header"]?.stringValue ?? "", prompt: value["question"]?.stringValue ?? "",
                              options: (value["options"]?.arrayValue ?? []).map { .init(label: $0["label"]?.stringValue ?? "", description: $0["description"]?.stringValue ?? "") },
-                             isSecret: value["isSecret"]?.boolValue ?? false)
+                             isSecret: value["isSecret"]?.boolValue ?? false,
+                             isOther: value["isOther"]?.boolValue == true)
             }
-            c.userInput = .init(id: id, questions: questions)
-            c.userInput?.submitting = submitting
+            let previous = c.userInput?.id == id ? c.userInput : nil
+            let revision = previous.map { $0.revision + ($0.questions == questions ? 0 : 1) } ?? 0
+            c.userInput = .init(id: id, questions: questions, submitting: submitting, revision: revision)
             c.question = questions.map(\.prompt).joined(separator: "\n")
             return
         }
@@ -140,7 +231,13 @@ import Foundation
         }
         var a = Approval(id: id, title: p["title"]?.stringValue ?? title, command: command, note: params["reason"]?.stringValue ?? "", acceptLabel: p["acceptLabel"]?.stringValue ?? "Allow", toolItemID: params["itemId"]?.stringValue ?? "", method: method, request: request, source: p["source"]?.stringValue ?? "")
         a.submitting = submitting
-        if let i = c.approvals.firstIndex(where: { $0.id == id }) { c.approvals[i] = a } else { c.approvals.append(a) }
+        if let i = c.approvals.firstIndex(where: { $0.id == id }) {
+            let old = c.approvals[i]
+            a.revision = old.revision + (old.request == request ? 0 : 1)
+            c.approvals[i] = a
+        } else {
+            c.approvals.append(a)
+        }
     }
 
     /// One classifier for mock store.apply and the live runtime, after its replay/watermark gates.
@@ -154,6 +251,10 @@ import Foundation
             let existed = c.transcriptItemIndex(id) != nil
             apply(event, to: c)
             return existed ? .itemAppended(itemID: id) : .itemChanged(itemID: id)
+        }
+        if event.method == "item/reasoning/summaryPartAdded", let id = p["itemId"]?.stringValue, !id.isEmpty {
+            apply(event, to: c)
+            return .itemChanged(itemID: id)
         }
         if ["item/started", "item/completed"].contains(event.method), let id = p["item"]?["id"]?.stringValue, !id.isEmpty {
             let previous = c.transcriptItemIndex(id).map { c.items[$0] }
@@ -170,12 +271,13 @@ import Foundation
     }
 
     static func apply(_ event: CoreEvent, to c: Conversation) {
+        defer {c.phaseFacts.consume(event,in:c)}
         let p = event.params
         let turnID = p["turnId"]?.stringValue ?? p["turn"]?["id"]?.stringValue ?? c.activeTurnID ?? ""
         switch event.method {
         case "thread/started", "thread/restored":
             if let thread = p["thread"] {
-                hydrate(thread, into: c)
+                hydrate(thread, into: c, phaseEvent:event)
                 c.branch = thread["branch"]?.stringValue ?? c.branch
                 c.projectID = thread["projectId"]?.stringValue ?? c.projectID
                 c.deviceID = thread["deviceId"]?.stringValue ?? c.deviceID
@@ -183,10 +285,18 @@ import Foundation
                 c.updated = thread["updatedAt"]?.doubleValue.map(Date.init(timeIntervalSince1970:)) ?? c.updated
             }
         case "turn/started":
+            c.turn(turnID, started: p["turn"]?["startedAt"]?.doubleValue ?? event.time)
             if c.activeTurnID != turnID { c.satellites = []; c.satellitesRetired = false }
             c.activeTurnID = turnID; c.running = true; c.stopping = false; c.error = nil; c.updated = event.time.map(Date.init(timeIntervalSince1970:)) ?? c.updated
             c.lastTurnInterrupted = false
         case "turn/completed":
+            c.turn(turnID, started: p["turn"]?["startedAt"]?.doubleValue,
+                   completed: p["turn"]?["completedAt"]?.doubleValue ?? event.time)
+            if let timing = c.turnTimes[turnID] {
+                for i in c.items.indices where c.items[i].turnID == turnID && c.items[i].rowKind == .assistant {
+                    c.items[i].coreTiming = timing
+                }
+            }
             if c.activeTurnID == nil || c.activeTurnID == turnID {
                 let interrupted = p["turn"]?["status"]?.stringValue == "interrupted" || c.stopping
                 c.lastTurnInterrupted = interrupted
@@ -200,12 +310,19 @@ import Foundation
             }
         case "item/started", "item/completed":
             if let item = p["item"] { upsert(item, turnID: turnID, in: c, completed: event.method == "item/completed", time: event.time) }
-        case "item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
+        case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta", "item/reasoning/summaryPartAdded":
+            applyReasoning(p, method: event.method, turnID: turnID, to: c)
+        case "item/agentMessage/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta":
             guard let id = p["itemId"]?.stringValue, let delta = p["delta"]?.stringValue else { return }
             if let i = c.transcriptItemIndex(id) { c.items[i].text += delta; c.items[i].revision += 1 }
             else {
-                let kind: RowKind = event.method.contains("reasoning") ? .reasoning : event.method.contains("commandExecution") ? .tool(.command) : event.method.contains("fileChange") ? .tool(.fileChange) : .assistant
+                let kind: RowKind = switch event.method {
+                case "item/commandExecution/outputDelta": .tool(.command)
+                case "item/fileChange/outputDelta": .tool(.fileChange)
+                default: .assistant
+                }
                 c.items.append(TranscriptItem(id: id, turnID: turnID, kind: kind, text: delta, status: "running"))
+                if c.usesLiveTiming { c.items[c.items.count - 1].coreTiming = .init() }
             }
             c.pace = event.method.contains("agentMessage") ? 1 : 0.4
         case "thread/tokenUsage/updated":

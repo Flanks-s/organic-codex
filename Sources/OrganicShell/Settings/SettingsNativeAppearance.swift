@@ -8,7 +8,6 @@ extension SettingsPreferences {
         let custom=theme.id != "canopy" || Self.isHex(self["look.background"].settingsText) || Self.isHex(self["look.foreground"].settingsText)
         let code=SettingsThemes.theme(self["look.code"].settingsText == "match" ? theme.id:self["look.code"].settingsText)
         var result=NativeAppearance.Look()
-        result.requestedMode=self["look.mode"].settingsText
         result.accent=self["look.accent"].settingsText == "multi" && theme.id == "canopy" ? nil:palette.accent
         result.background=custom ? palette.canvas:nil
         result.foreground=custom ? SettingsDrawing.hex(Self.isHex(self["look.foreground"].settingsText) ? self["look.foreground"].settingsText:theme.fg):nil

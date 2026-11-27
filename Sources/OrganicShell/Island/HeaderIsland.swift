@@ -11,6 +11,7 @@ struct HeaderIslandConfiguration: Equatable {
     var band:CGFloat = 0
     var signals=HeaderIslandSignals()
     var activitySerial:UInt64=0
+    var bodyPhase:BodyPhaseEvent?=nil
     var satellitesRetired=false
     var contextDescription="Context usage has not been reported"
     var contextLimit:String?
@@ -22,7 +23,15 @@ struct HeaderIslandConfiguration: Equatable {
     var noticeColumnWidth:CGFloat?
 }
 
+struct HeaderIslandHostPresentation: Equatable {
+    var conversationID: String?
+    var interactiveRegions: [CGRect]
+    var holdsPeek: Bool
+    var acceptsInput: Bool
+}
+
 @MainActor struct HeaderIslandActions {
+    var planet: (() -> Bool)?
     var customize:(()->Void)?
     var rename:((String)->Void)?
     var route:((HeaderIslandRoute)->Void)?
@@ -31,6 +40,7 @@ struct HeaderIslandConfiguration: Equatable {
     /// The window owner closes its other islands here. No window/scene registry lives in this component.
     var expansion:((Bool,Bool)->Void)?
     var geometry:((HeaderIslandGeometry)->Void)?
+    var presentation:((HeaderIslandHostPresentation)->Void)?
     /// Sheet owner receives this island's frame in its superview coordinates. nil selects the default row.
     var subAgents:((_ anchor:CGRect,_ select:String?)->Void)?
     /// nil is a click/AX action; a screen point is a satellite dropped away from its row.
@@ -38,7 +48,9 @@ struct HeaderIslandConfiguration: Equatable {
 }
 
 /// Retained native endpoint. The column owns placement and uses snapshots while driver B changes variants.
-@MainActor final class HeaderIsland:IslandPlane, NSTextFieldDelegate, NSPopoverDelegate {
+@MainActor final class HeaderIsland:IslandPlane, NSTextFieldDelegate, NSPopoverDelegate, HeaderIslandHoldSource {
+    private(set) lazy var headerHolds = HeaderIslandHold(host: self)
+    var yieldPeekReplyEscape: (() -> Bool)?
     private(set) var configuration:HeaderIslandConfiguration?
     private(set) var state=HeaderIslandState() {didSet {if state != oldValue {NotificationCenter.default.post(name:Notification.Name("Organic.ModePreparationInputsChanged"),object:self)}}}
     private(set) var geometry=HeaderIslandGeometry.make(variant:.full,columnWidth:400,state:.init())
@@ -50,7 +62,8 @@ struct HeaderIslandConfiguration: Equatable {
     var draggableOrbRect:CGRect { orb.glassView.frame }
     var orbDragPreparationDelay:Double {max(0,(localMotion.map{$0.began+$0.spring.duration} ?? now())-now())}
     var canDragOrb:Bool {
-        guard canAct,!state.editing,!orbIsCarried,let variant=configuration?.variant else {return false}
+        guard canInteract(HeaderIslandHold.Role.planet),!state.editing,!orbIsCarried,
+              let variant=configuration?.variant else {return false}
         switch variant {
         case .full,.brief,.split:return true
         case .collapse,.newChat:return false
@@ -62,9 +75,12 @@ struct HeaderIslandConfiguration: Equatable {
         orbIsCarried=carried
         // Withdraw the owned drawing before AppKit hides its native backing planes. This also
         // suppresses orbit/exposure replicas if a backing presentation survives the view handoff.
-        orb.setOpacity(carried ? 0:1)
-        for view in [orb.glassView,orb.backView,orb.frontView] { view.isHidden=carried }
-        planetButton.isHidden=carried
+        if headerHolds.canWrite(HeaderIslandHold.Role.planet, write: .visibility) {
+            orb.setOpacity(carried ? 0 : 1)
+            let parts: [NSView] = [orb.glassView, orb.backView, orb.frontView]
+            for view in parts { view.isHidden = carried }
+            planetButton.isHidden = carried
+        }
         if !carried {planetButton.restorePointerHover()}
     }
     private let glassContainer=NSGlassEffectContainerView()
@@ -83,6 +99,14 @@ struct HeaderIslandConfiguration: Equatable {
     /// While the column moves the capsule comes from `motionGeometry`, not from the island's state. An activity line that arrives then
     /// waits for the landing: it showed with no glass under it for the whole motion (board 261031j). One already up stays, with its capsule.
     private var hostMotion=false,hostMotionKeepsActivity=false,hostMotionTruncatesTitle=false
+    private var titleSource: NSImage?, titleTarget: NSImage?
+    private var titleSourceWidth: CGFloat = 0
+    private var titleSourceFont: CGFloat = 1
+    private var titleSourcePoseFont: CGFloat = 1
+    private var titleSourceCenter = CGPoint.zero
+    private var titleSourceWasPulse = false
+    private var titleSourcePoint = CGPoint.zero, titleTargetPoint = CGPoint.zero
+    private var titleSourceOpacity: CGFloat = 1, titleTargetOpacity: CGFloat = 1
     private var shownShape:HeaderIslandShape { hostMotion && !hostMotionKeepsActivity && state.shape == .activity ? .compact:state.shape }
     var motionProfile:DisplayProfile?
     var motionExposure:ExposureSettings = {var s=ExposureSettings();s.enabled=ProcessInfo.processInfo.environment["M10_COLUMNS"] != "0";return s}()
@@ -119,9 +143,34 @@ struct HeaderIslandConfiguration: Equatable {
     private var nameAnimationBegan:Double?
     private var renderedLobe=0, disposed=false, presentationActive=true
     private var interactionGeneration=0
+    private var lastHostPresentation:HeaderIslandHostPresentation?
+    private var publishingHostPresentation=false
+    /// Read the original state machines and painted endpoints; hosts own no Pulse deadlines.
+    var hostPresentation:HeaderIslandHostPresentation {
+        guard !disposed,!browserPresentationSuspended,!isHiddenOrHasHiddenAncestor,configuration?.active == true else {
+            return .init(conversationID:configuration?.id,interactiveRegions:[],holdsPeek:false,acceptsInput:false)
+        }
+        var regions=[visiblePlanet,visibleCapsule]
+        if !lobe.isHidden {regions.append(lobe.frame)}
+        regions += satelliteButtons.values.filter{!$0.isHidden && $0.participates}.map(\.frame)
+        if !overflowButton.isHidden {regions.append(overflowButton.frame)}
+        let p=pulseShowing ? pulse?.state:nil
+        let hold=state.expanded || state.pinned || state.editing || state.focused || state.activity != nil || !carriedSatellites.isEmpty
+            || p?.hovering == true || p?.pinned == true || p?.focused == true || p?.event != nil
+        return .init(conversationID: configuration?.id, interactiveRegions: canAct ? regions : [],
+                     holdsPeek: hold, acceptsInput: canAct)
+    }
+    private func publishHostPresentation() {
+        guard actions.presentation != nil,!publishingHostPresentation else {return}
+        let value=hostPresentation
+        guard value != lastHostPresentation else {return}
+        lastHostPresentation=value;publishingHostPresentation=true
+        actions.presentation?(value);publishingHostPresentation=false
+    }
     private var pulse:HeaderPulsePresentation?
     private var pulsePresentationRetired=false
     private var modeContentFrozen=false
+    private var browserPresentationSuspended=false
     private var pulseSuppressed:[(NSView,Bool)]=[]
     private var pulseShowing:Bool { pulse?.isEnabled == true && pulse?.isHidden == false }
     var pulseClockRunning:Bool { pulse?.clockRunning == true }
@@ -143,6 +192,7 @@ struct HeaderIslandConfiguration: Equatable {
             else if let c=configuration,c.notices != nil {restorePulseContent();configurePulse(c)}
             // The host can configure a retained hidden island before showing it again.
             if configuration != nil { installMenus(); schedule(); syncOutsideMonitor() }
+            publishHostPresentation()
         }
     }
 
@@ -174,16 +224,36 @@ struct HeaderIslandConfiguration: Equatable {
         // The product's title and event controls are clear (NativeHeaderTitleControl): a plate of radius 8 stuck out past
         // the capsule's rounder corners, and stayed there while the button held the keyboard.
         titleButton.drawsPointerHighlight=false; eventButton.drawsPointerHighlight=false
-        titleButton.invoke={ [weak self] in self?.togglePin() }
-        titleButton.doubleClick={ [weak self] in self?.beginRename() }
+        titleButton.invoke = { [weak self] in
+            guard let self, self.canInteract(HeaderIslandHold.Role.title) else { return }
+            self.togglePin()
+        }
+        titleButton.doubleClick = { [weak self] in
+            guard let self, self.canInteract(HeaderIslandHold.Role.title) else { return }
+            self.beginRename()
+        }
         titleButton.focus={ [weak self] in self?.setKeyboardFocus($0) }
         eventButton.focus={ [weak self] in self?.setKeyboardFocus($0) }
-        planetButton.invoke={ [weak self] in guard let self,self.canAct else { return }; self.actions.customize?() }
+        planetButton.invoke = { [weak self] in
+            guard let self, self.canInteract(HeaderIslandHold.Role.planet) else { return }
+            if self.actions.planet?() == true { return }
+            self.actions.customize?()
+        }
+        planetButton.routePointerDown={ [weak self] event in
+            guard let self,event.type != .leftMouseDown && event.type != .rightMouseDown || self.canDragOrb else { return false }
+            return self.orbDragProvider()?.routeOrbInput(from:self,event:event) == true
+        }
+        planetButton.cancelRoutedPointer={ [weak self] in self?.orbDragProvider()?.cancelOrbDrag() == true }
+        planetButton.routesContextInput={ [weak self] in self?.canDragOrb == true && self?.orbDragProvider() != nil }
         planetButton.beginPointerGesture={ [weak self] event in
             guard let self,self.canDragOrb else { return nil }
             return self.orbDragProvider()?.beginOrbDrag(from:self,event:event)
         }
-        eventButton.invoke={ [weak self] in guard let self,let event=self.state.activity else { return }; self.route(event.route) }
+        eventButton.invoke = { [weak self] in
+            guard let self, self.canInteract(HeaderIslandHold.Role.event),
+                  let event = self.state.activity else { return }
+            self.route(event.route)
+        }
         renameField.delegate=self
         for panel in HeaderIslandPanel.allCases {
             let button=IslandButton(); button.invoke={ [weak self] in self?.openPanel(panel) }
@@ -211,6 +281,14 @@ struct HeaderIslandConfiguration: Equatable {
     func configure(_ input:HeaderIslandConfiguration, at time:Double?=nil) {
         guard !disposed else { return }
         let t=time ?? now(), old=configuration
+        if old?.id != input.id {
+            headerHolds.invalidate(.targetChanged)
+        } else if let old, !headerHolds.tokens.isEmpty {
+            let removed = Set(old.signals.satellites.map(\.id)).subtracting(input.signals.satellites.map(\.id))
+            if !removed.isEmpty {
+                headerHolds.invalidate(.targetChanged, roles: Set(removed.map(HeaderIslandHold.Role.satellite)))
+            }
+        }
         let oldName=nameLabel.stringValue,oldNameFrame=nameLabel.frame,oldNameFont=nameLabel.font,oldNameBounds=nameLabel.bounds.size
         if old?.id != input.id {
             restorePulseContent(); pulse?.dispose(); pulse?.removeFromSuperview(); pulse=nil
@@ -230,14 +308,23 @@ struct HeaderIslandConfiguration: Equatable {
         if !input.active {
             stopMotionExposure()
             if old?.active == true { interactionGeneration+=1 }
-            state.escape(); state.hover(false,now:t); state.focus(false,now:t); state.outside(); endInput(); popover?.close(); lobe.isHidden=true; lobeTask?.cancel()
+            state.escape()
+            state.hover(false, now: t)
+            state.focus(false, now: t)
+            state.outside()
+            endInput()
+            popover?.close()
+            if headerHolds.canWrite(HeaderIslandHold.Role.lobe, write: .visibility) { lobe.isHidden = true }
+            lobeTask?.cancel()
         } else if let old,old.id == input.id,input.variant != .newChat,old.variant != .newChat {
             if input.notices == nil { state.update(old.signals,input.signals,now:t) }
         }
         if input.reduceMotion {
             stopMotionExposure()
             for key in ["island.name.fall","island.name.blur"] { nameLabel.layer?.removeAnimation(forKey:key) }
-            nameLabel.layer?.filters=nil; lobe.isHidden=true; lobe.layer?.removeAllAnimations()
+            nameLabel.layer?.filters = nil
+            if headerHolds.canWrite(HeaderIslandHold.Role.lobe, write: .visibility) { lobe.isHidden = true }
+            lobe.layer?.removeAllAnimations()
         }
         orb.setPresentationActive(input.active && presentationActive)
         render(animated:old != nil && input.variant == old?.variant)
@@ -247,7 +334,12 @@ struct HeaderIslandConfiguration: Equatable {
         schedule(); syncOutsideMonitor()
     }
     /// Explicit input methods are also useful when the host owns outside-event arbitration.
-    func receive(_ event:HeaderIslandEvent,at time:Double?=nil) { guard canAct else { return }; state.show(event,now:time ?? now()); render(animated:true); schedule() }
+    func receive(_ event: HeaderIslandEvent, at time: Double? = nil) {
+        guard interactionEligible else { return }
+        state.show(event, now: time ?? now())
+        render(animated: true)
+        schedule()
+    }
     func advance(to time:Double) {
         let was=state.expanded, pinned=state.pinned
         state.tick(now:time); render(animated:true); schedule()
@@ -309,10 +401,27 @@ struct HeaderIslandConfiguration: Equatable {
         if selector == #selector(NSResponder.cancelOperation(_:)) { cancelRename(); return true }; return false
     }
     override func cancelOperation(_ sender:Any?) { escape() }
-    private var canAct:Bool { !disposed && !isHiddenOrHasHiddenAncestor && !promotionInProgress && presentationActive && configuration?.active == true }
+    private var interactionEligible: Bool {
+        !browserPresentationSuspended && !disposed && !isHiddenOrHasHiddenAncestor && !promotionInProgress
+            && presentationActive && configuration?.active == true
+    }
+    private var canAct: Bool {
+        interactionEligible && headerHolds.canWrite(HeaderIslandHold.Role.interaction, write: .interaction)
+    }
+    private func canInteract(_ role: String) -> Bool {
+        canAct && headerHolds.canWrite(role, write: .interaction)
+    }
+    private func canPresentInteraction(_ role: String) -> Bool {
+        configuration?.active == true && presentationActive
+            && headerHolds.canWrite(HeaderIslandHold.Role.interaction, write: .interaction)
+            && headerHolds.canWrite(role, write: .interaction)
+    }
     private func publishExpansion() { actions.expansion?(state.expanded,state.pinned); syncOutsideMonitor() }
 
-    private func render(animated:Bool) {
+    private func render(animated requestedAnimation:Bool) {
+        if browserPresentationSuspended { setAccessibilityHidden(true); return }
+        defer {publishHostPresentation()}
+        let animated=requestedAnimation && !isHiddenOrHasHiddenAncestor
         restorePulseContent()
         guard let c=configuration else { return }
         if !c.active || !presentationActive {satelliteOpeners.values.forEach{$0.cancel()}}
@@ -331,46 +440,83 @@ struct HeaderIslandConfiguration: Equatable {
                 motionClock.start(in:self)
             } else {controlsFade=nil;controlsOpacity=target}
         }
-        setAccessibilityHidden(!(c.active && presentationActive && !promotionInProgress))
-        frame.size=CGSize(width:(c.columnWidth*c.scale).rounded()/c.scale,height:g.height)
-        glassContainer.frame=bounds; glassContainer.contentView?.frame=bounds; controls.frame=bounds
+        let held = !headerHolds.canWrite(HeaderIslandHold.Role.interaction, write: .interaction)
+        setAccessibilityHidden(!(c.active && presentationActive && !promotionInProgress) || held)
+        if headerHolds.canWrite(HeaderIslandHold.Role.root, write: .geometry) {
+            frame.size = CGSize(width: (c.columnWidth * c.scale).rounded() / c.scale, height: g.height)
+            glassContainer.frame = bounds
+            glassContainer.contentView?.frame = bounds
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .geometry) { controls.frame = bounds }
         glyphPlane.frame=controls.bounds
         glyphPose.layer?.transform=CATransform3DIdentity;glyphPose.frame=glyphPlane.bounds
-        capsule.frame=g.capsule; capsule.cornerRadius=g.radius; capsule.contentView?.frame=capsule.bounds
-        orb.glassView.frame=g.planet; orb.glassView.cornerRadius=g.planet.width/2
-        orb.glassView.contentView?.frame=orb.glassView.bounds
+        if headerHolds.canWrite(HeaderIslandHold.Role.capsule, write: .geometry) {
+            capsule.frame = g.capsule
+            capsule.cornerRadius = g.radius
+            capsule.contentView?.frame = capsule.bounds
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.planet, write: .geometry) {
+            orb.glassView.frame = g.planet
+            orb.glassView.cornerRadius = g.planet.width / 2
+            orb.glassView.contentView?.frame = orb.glassView.bounds
+        }
         orb.setCanvasSize(bounds.size)
-        titleButton.frame=g.titleRow; titleButton.isHidden=state.editing
-        titleButton.participates=c.active && presentationActive && !state.editing; titleButton.text=c.variant == .newChat ? "New Chat":promotionName ?? c.title
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) { titleButton.frame = g.titleRow }
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .visibility) {
+            titleButton.isHidden = state.editing
+        }
+        titleButton.participates = canPresentInteraction(HeaderIslandHold.Role.title) && !state.editing
+        titleButton.text = c.variant == .newChat ? "New Chat" : promotionName ?? c.title
         titleButton.setAccessibilityValue(c.signals.words)
         titleButton.setAccessibilityHelp(state.expanded ? "Closes the details":"Shows sub-agents, changes and context")
-        planetButton.frame=g.planet; planetButton.participates=c.active && presentationActive
-        planetButton.text="Customize \(c.title)"; planetButton.setAccessibilityHelp("Customizes the chat")
+        if headerHolds.canWrite(HeaderIslandHold.Role.planet, write: .geometry) { planetButton.frame = g.planet }
+        planetButton.participates = canPresentInteraction(HeaderIslandHold.Role.planet)
+        planetButton.text = actions.planet == nil ? "Customize \(c.title)" : "Open \(c.title)"
+        planetButton.setAccessibilityHelp(actions.planet == nil ? "Customizes the chat" : "Opens the chat overview")
         let labelHeight=ceil(NSFont.systemFont(ofSize:g.titleFont,weight:.semibold).ascender-NSFont.systemFont(ofSize:g.titleFont,weight:.semibold).descender)
-        nameLabel.font = .systemFont(ofSize:g.titleFont,weight:.semibold)
         nameLabel.stringValue=c.variant == .newChat ? "New Chat":promotionName ?? c.title
-        place(nameLabel,CGRect(x:g.title.minX,y:g.title.midY-labelHeight/2,width:g.title.width,height:labelHeight))
-        nameLabel.setBoundsSize(nameLabel.frame.size)
-        nameBaseRect=nameLabel.frame
-        nameLabel.alphaValue=state.expanded || state.hovering ? 1:g.titleOpacity; nameLabel.isHidden=state.editing
-        mark.mark=c.signals.mark; mark.configureDots(paused:!c.ambient || !c.active || !presentationActive,reduced:c.reduceMotion,scale:c.scale); mark.isHidden=shape != .compact || c.variant == .newChat || c.signals.mark == nil
-        place(mark,CGRect(x:g.title.minX-20,y:g.titleRow.midY-7,width:14,height:14))
-        chevron.stringValue=state.expanded ? "⌄":"›"; chevron.font = .systemFont(ofSize:12,weight:.semibold)
-        place(chevron,CGRect(x:g.title.maxX+8,y:g.titleRow.midY-8,width:8,height:16)); chevron.isHidden=state.editing || c.variant == .newChat
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) {
+            nameLabel.font = .systemFont(ofSize: g.titleFont, weight: .semibold)
+            place(nameLabel, CGRect(x: g.title.minX, y: g.title.midY - labelHeight / 2,
+                                    width: g.title.width, height: labelHeight))
+            nameLabel.setBoundsSize(nameLabel.frame.size)
+            nameBaseRect = nameLabel.frame
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .visibility) {
+            nameLabel.alphaValue = state.expanded || state.hovering ? 1 : g.titleOpacity
+            nameLabel.isHidden = state.editing
+        }
+        mark.mark = c.signals.mark
+        mark.configureDots(paused: !c.ambient || !c.active || !presentationActive,
+                           reduced: c.reduceMotion, scale: c.scale)
+        chevron.stringValue = state.expanded ? "⌄" : "›"
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) {
+            place(mark, CGRect(x: g.title.minX - 20, y: g.titleRow.midY - 7, width: 14, height: 14))
+            chevron.font = .systemFont(ofSize: 12, weight: .semibold)
+            place(chevron, CGRect(x: g.title.maxX + 8, y: g.titleRow.midY - 8, width: 8, height: 16))
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .visibility) {
+            mark.isHidden = shape != .compact || c.variant == .newChat || c.signals.mark == nil
+            chevron.isHidden = state.editing || c.variant == .newChat
+        }
         let showEvent=g.event != nil && state.activity != nil
         if let r=g.event,let event=state.activity {
             eventBaseRect=r;eventButton.text=event.text; eventButton.symbol=event.symbol
             eventButton.tint=event.urgent ? (event.kind == .error ? .systemRed:.systemYellow):event.kind == .done ? .systemGreen:.secondaryLabelColor
         }
-        if !c.active || !presentationActive {eventPhase.reset(visible:showEvent)}
+        if isHiddenOrHasHiddenAncestor {eventPhase.reset(visible:showEvent)}
         else if showEvent != wantedEvent {eventPhase.retarget(visible:showEvent,at:now(),reduced:c.reduceMotion)}
         wantedEvent=showEvent
         eventPhase.sample(now());applyEventPose()
         if eventPhase.busy {motionClock.start(in:self)}
         for (i,b) in actionButtons.enumerated() {
-            b.isHidden=g.actions.isEmpty && controlsFade == nil
-            b.participates=c.active && presentationActive && !g.actions.isEmpty
-            if !g.actions.isEmpty { b.frame=g.actions[i] }
+            if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .visibility) {
+                b.isHidden = g.actions.isEmpty && controlsFade == nil
+            }
+            b.participates = canPresentInteraction(HeaderIslandHold.Role.controls) && !g.actions.isEmpty
+            if !g.actions.isEmpty, headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .geometry) {
+                b.frame = g.actions[i]
+            }
         }
         let running=c.signals.satellites.filter { !$0.done }.count
         actionButtons[0].text=running>0 ? "\(running) sub-agent\(running == 1 ? "":"s")":c.signals.satellites.isEmpty ? "0 sub-agents":"\(c.signals.satellites.count) done"
@@ -381,9 +527,14 @@ struct HeaderIslandConfiguration: Equatable {
         actionButtons[3].text=c.signals.words; actionButtons[3].symbol="sparkle"
         if let r=g.rename {
             if renameField.superview == nil { controls.addSubview(renameField) }
-            renameField.frame=r; renameField.font = .systemFont(ofSize:g.titleFont,weight:.semibold); renameField.participates=c.active && presentationActive
+            if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) { renameField.frame = r }
+            renameField.font = .systemFont(ofSize: g.titleFont, weight: .semibold)
+            renameField.participates = canPresentInteraction(HeaderIslandHold.Role.title)
         } else { renameField.participates=false; renameField.removeFromSuperview() }
         var oc=OrbConfiguration(content:c.variant == .newChat ? .seed:.identity(c.identity),drawingSize:56)
+        oc.bodyPhase=c.variant == .newChat ? nil:c.bodyPhase
+        oc.bodyOuter=g.planet.width
+        oc.bodyUnknown=c.signals.context == nil
         oc.context=c.variant == .newChat ? 0:c.signals.context ?? 0
         oc.running=c.variant != .newChat && c.signals.running
         oc.activitySerial=c.variant == .newChat ? 0:c.activitySerial
@@ -401,7 +552,8 @@ struct HeaderIslandConfiguration: Equatable {
             oc.satelliteDiameter=16/scale; oc.satelliteVisibleIDs=Set(rows.keys).subtracting(carriedSatellites)
             _ = row
         }
-        orb.configure(oc); orb.setFrame(g.planet)
+        orb.configure(oc)
+        if headerHolds.canWrite(HeaderIslandHold.Role.planet, write: .geometry) { orb.setFrame(g.planet) }
         sampleControlsFade(at:now())
         installMenus(); updateTrackingAreas()
         glyphPlane.textureScale=window?.backingScaleFactor ?? c.scale
@@ -410,21 +562,31 @@ struct HeaderIslandConfiguration: Equatable {
         glyphPlane.warmTextures()
         if animated && old != g && (c.notices == nil || state.expanded || state.editing) { animateGeometry(from:departure,to:g) }
         else if localMotion != nil { sampleMotion(at:now()) }
-        if state.lobeRevision != renderedLobe,shape == state.shape { renderedLobe=state.lobeRevision; popLobe() }
+        if state.lobeRevision != renderedLobe,shape == state.shape { renderedLobe=state.lobeRevision; if !isHiddenOrHasHiddenAncestor {popLobe()} }
         if old != g { actions.geometry?(g) }
         if canDragOrb {orbDragProvider()?.prepareOrbDrag(from:self)}
         configurePulse(c)
     }
 
     private func restorePulseContent() {
-        for (view,hidden) in pulseSuppressed {view.isHidden=hidden}
+        for (view, hidden) in pulseSuppressed {
+            let role = pulseSuppressedRole(view)
+            if headerHolds.canWrite(role, write: .visibility) { view.isHidden = hidden }
+        }
         pulseSuppressed=[]
     }
 
+    private func pulseSuppressedRole(_ view: NSView) -> String {
+        if view === glyphPlane || view === titleButton || view === renameField { return HeaderIslandHold.Role.title }
+        return holdViews.first { $0.value === view }?.key ?? HeaderIslandHold.Role.controls
+    }
+
     private func configurePulse(_ c:HeaderIslandConfiguration) {
+        let work=M10ColumnWorkTrace.scope("peek.header.pulse");defer {work.end()}
         guard let notices=c.notices else {pulse?.suspend();return}
         if pulse == nil {
             let view=HeaderPulsePresentation();pulse=view
+            view.now = { [weak self] in self?.now() ?? CACurrentMediaTime() }
             view.setModeContentFrozen(modeContentFrozen)
             addSubview(view,positioned:.below,relativeTo:orb.glassView)
             view.onToggle={ [weak self] in self?.togglePin() }
@@ -434,16 +596,21 @@ struct HeaderIslandConfiguration: Equatable {
                 if action == .review {self.pulse?.dismiss();self.route(.transcript)} else {self.actions.noticeAction?(action)}
             }
             view.onPanel={ [weak self] in self?.openPanel($0) }
-            view.onExpansion={ [weak self] open,pin in self?.actions.expansion?(open,pin);self?.syncOutsideMonitor() }
+            view.onExpansion={ [weak self] open,pin in self?.actions.expansion?(open,pin);self?.syncOutsideMonitor();self?.publishHostPresentation() }
             view.onPose={ [weak self] scale in
-                guard let self,self.pulseShowing else{return}
+                guard let self else{return}
+                defer {self.publishHostPresentation()}
+                guard self.pulseShowing else{return}
                 let r=self.geometry.planet
                 let frame=CGRect(x:r.midX-r.width*scale/2,y:r.midY-r.height*scale/2,width:r.width*scale,height:r.height*scale)
                 // OrbComponent.setFrame places decorations only. The host owns the visible glass geometry.
-                self.orb.glassView.frame=frame; self.orb.glassView.cornerRadius=frame.width/2
-                self.orb.glassView.contentView?.frame=self.orb.glassView.bounds
-                self.orb.setFrame(frame)
-                self.planetButton.frame=frame
+                if self.headerHolds.canWrite(HeaderIslandHold.Role.planet, write: .geometry) {
+                    self.orb.glassView.frame = frame
+                    self.orb.glassView.cornerRadius = frame.width / 2
+                    self.orb.glassView.contentView?.frame = self.orb.glassView.bounds
+                    self.orb.setFrame(frame)
+                    self.planetButton.frame = frame
+                }
                 if self.hoverTracking?.rect != self.visibleCapsule {self.updateTrackingAreas()}
             }
         }
@@ -451,15 +618,22 @@ struct HeaderIslandConfiguration: Equatable {
         let compact=HeaderIslandGeometry.make(variant:c.variant,columnWidth:c.columnWidth,
             state:.init(titleWidth:widths[font] ?? 0,hasMark:c.signals.mark != nil,band:c.band,scale:c.scale))
         let suspended = isHiddenOrHasHiddenAncestor || !c.active || pulsePresentationRetired || hostMotion || state.editing || state.expanded || promotionInProgress
-        pulse?.frame=CGRect(x:0,y:0,width:c.columnWidth,height:max(geometry.height,compact.capsule.minY+140))
-        pulse?.setAmbientActive(presentationActive)
+        if headerHolds.canWrite(HeaderIslandHold.Role.pulse, write: .geometry) {
+            pulse?.frame = CGRect(x: 0, y: 0, width: c.columnWidth,
+                                  height: max(geometry.height, compact.capsule.minY + 140))
+        }
         pulse?.wallTime=noticeWallTime
-        pulse?.configure(notices,input:c,compact:compact.capsule,at:now(),suspended:suspended,interactive:canAct)
+        pulse?.configure(notices, input: c, compact: compact.capsule, at: now(), suspended: suspended,
+                         interactive: canInteract(HeaderIslandHold.Role.pulse))
         pulse?.setTitleMenu(titleButton.menu)
         guard pulseShowing else{return}
-        frame.size.height=max(frame.height,compact.capsule.minY+140)
+        if headerHolds.canWrite(HeaderIslandHold.Role.root, write: .geometry) {
+            frame.size.height = max(frame.height, compact.capsule.minY + 140)
+        }
         for view in [capsule,lobe] + controls.subviews.filter({$0 !== planetButton}) {
-            pulseSuppressed.append((view,view.isHidden));view.isHidden=true
+            pulseSuppressed.append((view, view.isHidden))
+            let role = pulseSuppressedRole(view)
+            if headerHolds.canWrite(role, write: .visibility) { view.isHidden = true }
         }
         updateTrackingAreas()
     }
@@ -487,12 +661,32 @@ struct HeaderIslandConfiguration: Equatable {
     }
 
     /// A transition starts: an open island closes (its expansion, rename and popover end).
-    func beginMotion() {
-        pulse?.suspend(); restorePulseContent()
+    func beginMotion(capturingTitle: Bool = true) {
+        // Capture before configure replaces the endpoint, including any unfinished blend.
+        let wasPulse = pulseShowing
+        let label = wasPulse ? pulse?.motionTitleDrawing ?? nameLabel : nameLabel
+        let source = !capturingTitle || promotionInProgress || configuration?.variant == .newChat ? nil
+            : label.titleImage(scale: window?.backingScaleFactor ?? configuration?.scale ?? 2)
+        let rect = label === nameLabel ? motionGlyphRect : label.convert(label.bounds, to: self)
+        let opacity = label.alphaValue
+        let truncated = (widths[label.font?.pointSize ?? 0] ?? 0)
+            > label.bounds.width + 0.5
+        let pose = motionPose ?? geometry
+        let font = nameLabel.font?.pointSize ?? 1
+        pulse?.suspend()
+        restorePulseContent()
         if state.expanded || state.editing || state.pinned { escape() }
         stopMotionExposure()
+        titleSource = source
+        titleSourceWidth = pose.capsule.width
+        titleSourceFont = font
+        titleSourcePoseFont = pose.titleFont
+        titleSourceCenter = CGPoint(x: pose.capsule.midX, y: pose.capsule.midY)
+        titleSourceWasPulse = wasPulse
+        titleSourcePoint = CGPoint(x: rect.minX, y: rect.midY)
+        titleSourceOpacity = opacity
         if !hostMotion {
-            hostMotionTruncatesTitle=(widths[geometry.titleFont] ?? 0)>geometry.title.width+0.5
+            hostMotionTruncatesTitle = truncated
             hostMotion=true;hostMotionKeepsActivity=state.activity != nil
         }
     }
@@ -503,20 +697,30 @@ struct HeaderIslandConfiguration: Equatable {
                      earlierOrigin:CGPoint?=nil, earlierFontScale:CGFloat?=nil) {
         motionPose=g
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        glassContainer.frame = bounds; glassContainer.contentView?.frame = bounds; controls.frame = bounds
+        if headerHolds.canWrite(HeaderIslandHold.Role.root, write: .geometry) {
+            glassContainer.frame = bounds
+            glassContainer.contentView?.frame = bounds
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .geometry) { controls.frame = bounds }
         glyphPlane.frame=controls.bounds
         if glyphPose.frame.size != glyphPlane.bounds.size {glyphPose.setFrameSize(glyphPlane.bounds.size)}
         // applyMotionExposure writes the final real glass frames once; do not lay out the unstretched SDF first.
-        orb.setCanvasSize(bounds.size); orb.setFrame(g.planet)
+        orb.setCanvasSize(bounds.size)
+        if headerHolds.canWrite(HeaderIslandHold.Role.planet, write: .geometry) { orb.setFrame(g.planet) }
         retiringNames.removeAll { $0.superview == nil }
         for old in retiringNames {
             let base=old.bounds.size
             place(old,CGRect(x:nameBaseRect.midX-base.width/2,y:nameBaseRect.midY-base.height/2,width:base.width,height:base.height))
             old.setBoundsSize(base)
         }
-        nameLabel.alphaValue = g.titleOpacity
-        mark.frame.origin = CGPoint(x: g.title.minX - 20, y: g.titleRow.midY - 7)
-        titleButton.frame = g.titleRow; planetButton.frame = g.planet
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .visibility) {
+            nameLabel.alphaValue = g.titleOpacity
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) {
+            mark.frame.origin = CGPoint(x: g.title.minX - 20, y: g.titleRow.midY - 7)
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) { titleButton.frame = g.titleRow }
+        if headerHolds.canWrite(HeaderIslandHold.Role.planet, write: .geometry) { planetButton.frame = g.planet }
         if let event=g.event {eventBaseRect=event}
         applyMotionExposure(g,fontScale:fontScale,earlier:earlier,earlierOrigin:earlierOrigin,earlierFontScale:earlierFontScale)
         applyEventPose()
@@ -525,6 +729,7 @@ struct HeaderIslandConfiguration: Equatable {
 
     /// At rest again: the configured layout, exactly.
     func endMotion() {
+        if nameLabel.titleBlend != nil { pulse?.suspend() }
         stopMotionExposure()
         nameLabel.setBoundsSize(nameLabel.frame.size)
         // What arrived or ended during the motion takes its shape now, on the activity's own spring.
@@ -539,7 +744,10 @@ struct HeaderIslandConfiguration: Equatable {
     /// Call after configuring the retained conversation as .full. No timers or geometry animation are installed.
     func beginPromotion(seedCenterY:CGFloat) -> HeaderIslandPromotion? {
         guard let c=configuration,c.variant == .full,!disposed else { return nil }
-        beginMotion(); promotionInProgress=true; promotionTitleRevealed=false; promotionName="New Chat"
+        beginMotion(capturingTitle: false)
+        promotionInProgress = true
+        promotionTitleRevealed = false
+        promotionName = "New Chat"
         render(animated:false)
         if semanticGaussian {
             animateName(from:nameLabel.stringValue,frame:nameLabel.frame,font:nameLabel.font,bounds:nameLabel.bounds.size,feedback:false)
@@ -575,8 +783,15 @@ struct HeaderIslandConfiguration: Equatable {
     }
     private func layoutSatellites(_ c:HeaderIslandConfiguration,_ g:HeaderIslandGeometry) -> [String:CGPoint] {
         firstHiddenSatellite=nil
-        for b in satelliteButtons.values { b.isHidden=true; b.participates=false }
-        overflowButton.isHidden=true; divider.isHidden=true
+        for (id, button) in satelliteButtons {
+            let role = HeaderIslandHold.Role.satellite(id)
+            if headerHolds.canWrite(role, write: .visibility) { button.isHidden = true }
+            button.participates = false
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .visibility) {
+            overflowButton.isHidden = true
+            divider.isHidden = true
+        }
         guard let row=g.satelliteRow else { satelliteOpeners.values.forEach{$0.cancel()}; return [:] }
         let running=c.signals.satellites.filter { !$0.done }
         let done=c.signals.satellites.enumerated().filter { $0.element.done }.sorted { ($0.element.finishedOrder ?? $0.offset)<($1.element.finishedOrder ?? $1.offset) }.map(\.element)
@@ -586,11 +801,22 @@ struct HeaderIslandConfiguration: Equatable {
         func position(_ sat:OrbSatellite,_ x:CGFloat) {
             let point=CGPoint(x:x,y:row.midY); targets[sat.id]=point
             let b=satelliteButtons[sat.id] ?? IslandButton()
-            if b.superview == nil { controls.addSubview(b); satelliteButtons[sat.id]=b }
+            if b.superview == nil {
+                controls.addSubview(b)
+                satelliteButtons[sat.id] = b
+            }
             b.drawsText=false; b.text="Sub-agent \(sat.face)\(sat.done ? ", finished":" , running")"
             b.linkCursor=true;b.circularHit=true;b.drawsPointerHighlight=false
-            b.frame=CGRect(x:x-12,y:row.minY,width:24,height:24); b.isHidden=false; b.participates=c.active && presentationActive
-            b.invoke={ [weak self] in self?.route(.satellite(sat.id)) }
+            let role = HeaderIslandHold.Role.satellite(sat.id)
+            if headerHolds.canWrite(role, write: .geometry) {
+                b.frame = CGRect(x: x - 12, y: row.minY, width: 24, height: 24)
+            }
+            if headerHolds.canWrite(role, write: .visibility) { b.isHidden = false }
+            b.participates = canPresentInteraction(HeaderIslandHold.Role.satellite(sat.id))
+            b.invoke = { [weak self] in
+                guard let self, self.canInteract(HeaderIslandHold.Role.satellite(sat.id)) else { return }
+                self.route(.satellite(sat.id))
+            }
             let opener=satelliteOpeners[sat.id] ?? SatelliteOpener(satellite:sat,diameter:16)
             satelliteOpeners[sat.id]=opener;opener.satellite=sat
             opener.hiddenAtRest=false
@@ -609,8 +835,22 @@ struct HeaderIslandConfiguration: Equatable {
         for (i,sat) in running.prefix(plan.running).enumerated() { position(sat,row.minX+places.running[i]) }
         for (i,sat) in done.suffix(plan.done).enumerated() { position(sat,row.minX+places.done[i]) }
         firstHiddenSatellite=HeaderIslandSatellitePlan.firstHidden(shown:Set(targets.keys),running:running,done:done)
-        if plan.hidden>0 { overflowButton.isHidden=false; overflowButton.participates=c.active && presentationActive; overflowButton.frame=CGRect(x:row.minX+places.more-12,y:row.minY,width:24,height:24); overflowButton.setAccessibilityLabel("\(plan.hidden) more sub-agents") }
-        if plan.divider { divider.isHidden=false; place(divider,CGRect(x:row.minX+places.divider-0.5,y:row.midY-5,width:1,height:10)) }
+        if plan.hidden > 0 {
+            if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .visibility) {
+                overflowButton.isHidden = false
+            }
+            overflowButton.participates = canPresentInteraction(HeaderIslandHold.Role.controls)
+            if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .geometry) {
+                overflowButton.frame = CGRect(x: row.minX + places.more - 12, y: row.minY, width: 24, height: 24)
+            }
+            overflowButton.setAccessibilityLabel("\(plan.hidden) more sub-agents")
+        }
+        if plan.divider {
+            if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .visibility) { divider.isHidden = false }
+            if headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .geometry) {
+                place(divider, CGRect(x: row.minX + places.divider - 0.5, y: row.midY - 5, width: 1, height: 10))
+            }
+        }
         for id in satelliteButtons.keys.filter({ id in !c.signals.satellites.contains { $0.id == id } }) {
             satelliteOpeners.removeValue(forKey:id)?.cancel();satelliteButtons.removeValue(forKey:id)?.removeFromSuperview()
         }
@@ -680,7 +920,7 @@ struct HeaderIslandConfiguration: Equatable {
         timer?.invalidate(); timer=nil
         // Not canAct: that goes false when the window has been idle for 8 s (the ambient hold), and an event line then
         // stayed on screen until the next input (user 10-30; 14.7 s with a 2.2 s hold in a real-path run).
-        guard !disposed,configuration?.active == true,let deadline=state.nextDeadline else { return }
+        guard !browserPresentationSuspended,!disposed,!isHiddenOrHasHiddenAncestor,configuration?.active == true,let deadline=state.nextDeadline else { return }
         let timer=Timer(timeInterval:max(0.001,deadline-now()),repeats:false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -703,6 +943,7 @@ struct HeaderIslandConfiguration: Equatable {
         // A sibling island's activity/expansion monitor may run before the drag monitor. Whichever sees
         // Esc first cancels the SAME scene gesture; it must not merely dismiss an unrelated nameplate.
         if event.type == .keyDown,event.keyCode == 53,orbDragProvider()?.cancelOrbDrag() == true { return true }
+        if event.type == .keyDown,event.keyCode == 53,yieldPeekReplyEscape?() == true { return false }
         guard canAct else { return false }
         if event.type == .keyDown,event.keyCode == 53,state.expanded || state.editing || state.activity != nil || pulseShowing && pulse?.state.mode != .compact { escape(); return true }
         if event.type == .leftMouseDown,popover == nil,(state.expanded || state.editing || pulseShowing && pulse?.state.pinned == true),!visibleCapsule.union(visiblePlanet).insetBy(dx:-4,dy:-4).contains(convert(event.locationInWindow,from:nil)) {
@@ -725,6 +966,10 @@ struct HeaderIslandConfiguration: Equatable {
         if window == nil { satelliteOpeners.values.forEach{$0.cancel()}; stopMotionExposure() }
         else if localMotion != nil || lobeMotion != nil { motionClock.start(in:self) }
     }
+    override func viewWillMove(toSuperview newSuperview: NSView?) {
+        if superview !== newSuperview { headerHolds.invalidate(.targetChanged) }
+        super.viewWillMove(toSuperview: newSuperview)
+    }
     private var visibleCapsule:CGRect { pulseShowing ? pulse!.capsuleFrame:capsule.frame }
     private var visiblePlanet:CGRect { orb.glassView.frame }
     override func hitTest(_ point:NSPoint) -> NSView? {
@@ -732,8 +977,10 @@ struct HeaderIslandConfiguration: Equatable {
         let p=convert(point,from:superview)
         // Planet owns the overlap, and its visible circle rather than its square bounds is the target.
         let r=visiblePlanet, dx=(p.x-r.midX)/(r.width/2),dy=(p.y-r.midY)/(r.height/2)
-        if !orbIsCarried,dx*dx+dy*dy<=1 { return planetButton }
-        if pulseShowing {return pulse?.hitTest(p)}
+        if !orbIsCarried, !planetButton.isHidden, planetButton.participates, dx * dx + dy * dy <= 1 {
+            return planetButton
+        }
+        if pulseShowing { return canInteract(HeaderIslandHold.Role.pulse) ? pulse?.hitTest(p) : nil }
         let radius=capsule.cornerRadius // the real SDF radius; the backing CALayer's cornerRadius is not the glass
         guard NSBezierPath(roundedRect:visibleCapsule,xRadius:radius,yRadius:radius).contains(p) else { return nil }
         // Rename width springs can leave the visible plate wider than the model title button.
@@ -741,7 +988,19 @@ struct HeaderIslandConfiguration: Equatable {
         if state.shape == .compact { return titleButton.participates ? titleButton:nil }
         return super.hitTest(point)
     }
+    /// Retire only an unmounted Peek interaction; browser suspension remains independently owned.
+    func retireHiddenInteraction() {
+        let work=M10ColumnWorkTrace.scope("peek.header.retire");defer {work.end()}
+        guard isHiddenOrHasHiddenAncestor else {return}
+        interactionGeneration+=1;timer?.invalidate();timer=nil;lobeTask?.cancel();popover?.close();endInput()
+        satelliteOpeners.values.forEach{$0.cancel()};pulse?.suspend();restorePulseContent()
+        state=HeaderIslandState();hostMotion=false;hostMotionKeepsActivity=false
+        configuration?.active=false;wantedEvent=false;eventPhase.reset(visible:false)
+        stopMotionExposure();orb.setPresentationActive(false);setAccessibilityHidden(true);syncOutsideMonitor()
+        publishHostPresentation()
+    }
     func dispose() {
+        headerHolds.invalidate(.disposed)
         restorePulseContent();pulse?.dispose()
         satelliteOpeners.values.forEach{$0.cancel()};satelliteOpeners=[:]
         state.escape(); disposed=true; interactionGeneration+=1; setAccessibilityHidden(true)
@@ -749,6 +1008,95 @@ struct HeaderIslandConfiguration: Equatable {
         timer?.invalidate(); timer=nil; lobeTask?.cancel(); popover?.close(); endInput(); orb.dispose()
         stopMotionExposure()
         if let outsideMonitor { NSEvent.removeMonitor(outsideMonitor); self.outsideMonitor=nil }
+        publishHostPresentation();actions.presentation=nil
+    }
+}
+
+extension HeaderIsland {
+    private var holdViews: [String: NSView] {
+        var views: [String: NSView] = [
+            HeaderIslandHold.Role.root: self,
+            HeaderIslandHold.Role.interaction: self,
+            HeaderIslandHold.Role.capsule: capsule,
+            HeaderIslandHold.Role.lobe: lobe,
+            HeaderIslandHold.Role.title: titleButton,
+            HeaderIslandHold.Role.planet: orb.glassView,
+            HeaderIslandHold.Role.controls: controls,
+            HeaderIslandHold.Role.event: eventButton
+        ]
+        if let pulse { views[HeaderIslandHold.Role.pulse] = pulse }
+        for (id, button) in satelliteButtons { views[HeaderIslandHold.Role.satellite(id)] = button }
+        return views
+    }
+    var headerHoldRoles: [String] {
+        let roles = holdViews
+        let ordered = [HeaderIslandHold.Role.root, HeaderIslandHold.Role.controls, HeaderIslandHold.Role.capsule,
+                       HeaderIslandHold.Role.lobe, HeaderIslandHold.Role.title, HeaderIslandHold.Role.planet,
+                       HeaderIslandHold.Role.event, HeaderIslandHold.Role.pulse, HeaderIslandHold.Role.interaction]
+        return ordered.filter { roles[$0] != nil } + satelliteButtons.keys.sorted().map(HeaderIslandHold.Role.satellite)
+    }
+    func headerHoldCoordinateRoot(for role: String) -> AnyObject? {
+        guard holdViews[role] != nil else { return nil }
+        return superview ?? self
+    }
+    func headerHoldOriginalPlacement(for role: String) -> HeaderIslandHold.Placement? {
+        guard let view = holdViews[role], let root = headerHoldCoordinateRoot(for: role) as? NSView else { return nil }
+        let rect = view.superview.map { $0.convert(view.frame, to: root) } ?? view.frame
+        var pose = HeaderIslandHold.Placement(root: root, frame: rect, bounds: view.bounds,
+                                               transform: view.layer?.transform ?? CATransform3DIdentity,
+                                               hidden: view.isHidden, opacity: view.alphaValue,
+                                               interactive: interactionEligible)
+        if let original = headerHolds.originalPlacement(role, write: .geometry) {
+            pose.frame = original.frame
+            pose.bounds = original.bounds
+            pose.transform = original.transform
+        }
+        if let original = headerHolds.originalPlacement(role, write: .visibility) {
+            pose.hidden = original.hidden
+            pose.opacity = original.opacity
+        }
+        return pose
+    }
+    func headerHoldAffectedRoles(for role: String, write: HeaderIslandHold.Write) -> Set<String> {
+        guard write != .interaction else { return [role] }
+        if role == HeaderIslandHold.Role.root { return Set(headerHoldRoles) }
+        if role == HeaderIslandHold.Role.controls {
+            return Set([HeaderIslandHold.Role.title, HeaderIslandHold.Role.planet, HeaderIslandHold.Role.event]
+                       + satelliteButtons.keys.map(HeaderIslandHold.Role.satellite))
+        }
+        return [role]
+    }
+    func headerHoldApply(_ pose: HeaderIslandHold.Placement, role: String, write: HeaderIslandHold.Write) {
+        guard let view = holdViews[role], let root = pose.root as? NSView else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        defer { CATransaction.commit() }
+        switch write {
+        case .geometry:
+            if let parent = view.superview { view.frame = parent.convert(pose.frame, from: root) }
+            view.bounds = pose.bounds
+            view.layer?.transform = pose.transform
+            if role == HeaderIslandHold.Role.planet {
+                orb.glassView.cornerRadius = view.frame.width / 2
+                orb.glassView.contentView?.frame = view.bounds
+                planetButton.frame = controls.convert(pose.frame, from: root)
+                orb.setFrame(view.frame)
+            }
+        case .visibility:
+            view.isHidden = pose.hidden
+            view.alphaValue = pose.opacity
+            if role == HeaderIslandHold.Role.planet {
+                let hidden = pose.hidden || orbIsCarried
+                let parts: [NSView] = [orb.glassView, orb.backView, orb.frontView, planetButton]
+                for part in parts { part.isHidden = hidden }
+                orb.setOpacity(orbIsCarried ? 0 : Float(pose.opacity))
+            }
+        case .interaction:
+            if !disposed, configuration != nil {
+                render(animated: false)
+                syncOutsideMonitor()
+            }
+        }
     }
 }
 
@@ -757,6 +1105,9 @@ extension HeaderIsland {
         window?.screen.map(DisplayProfile.of) ?? motionProfile ?? DisplayProfile(name:"offscreen island",frameInterval:1/60,mmPerPoint:0.27,persistenceFrames:0)
     }
     private func stopMotionExposure() {
+        nameLabel.titleBlend = nil
+        titleSource = nil
+        titleTarget = nil
         localMotion=nil; lobeMotion=nil; motionClock.stop(); glyphPlane.reset(); controls.layer?.mask=nil
         nameGaussian?.setVisible(true,animated:false);nameGaussian=nil
         for effect in outgoingGaussians {
@@ -766,10 +1117,12 @@ extension HeaderIsland {
         outgoingGaussians=[];retiringNames.removeAll{$0.superview == nil}
         orb.resetGlyphGaussian()
         controlsFade=nil;controlsOpacity=geometry.actions.isEmpty ? 0:1
-        for b in actionButtons {b.alphaValue=controlsOpacity;b.isHidden=geometry.actions.isEmpty}
+        sampleControlsFade(at: now())
         glyphPose.layer?.transform=CATransform3DIdentity;glyphPose.setFrameOrigin(.zero)
         orb.exposeGlyphs(now:geometry.planet,earlier:geometry.planet,profile:exposureProfile,enabled:false)
-        lastMotion=nil; motionRecords=[]; lobe.isHidden=true
+        lastMotion = nil
+        motionRecords = []
+        if headerHolds.canWrite(HeaderIslandHold.Role.lobe, write: .visibility) { lobe.isHidden = true }
         for key in ["island.bounds.size","island.position","island.radius"] { capsule.layer?.removeAnimation(forKey:key) }
     }
     private func applyMotionExposure(_ g:HeaderIslandGeometry,fontScale:CGFloat,earlier:HeaderIslandGeometry?,earlierOrigin:CGPoint?,earlierFontScale:CGFloat?) {
@@ -795,9 +1148,12 @@ extension HeaderIsland {
                 treated=CGRect(x:x,y:y,width:ceil((treated.maxX-origin.x)*s)/s+origin.x-x,height:ceil((treated.maxY-origin.y)*s)/s+origin.y-y)
             }
             let frame=local(treated),round=radius+(min(treated.width,treated.height)/2-radius)*sample.gate
-            if view.frame != frame {view.frame=frame}
-            if view.cornerRadius != round {view.cornerRadius=round}
-            if view.contentView?.frame != view.bounds {view.contentView?.frame=view.bounds}
+            let role = view === capsule ? HeaderIslandHold.Role.capsule : HeaderIslandHold.Role.planet
+            if headerHolds.canWrite(role, write: .geometry) {
+                if view.frame != frame { view.frame = frame }
+                if view.cornerRadius != round { view.cornerRadius = round }
+                if view.contentView?.frame != view.bounds { view.contentView?.frame = view.bounds }
+            }
             motionRecords.append(.init(material:id,now:now,earlier:old,treated:treated,sample:sample,shutter:settings.shutter))
         }
         motionRecords=[]
@@ -808,16 +1164,61 @@ extension HeaderIsland {
         orb.exposeGlyphs(now:world(g.planet,origin),earlier:world(previous.planet,oldOrigin),profile:profile,enabled:settings.enabled && !semanticZoom)
         let k=max(0.01,fontScale)
         var baseRect=nameBaseRect
+        let endpoint = configuration?.notices != nil && !pulsePresentationRetired && pulse?.isEnabled == true
+            ? pulse?.motionTitleDrawing ?? nameLabel : nameLabel
+        if hostMotion, (widths[endpoint.font?.pointSize ?? 0] ?? 0)
+            > endpoint.bounds.width + 0.5 { hostMotionTruncatesTitle = true }
         // Promotion retains its authored seed-to-title choreography.
         let constrained=hostMotion && hostMotionTruncatesTitle && !promotionInProgress && configuration?.variant != .newChat
         if constrained {
+            let span = geometry.capsule.width - titleSourceWidth
+            let fontSpan = geometry.titleFont - titleSourcePoseFont
+            let xSpan = geometry.capsule.midX - titleSourceCenter.x
+            let ySpan = geometry.capsule.midY - titleSourceCenter.y
+            if let source = titleSource {
+                if titleTarget == nil {
+                    // Express the captured drawing in the destination font's canonical coordinate space.
+                    let ratio = (nameLabel.font?.pointSize ?? 1) / titleSourceFont
+                    source.size = CGSize(width: source.size.width * ratio, height: source.size.height * ratio)
+                    titleTarget = endpoint.titleImage(
+                        scale: window?.backingScaleFactor ?? configuration?.scale ?? 2, blended: false)
+                    let rect = endpoint === nameLabel ? nameLabel.frame : endpoint.convert(endpoint.bounds, to: self)
+                    titleTargetPoint = CGPoint(x: rect.minX, y: rect.midY)
+                    titleTargetOpacity = endpoint.alphaValue
+                }
+                if let target = titleTarget {
+                    let progress = abs(span) > 0.5 ? (g.capsule.width - titleSourceWidth) / span
+                        : abs(fontSpan) > 0.001 ? (g.titleFont - titleSourcePoseFont) / fontSpan
+                        : abs(xSpan) > 0.5 ? (g.capsule.midX - titleSourceCenter.x) / xSpan
+                        : abs(ySpan) > 0.5 ? (g.capsule.midY - titleSourceCenter.y) / ySpan
+                        : titleSourceWasPulse ? 0 : 1
+                    nameLabel.titleBlend = (source, target, min(1, max(0, progress)))
+                }
+            }
             // A truncated title uses the moving capsule's available width, not the destination's truncation.
             // Keep its native drawing inside the pose view so AppKit can draw the whole label and arrow.
-            baseRect.origin.x=0;baseRect.size.width=g.title.width/k
-            nameLabel.frame=baseRect;nameLabel.setBoundsSize(baseRect.size);nameBaseRect=baseRect
+            baseRect.origin.x = 0
+            baseRect.size.width = g.title.width / k
+            if let blend = nameLabel.titleBlend {
+                baseRect.size.height = max(baseRect.height, blend.from.size.height, blend.to.size.height)
+            }
+            if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) {
+                nameLabel.frame = baseRect
+                nameLabel.setBoundsSize(baseRect.size)
+                nameBaseRect = baseRect
+            }
         }
         let dx=constrained ? 0:baseRect.midX-geometry.title.midX,dy=baseRect.midY-geometry.title.midY
-        let current=CGRect(x:g.title.midX+(dx-baseRect.width/2)*k,y:g.title.midY+(dy-baseRect.height/2)*k,width:baseRect.width*k,height:baseRect.height*k)
+        var current = CGRect(x: g.title.midX + (dx - baseRect.width / 2) * k,
+                             y: g.title.midY + (dy - baseRect.height / 2) * k,
+                             width: baseRect.width * k, height: baseRect.height * k)
+        if let p = nameLabel.titleBlend?.progress {
+            current.origin.x = titleSourcePoint.x + (titleTargetPoint.x - titleSourcePoint.x) * p
+            current.origin.y = titleSourcePoint.y + (titleTargetPoint.y - titleSourcePoint.y) * p - current.height / 2
+            if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .visibility) {
+                nameLabel.alphaValue = titleSourceOpacity + (titleTargetOpacity - titleSourceOpacity) * p
+            }
+        }
         // Canonical, pixel-aligned native glyphs stay laid out once. Their glyph-only parent follows the analytic
         // subpixel pose: rounding the moving native frame held then jumped whole pixels near the spring's tail.
         // Only while the column moves: the island's own motion (expansion, the planets' island) is as it was.
@@ -825,11 +1226,17 @@ extension HeaderIsland {
         // then it isn't drawn: the right column's arrow was gone for the first 24–42 ms of a switch (board 261031j). So the pose's view
         // stands where the glyphs show, whole points, and the transform keeps the rest.
         let shift=hostMotion ? (current.minX-baseRect.minX).rounded():0
-        if glyphPose.frame.minX != shift {glyphPose.setFrameOrigin(CGPoint(x:shift,y:glyphPose.frame.minY))}
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry), glyphPose.frame.minX != shift {
+            glyphPose.setFrameOrigin(CGPoint(x: shift, y: glyphPose.frame.minY))
+        }
         var pose=CATransform3DMakeTranslation(current.minX-shift,current.minY,0)
         pose=CATransform3DScale(pose,k,k,1);pose=CATransform3DTranslate(pose,-baseRect.minX,-baseRect.minY,0)
-        glyphPose.layer?.transform = abs(k-1)<1e-12 && abs(current.minX-baseRect.minX)<1e-9 && abs(current.minY-baseRect.minY)<1e-9 ? CATransform3DIdentity:pose
-        // The arrow follows the name's moving width, as the product's arrowRect does; the name itself takes its end's truncation at once, as there.
+        if headerHolds.canWrite(HeaderIslandHold.Role.title, write: .geometry) {
+            let identity = abs(k - 1) < 1e-12 && abs(current.minX - baseRect.minX) < 1e-9
+                && abs(current.minY - baseRect.minY) < 1e-9
+            glyphPose.layer?.transform = identity ? CATransform3DIdentity : pose
+        }
+        // The arrow follows the moving title width while the fixed endpoint drawings blend.
         if hostMotion {chevron.setFrameOrigin(CGPoint(x:baseRect.minX+(g.title.maxX+8-current.minX)/k,y:baseRect.minY+(g.titleRow.midY-8-current.minY)/k))}
         let base=nameBaseRect.size,oldK=earlierFontScale ?? lastMotion?.fontScale ?? fontScale
         let oldName:CGRect
@@ -856,6 +1263,7 @@ extension HeaderIsland {
     }
     /// Offscreen and scene-owned driving use the same entry as the display link. No fixed 1/60 Timer.
     func sampleMotion(at time:Double) {
+        defer {publishHostPresentation()}
         pulse?.sample(at:time)
         guard !disposed else { return }
         let dt=exposureProfile.frameInterval*motionExposure.shutter
@@ -873,10 +1281,16 @@ extension HeaderIsland {
             var settings=motionExposure; settings.enabled = settings.enabled && configuration?.reduceMotion != true
             let sample=ExposureSample(now:r,earlier:old,frameInterval:dt,mmPerPoint:exposureProfile.mmPerPoint,settings:settings)
             let treated=IslandGlassExposure.frame(now:r,earlier:old,profile:exposureProfile,settings:settings)
-            lobe.frame=treated; lobe.cornerRadius=min(treated.width,treated.height)/2
+            if headerHolds.canWrite(HeaderIslandHold.Role.lobe, write: .geometry) {
+                lobe.frame = treated
+                lobe.cornerRadius = min(treated.width, treated.height) / 2
+            }
             motionRecords.removeAll { $0.material == "island.lobe" }
             motionRecords.append(.init(material:"island.lobe",now:r,earlier:old,treated:treated,sample:sample,shutter:settings.shutter))
-            if time-m.began>=0.18 { lobe.isHidden=true; lobeMotion=nil }
+            if time - m.began >= 0.18 {
+                if headerHolds.canWrite(HeaderIslandHold.Role.lobe, write: .visibility) { lobe.isHidden = true }
+                lobeMotion = nil
+            }
         }
         sampleControlsFade(at:time)
         eventPhase.sample(time);applyEventPose()
@@ -887,10 +1301,14 @@ extension HeaderIsland {
     private func applyEventPose() {
         CATransaction.begin();CATransaction.setDisableActions(true);defer {CATransaction.commit()}
         let p=eventPhase.pose
-        eventButton.frame=eventBaseRect.offsetBy(dx:0,dy:p.offsetY)
-        eventButton.alphaValue=p.opacity
-        eventButton.isHidden = !wantedEvent && !eventPhase.busy
-        eventButton.participates=wantedEvent && p.opacity>0 && configuration?.active == true && presentationActive
+        if headerHolds.canWrite(HeaderIslandHold.Role.event, write: .geometry) {
+            eventButton.frame = eventBaseRect.offsetBy(dx: 0, dy: p.offsetY)
+        }
+        if headerHolds.canWrite(HeaderIslandHold.Role.event, write: .visibility) {
+            eventButton.alphaValue = p.opacity
+            eventButton.isHidden = !wantedEvent && !eventPhase.busy
+        }
+        eventButton.participates = wantedEvent && p.opacity > 0 && canPresentInteraction(HeaderIslandHold.Role.event)
         if let layer=eventButton.layer,let eventBlur {
             // CA gaussianBlur uses layer points, as ContentGaussianTransition does: product radius 2pt.
             // Install once per phase and notify CA through the named key path, not a mutable CIFilter.
@@ -931,6 +1349,7 @@ extension HeaderIsland {
             controlsOpacity=fade.value(at:time)
             if fade.complete(at:time) {controlsFade=nil}
         }
+        guard headerHolds.canWrite(HeaderIslandHold.Role.controls, write: .visibility) else { return }
         for b in actionButtons {
             b.alphaValue=controlsOpacity
             b.isHidden=geometry.actions.isEmpty && controlsFade == nil
@@ -997,8 +1416,11 @@ private extension HeaderIsland {
     func popLobe() {
         guard let c=configuration,!c.reduceMotion,c.active,state.activity != nil else { return }
         if let screen=window?.screen {motionProfile=DisplayProfile.of(screen)}
-        lobeTask?.cancel(); lobe.isHidden=false
-        lobe.frame=CGRect(x:geometry.capsule.maxX-24,y:geometry.capsule.minY+6,width:20,height:20)
+        lobeTask?.cancel()
+        if headerHolds.canWrite(HeaderIslandHold.Role.lobe, write: .visibility) { lobe.isHidden = false }
+        if headerHolds.canWrite(HeaderIslandHold.Role.lobe, write: .geometry) {
+            lobe.frame = CGRect(x: geometry.capsule.maxX - 24, y: geometry.capsule.minY + 6, width: 20, height: 20)
+        }
         lobe.layer?.removeAllAnimations()
         if semanticGaussian {animateName(from:nameLabel.stringValue,frame:nameLabel.frame,font:nameLabel.font,bounds:nameLabel.bounds.size,feedback:false)}
         lobeMotion=(lobe.frame,now()); sampleMotion(at:now()); motionClock.start(in:self)
@@ -1104,7 +1526,9 @@ extension HeaderIsland {
             if let outgoingAlpha {exposureOutgoingName?.alphaValue=outgoingAlpha}
             if let outgoingFrame {exposureOutgoingName?.frame=outgoingFrame}
         }
-        glassContainer.isHidden=true; orb.glassView.isHidden=true; orb.backView.isHidden=true; orb.frontView.isHidden=true
+        let hiddenViews: [NSView] = [glassContainer, orb.glassView, orb.backView, orb.frontView]
+        let previousHidden = hiddenViews.map(\.isHidden)
+        for view in hiddenViews { view.isHidden = true }
         if pulseShowing {pulse?.setOffscreenGlassHidden(true)}
         // The view's whole-point stand and its transform as one pose, around a capture of the labels where they are laid out.
         let poseStand=glyphPose.frame.minX,poseRest=glyphPose.layer?.transform ?? CATransform3DIdentity
@@ -1118,7 +1542,7 @@ extension HeaderIsland {
         let native=NativeViewBitmap.capture(self,scale:s)
         if pulseShowing {pulse?.setOffscreenGlassHidden(false)}
         if accumulate { glyphPlane.isHidden=false }
-        glassContainer.isHidden=false; orb.glassView.isHidden=orbIsCarried; orb.backView.isHidden=orbIsCarried; orb.frontView.isHidden=orbIsCarried
+        for (view, hidden) in zip(hiddenViews, previousHidden) { view.isHidden = hidden }
         let context=CGContext(data:nil,width:Int(ceil(bounds.width*s)),height:Int(ceil(bounds.height*s)),bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)!
         context.saveGState(); context.translateBy(x:0,y:CGFloat(context.height)); context.scaleBy(x:s,y:-s)
         let pose=motionPose ?? geometry
@@ -1175,8 +1599,18 @@ extension HeaderIsland {
         if !active && presentationActive { interactionGeneration+=1 }
         presentationActive=active; orb.setPresentationActive(active && configuration?.active == true)
         if !active { timer?.invalidate(); timer=nil; popover?.close(); stopMotionExposure() }
-        pulse?.setAmbientActive(active)
         render(animated:false); schedule(); syncOutsideMonitor()
+    }
+    /// Independent of ambient policy: preserve semantic state while another full surface owns this column.
+    func setBrowserPresentationSuspended(_ suspended:Bool) {
+        guard browserPresentationSuspended != suspended else { return }
+        browserPresentationSuspended=suspended
+        if suspended {
+            timer?.invalidate();timer=nil;popover?.close();stopMotionExposure();pulse?.suspend()
+            satelliteOpeners.values.forEach{$0.cancel()};setAccessibilityHidden(true)
+        }
+        render(animated:false);schedule();syncOutsideMonitor()
+        publishHostPresentation()
     }
 }
 

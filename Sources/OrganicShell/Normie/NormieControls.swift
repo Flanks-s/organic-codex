@@ -2,7 +2,7 @@ import AppKit
 
 @MainActor enum NormieDrawing {
     static var background: NSColor { NativePalette.canvas }
-    static func identity(_ c:Conversation)->OrbIdentity {let assigned=OrbIdentity.assigned(c.identityIndex);return OrbIdentity(symbol:OrbCelestialBody.allCases.first{String(describing:$0).caseInsensitiveCompare(c.identitySymbol ?? "") == .orderedSame} ?? assigned.symbol,tint:OrbTint.allCases.first{String(describing:$0).caseInsensitiveCompare(c.identityTint ?? "") == .orderedSame} ?? assigned.tint)}
+    static func identity(_ c:Conversation)->OrbIdentity { BodyIdentityAdapter.identity(index:c.identityIndex,symbol:c.identitySymbol,tint:c.identityTint) }
     static func pixel(_ value: CGFloat, scale: CGFloat) -> CGFloat { (value * max(1, scale)).rounded()/max(1, scale) }
     static func rect(_ r: CGRect, scale: CGFloat) -> CGRect {
         let x = pixel(r.minX, scale: scale), y = pixel(r.minY, scale: scale)
@@ -98,13 +98,10 @@ import AppKit
 }
 
 @MainActor final class NormiePlanetView: NormieView {
-    var identity = OrbIdentity.assigned(0) { didSet { needsDisplay = true } }
+    var identity = OrbIdentity.assigned(0) { didSet { if identity != oldValue { needsDisplay = true } } }
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        guard let cg = NSGraphicsContext.current?.cgContext else { return }
-        cg.addPath(OrbCelestialGlyph(symbol: identity.symbol).path(in: bounds.insetBy(dx: 1, dy: 1)).cgPath)
-        cg.setStrokeColor(identity.tint.color.cgColor); cg.setLineWidth(bounds.width/24*2.2)
-        cg.setLineCap(.round); cg.setLineJoin(.round); cg.strokePath()
+        BodyFaceDrawing.draw(identity.resolvedBodyID,in:bounds)
     }
 }
 
@@ -131,17 +128,21 @@ struct NormieAccount: Equatable {
     }
 }
 
-/// ProfileCapsule's 16 × 8 sunrise horizon, clipped to its upper 4.5 pt (SidebarView:334).
+/// ProfileCapsule's 16 × 8 sunrise arc with room for its glow.
 @MainActor final class NormieAccountHorizon: NormieView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override func draw(_ dirtyRect: NSRect) {
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: CGRect(x: 0, y: 0, width: bounds.width, height: 4.5)).addClip()
-        let glow = NSShadow(); glow.shadowColor = NSColor(srgbRed: 1, green: 0xb3/255, blue: 0x5c/255, alpha: 0.45)
-        glow.shadowBlurRadius = 3; glow.shadowOffset = CGSize(width: 0, height: 2); glow.set()
+        let glow = NSShadow()
+        glow.shadowColor = NSColor(srgbRed: 1, green: 0xb3/255, blue: 0x5c/255, alpha: 0.45)
+        glow.shadowBlurRadius = 3
+        glow.shadowOffset = CGSize(width: 0, height: 2)
+        glow.set()
         NSColor(srgbRed: 1, green: 0xc7/255, blue: 0x7a/255, alpha: 1).setStroke()
-        let path = NSBezierPath(ovalIn: CGRect(x: 0.8, y: 0.8, width: max(0, bounds.width-1.6), height: 14.4))
-        path.lineWidth = 1.6; path.stroke()
+        let path = NSBezierPath()
+        path.appendArc(withCenter: CGPoint(x: 16, y: 16), radius: 8, startAngle: 180, endAngle: 0, clockwise: false)
+        path.lineWidth = 1.6
+        path.stroke()
         NSGraphicsContext.restoreGraphicsState()
     }
 }
@@ -174,11 +175,20 @@ struct NormieAccount: Equatable {
         place(avatar, CGRect(x: 7, y: 7, width: 26, height: 26))
         place(name, CGRect(x: 39, y: 12, width: max(0, bounds.width-67), height: 20))
         place(plan, CGRect(x: 41, y: 24, width: max(0, bounds.width-72), height: 15))
-        place(daybreak, CGRect(x: bounds.width-28, y: 16, width: 16, height: 8)); button.frame = bounds
+        place(daybreak, CGRect(x: bounds.width-36, y: 8, width: 32, height: 24))
+        button.frame = bounds
     }
 }
 
 @MainActor final class NormieClipView: NSClipView {
+    override func setBoundsOrigin(_ newOrigin: NSPoint) {
+        super.setBoundsOrigin(newOrigin)
+        documentView?.refreshAmbientSpinners()
+    }
+    override func setBoundsSize(_ newSize: NSSize) {
+        super.setBoundsSize(newSize)
+        documentView?.refreshAmbientSpinners()
+    }
     override func constrainBoundsRect(_ proposedBounds: NSRect) -> NSRect {
         var r = super.constrainBoundsRect(proposedBounds)
         let scale = window?.backingScaleFactor ?? 2

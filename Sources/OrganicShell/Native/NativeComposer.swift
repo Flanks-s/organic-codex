@@ -1,4 +1,5 @@
 import AppKit
+import QuartzCore
 import UniformTypeIdentifiers
 
 /// Retain one instance per conversation. Moving/resizing the host must not replace its NSTextView.
@@ -15,7 +16,7 @@ import UniformTypeIdentifiers
     /// A motion adapter can prewarm after semantic content changes; never called once per display frame.
     var onMotionContentsChange:(()->Void)?
     var placeholder: String {
-        get { placeholderOverride ?? (layoutMode == .growing ? "Message Codex — "+((sendShortcut ?? (sendsWithReturn ? .return:.commandReturn)) == .commandReturn ? "⌘↩":"↩")+" to send" : (state.running ? "Steer or queue…" : "Message…")) }
+        get { hostPlaceholder ?? placeholderOverride ?? (layoutMode == .growing ? "Message Codex — "+((sendShortcut ?? (sendsWithReturn ? .return:.commandReturn)) == .commandReturn ? "⌘↩":"↩")+" to send" : (state.running ? "Steer or queue…" : "Message…")) }
         set { placeholderOverride = newValue; updatePresentation() }
     }
     var sendsWithReturn = true {
@@ -63,12 +64,29 @@ import UniformTypeIdentifiers
     let attachmentScrollView = NSScrollView()
     let attachmentContent = NativeFlippedView()
     var attachmentChips: [NativeComposerAttachmentChip] = []
+    private let attachmentDropIdentity = UUID()
+    private var attachmentDropGeneration: UInt64 = 0
+    private var receivedAttachmentSessions: Set<UUID> = []
+    private(set) var attachmentPreview: NativeComposerAttachmentPreview?
+    private var attachmentPreviewClip: Bool?
+    /// The future glass owner consumes this displacement without resizing/replacing the retained editor.
+    var onAttachmentPreviewGeometryChange: ((CGFloat) -> Void)?
+    /// A deadline requests this lane's frames; nil revokes that request without stopping unrelated motion.
+    var onAttachmentPreviewFrameRequest: ((Double?) -> Void)?
 
     var onSubmit: ((NativeComposerSubmission) -> Void)?
     var onStopRequest: ((UUID, @escaping @MainActor (NativeComposerCompletion) -> Void) -> Void)? { didSet { updateActionAvailability() } }
     var onRefreshHistory: (() -> Void)? { didSet { updatePresentation() } }
     var onStop: (() -> Void)? { didSet { updateActionAvailability() } }
     var onAttachmentsChange: (([Attachment]) -> Void)?
+    var allowsAttachmentInput = true {
+        didSet {
+            guard oldValue != allowsAttachmentInput else { return }
+            if !allowsAttachmentInput { invalidateAttachmentDropTarget() }
+            updateActionAvailability()
+            needsLayout = true
+        }
+    }
     var onAccessChange: ((Access) -> Void)?
     var onSettingsChange: ((ModelSettings) -> Void)?
     var onRestoreQueued: ((QueuedMessage) -> Void)?
@@ -78,6 +96,7 @@ import UniformTypeIdentifiers
     var onSendVoice: ((String) -> Void)?
     var onDictation: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
+    var hostInteraction: NativeComposerHostInteraction?
     private(set) var editorFocused = false
     /// A host picker/uploader can return fully prepared Attachment values instead of opening a local panel.
     var onChooseAttachments: (((@escaping @MainActor ([Attachment]) -> Void)) -> Void)?
@@ -100,6 +119,20 @@ import UniformTypeIdentifiers
     var fixedHeight: CGFloat = 48 { didSet { requestMeasurement() } }
     /// Set by the dock for a Focused / Split segment; nil for a full bar.
     var segmentTransition: NativeComposerSegmentMotion?
+    var splitOwnsPresentation = false
+    var splitModelWidth: CGFloat?
+    var splitActionPoses: [(control: NSView, original: CGRect, projected: CGRect)] = []
+    var splitActionRail: [NSView] {
+        [modelButton, sendButton, stopButton, voiceButton, dictationButton, queueButton, historyRefreshButton,
+         sendingIndicator, stoppingIndicator]
+    }
+
+    func restoreSplitActionRail() {
+        for pose in splitActionPoses where pose.control.frame == pose.projected {
+            pose.control.frame = pose.original
+        }
+        splitActionPoses.removeAll(keepingCapacity: true)
+    }
     var segment: NativeComposerSegment? { didSet { if segment != oldValue { updatePresentation() } } }
     /// A non-nil width mounts the retained editor as a bar. Normie clears it when mounting its growing composer.
     /// Set the final semantic width before a spring begins; never derive density from animation frames.
@@ -116,7 +149,7 @@ import UniformTypeIdentifiers
     private(set) var identity: String?
     private(set) var lastSubmission: NativeComposerSubmission?
     var onModeHandoffGuardChanged:(()->Void)?
-    private(set) var isChoosingAttachments = false {didSet {if oldValue != isChoosingAttachments {onModeHandoffGuardChanged?()}}}
+    private(set) var isChoosingAttachments = false {didSet {if oldValue != isChoosingAttachments {onModeHandoffGuardChanged?();hostStateChanged()}}}
     private var placeholderOverride: String?
     private var measurementPending = false
     private var presentationPending = false
@@ -155,12 +188,12 @@ import UniformTypeIdentifiers
         scrollView.automaticallyAdjustsContentInsets = false
         textView.delegate = self
         textView.onSubmit = { [weak self] in self?.submit() }
-        textView.onCancel = { [weak self] in self?.onCancel?() }
+        textView.onCancel = { [weak self] in guard let self else{return};let host=self.hostInteraction;self.onCancel?();self.hostCancelled(from:host) }
         textView.onStop = { [weak self] in self?.requestStop() }
         textView.onAttach = { [weak self] in self?.chooseAttachments() }
         textView.onLayoutChange = { [weak self] in self?.requestMeasurement() }
         textView.onCompositionChange = { [weak self] in self?.compositionChanged();self?.onModeHandoffGuardChanged?() }
-        textView.onFocusChange = { [weak self] focused in self?.editorFocused = focused; self?.updateFocusRing(); self?.onFocusChange?(focused) }
+        textView.onFocusChange = { [weak self] focused in guard let self else{return};let host=self.hostInteraction;self.editorFocused=focused;self.updateFocusRing();self.onFocusChange?(focused);self.hostFocusChanged(focused,from:host) }
         scrollView.documentView = textView
         attachmentScrollView.drawsBackground = false; attachmentScrollView.borderType = .noBorder
         attachmentScrollView.hasHorizontalScroller = true; attachmentScrollView.autohidesScrollers = true
@@ -177,6 +210,10 @@ import UniformTypeIdentifiers
         configureButton(contextButton, symbol: "circle.dotted", label: "Context", action: #selector(contextPressed))
         let sendCell=NativeComposerSendCell(textCell:sendButton.title);sendCell.motion=sendPressMotion;sendCell.isBordered=false;sendCell.setButtonType(.momentaryPushIn);sendButton.cell=sendCell
         configureButton(sendButton, symbol: "arrow.up", label: "Send", action: #selector(sendPressed))
+        sendButton.setAccessibilityRole(.button)
+        sendButton.setAccessibilityChildren([])
+        sendButton.setAccessibilityElement(true)
+        modelButton.setAccessibilityElement(true)
         for popup in [accessButton, modelButton, queueButton] {
             popup.isBordered = false; popup.font = .systemFont(ofSize: 11); popup.autoenablesItems = false
         }
@@ -194,8 +231,9 @@ import UniformTypeIdentifiers
         self.init(); bind(to: conversation, store: store)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    override func viewDidHide(){super.viewDidHide();sendPressMotion.setPressed(false,animated:false)}
-    override func viewDidMoveToWindow(){super.viewDidMoveToWindow();if window == nil{sendPressMotion.setPressed(false,animated:false)}}
+    override func viewDidHide(){super.viewDidHide();sendPressMotion.setPressed(false,animated:false);invalidateAttachmentDropTarget();hostMoved(.hidden)}
+    override func viewDidMoveToWindow(){super.viewDidMoveToWindow();if window == nil{sendPressMotion.setPressed(false,animated:false);invalidateAttachmentDropTarget()};hostMoved(.window)}
+    override func viewDidMoveToSuperview(){super.viewDidMoveToSuperview();hostMoved(.superview)}
     isolated deinit {
         if let observation { store?.removeObserver(observation) }
     }
@@ -234,7 +272,7 @@ import UniformTypeIdentifiers
         if let storage=textView.textStorage,storage.length>0{storage.addAttributes([.font:font,.foregroundColor:color],range:NSRange(location:0,length:storage.length))}
         textView.selectedRanges=selected;updatePresentation();requestMeasurement();needsLayout=true
     }
-    override func presentationVisibilityDidChange(){voiceDemo?.synchronizeClock();guard isPresentationVisible,refreshDeferred else{return};refreshDeferred=false;refresh()}
+    override func presentationVisibilityDidChange(){voiceDemo?.synchronizeClock();if !isPresentationVisible{invalidateAttachmentDropTarget()};guard isPresentationVisible,refreshDeferred else{return};refreshDeferred=false;refresh()}
     /// Opt-in demo owner. Host-provided voice callbacks take precedence and are never replaced.
     @discardableResult func enableVoiceDemo()->Bool{
         if voiceDemo != nil{return true};guard onVoice == nil,onEndVoice == nil,onSendVoice == nil,!state.usesLiveCore else{return false}
@@ -262,7 +300,10 @@ import UniformTypeIdentifiers
         isEnabled && !isComposing && state.running && !state.stopping && !stopPending && (onStopRequest != nil || onStop != nil)
     }
     var canEditOptions: Bool { isEnabled && !isComposing && state.online && !state.loading && !isChoosingAttachments }
-    var canChangeAttachments: Bool { isEnabled && !isComposing && !state.loading && !isChoosingAttachments && state.voice == nil }
+    var canChangeAttachments: Bool {
+        allowsAttachmentInput && isEnabled && !isComposing && !state.loading &&
+            !isChoosingAttachments && state.voice == nil
+    }
 
     @discardableResult func setText(_ text: String, clearUndo: Bool = false) -> Bool {
         guard !isComposing else { return false }
@@ -283,6 +324,7 @@ import UniformTypeIdentifiers
     }
     func focus() { window?.makeFirstResponder(textView) }
     func useAutomaticPlaceholder() { placeholderOverride = nil; updatePresentation() }
+    func refreshHostPresentation() { updatePresentation() }
     func textDidChange(_ notification: Notification) {
         draftRevision &+= 1
         conversation?.draft = text
@@ -293,6 +335,7 @@ import UniformTypeIdentifiers
     /// A Tools delivery passes its own UUID, so its receipt finishes the Tools operation too (TOOLS-M8 Send).
     @discardableResult func submit(followUp: FollowUp? = nil, id: UUID = UUID()) -> Bool {
         guard canSend else { return false }
+        let host = hostInteraction
         let action: NativeComposerAction = state.running ? ((followUp ?? followUpDefault) == .steer ? .steer : .queue) : .send
         let request = NativeComposerSubmission(id: id, identity: identity, action: action, text: text,
             attachments: attachments, settings: settings, access: access, waitingForTurnID: activeTurnID)
@@ -301,7 +344,7 @@ import UniformTypeIdentifiers
             submittedRevision = draftRevision; submissionPending = true; updatePresentation(); onSubmit(request)
         } else if let onSend { onSend(request.text) }
         else { return false }
-        return true
+        hostSubmitted(request, from: host); return true
     }
     /// Only a matching acknowledgement may finish a pending request. Failed/uncertain sends keep the draft.
     @discardableResult func completeSubmission(_ id: UUID, outcome: NativeComposerCompletion) -> Bool {
@@ -379,6 +422,7 @@ import UniformTypeIdentifiers
         guard controlsLayoutValue != value else { return }
         controlsLayoutValue = value; controlsLayoutCount += 1
         layoutControls()
+        fitSplitModelLabel()
     }
     func measureNow() {
         guard !isComposing else { presentationPending = true; return }
@@ -446,6 +490,7 @@ import UniformTypeIdentifiers
         }
     }
     private func compositionChanged() {
+        hostStateChanged()
         // Buttons cannot steal the first responder from an active input method.
         updateActionAvailability()
         guard !isComposing else { presentationPending = true; return }
@@ -466,6 +511,9 @@ import UniformTypeIdentifiers
         button.setAccessibilityLabel(label); button.toolTip = label
     }
     private func updateActionAvailability() {
+        attachButton.isHidden = !allowsAttachmentInput
+        attachButton.setAccessibilityHidden(!allowsAttachmentInput)
+        if !canChangeAttachments { resetAttachmentPreview() }
         historyRefreshButton.isEnabled = canRefreshHistory
         sendButton.isEnabled = canSend
         stopButton.isEnabled = canStop
@@ -480,7 +528,7 @@ import UniformTypeIdentifiers
     private func updatePresentation() {
         guard !batchUpdating,presentationDepth==0 else {if presentationDepth>0 {presentationDirty=true};return}
         presentationUpdateCount+=1
-        defer{onMotionContentsChange?()}
+        defer{onMotionContentsChange?();hostStateChanged()}
         if !state.running && !state.stopping { stopPending = false; pendingStopID = nil }
         updateActionAvailability()
         guard !isComposing else { presentationPending = true; return }
@@ -510,11 +558,23 @@ import UniformTypeIdentifiers
         if stoppingIndicator.isHidden { stoppingIndicator.stopAnimation(nil) } else { stoppingIndicator.startAnimation(nil) }
         updateActionAvailability(); needsLayout = true; requestMeasurement()
     }
+    override func accessibilityAttributeValue(_ attribute: NSAccessibility.Attribute) -> Any? {
+        nativeInteractionAXResult {
+            if attribute == .children {
+                return self.accessibilityChildren()
+            }
+            return super.accessibilityAttributeValue(attribute)
+        }
+    }
+
     private func updateAccessibility() {
         let shortcut = sendShortcut ?? (sendsWithReturn ? .return : .commandReturn)
         textView.setAccessibilityIdentifier("composer." + (identity ?? "standalone") + ".draft")
         textView.setAccessibilityLabel("Message draft")
-        textView.setAccessibilityHelp(placeholder + (shortcut == .return ? ". Return to send; Command Return for a new line." : shortcut == .commandReturn ? ". Command Return to send; Return for a new line." : ". Use the configured send shortcut."))
+        let help = shortcut == .return ? ". Return to send; Shift Return for a new line."
+            : shortcut == .commandReturn ? ". Command Return to send; Return for a new line."
+            : ". Use the configured send shortcut."
+        textView.setAccessibilityHelp(placeholder + help)
         textView.setAccessibilityPlaceholderValue(placeholder)
         let prefix = "composer." + (identity ?? "standalone") + "."
         sendButton.setAccessibilityIdentifier(prefix + "send")
@@ -533,6 +593,90 @@ import UniformTypeIdentifiers
         textView.replaceWholeDraftUndoably(value)
     }
     private func publishAttachments() { conversation?.attachments = attachments; onAttachmentsChange?(attachments) }
+
+    var attachmentDropTarget: DragAttachmentPayload.Target {
+        .init(composer: attachmentDropIdentity, conversationID: identity, generation: attachmentDropGeneration)
+    }
+    /// Hosts revoke captured targets on cancellation, mode/owner handoff or window retirement.
+    func invalidateAttachmentDropTarget(matching expected: DragAttachmentPayload.Target? = nil) {
+        guard expected == nil || expected == attachmentDropTarget else { return }
+        attachmentDropGeneration &+= 1
+        resetAttachmentPreview()
+    }
+    /// One append-and-publish transaction, addressed to this composer, including an unbound New Chat draft.
+    @discardableResult func appendDragAttachments(_ payload: DragAttachmentPayload, session: DragAttachmentPayload.Session) -> Bool {
+        guard canChangeAttachments, session.target == attachmentDropTarget,
+              !receivedAttachmentSessions.contains(session.id) else { return false }
+        let incoming = payload.attachments
+        guard !incoming.isEmpty else { return false }
+        receivedAttachmentSessions.insert(session.id)
+        var ids = Set(attachments.map(\.id))
+        let additions = incoming.filter { ids.insert($0.id).inserted }
+        if attachmentPreview?.session.id == session.id { resetAttachmentPreview() }
+        guard !additions.isEmpty else { return false }
+        configurePresentation {
+            attachments.append(contentsOf: additions)
+            publishAttachments()
+        }
+        return true
+    }
+
+    @discardableResult func showAttachmentPreview(_ payload: DragAttachmentPayload, session: DragAttachmentPayload.Session,
+                                                   title: String, clock: SceneClock, at time: Double) -> Bool {
+        guard canChangeAttachments, session.target == attachmentDropTarget,
+              !receivedAttachmentSessions.contains(session.id), !payload.attachments.isEmpty else { return false }
+        if let preview = attachmentPreview, preview.session == session {
+            if preview.payload == payload, preview.title == title, !preview.isLeaving { return true }
+            preview.replace(payload: payload, title: title, at: time)
+            sampleAttachmentPreview(at: time)
+            onAttachmentPreviewFrameRequest?(preview.endTime)
+            return true
+        }
+        resetAttachmentPreview()
+        let preview = NativeComposerAttachmentPreview(payload: payload, session: session, title: title, clock: clock)
+        attachmentPreviewClip = clipsToBounds; clipsToBounds = false
+        attachmentPreview = preview; addSubview(preview)
+        preview.begin(at: time)
+        sampleAttachmentPreview(at: time)
+        onAttachmentPreviewFrameRequest?(preview.endTime)
+        return true
+    }
+    func clearAttachmentPreview(sessionID: UUID, animated: Bool = true, at time: Double) {
+        guard let preview = attachmentPreview, preview.session.id == sessionID else { return }
+        guard animated else { resetAttachmentPreview(); return }
+        guard !preview.isLeaving else { return }
+        preview.leave(at: time)
+        sampleAttachmentPreview(at: time)
+        onAttachmentPreviewFrameRequest?(time + NativeComposerAttachmentPreview.exitDuration)
+    }
+    /// Call from the host's existing clock while attachmentPreviewNeedsFrames is true.
+    @discardableResult func sampleAttachmentPreview(at time: Double) -> Bool {
+        guard let preview = attachmentPreview else { return false }
+        let wasPending = preview.needsFrames
+        let pending = preview.sample(at: time, sendFrame: sendButton.frame, reduceMotion: Motion.reduce)
+        if !pending, preview.isLeaving { resetAttachmentPreview(); return false }
+        if wasPending && !pending { onAttachmentPreviewFrameRequest?(nil) }
+        let displacement = preview.displacement
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        sendButton.wantsLayer = true
+        sendButton.layer?.setValue(displacement, forKeyPath: "transform.translation.x")
+        CATransaction.commit()
+        textView.attachmentPreviewPlaceholderOpacity = Motion.reduce ? 1 : 1 - preview.progress
+        onAttachmentPreviewGeometryChange?(displacement)
+        return pending
+    }
+    var attachmentPreviewNeedsFrames: Bool { attachmentPreview?.needsFrames ?? false }
+    private func resetAttachmentPreview() {
+        guard let preview = attachmentPreview else { return }
+        preview.cancel(); preview.removeFromSuperview(); attachmentPreview = nil
+        if let clipped = attachmentPreviewClip { clipsToBounds = clipped }; attachmentPreviewClip = nil
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        sendButton.layer?.setValue(0, forKeyPath: "transform.translation.x")
+        CATransaction.commit()
+        textView.attachmentPreviewPlaceholderOpacity = 1
+        onAttachmentPreviewGeometryChange?(0)
+        onAttachmentPreviewFrameRequest?(nil)
+    }
 
     @objc private func sendPressed() {
         if state.voice != nil { sendVoice() } else { submit() }
@@ -566,6 +710,10 @@ import UniformTypeIdentifiers
         let completion: @MainActor ([Attachment]) -> Void = { [weak self] values in
             guard let self else { return }
             self.isChoosingAttachments = false
+            guard self.allowsAttachmentInput else {
+                self.updatePresentation()
+                return
+            }
             self.attachments.append(contentsOf: values.filter { value in !self.attachments.contains { $0.id == value.id } })
             if !values.isEmpty { self.publishAttachments() }
             self.updatePresentation()
@@ -590,6 +738,7 @@ import UniformTypeIdentifiers
         guard identity == nil || identity == c.id else { return false }
         if let observation { self.store?.removeObserver(observation) }
         if identity != c.id{invalidateAccessibilityLease()}
+        invalidateAttachmentDropTarget()
         identity = c.id; conversation = c; self.store = store
         observation = store?.observe { [weak self] updated in
             guard let self, self.identity == updated.id else { return };if !self.isPresentationVisible{self.refreshDeferred=true}else{self.refresh()}
@@ -599,6 +748,7 @@ import UniformTypeIdentifiers
     private var modeContentEpochFrozen=false
     func setModeContentEpochFrozen(_ frozen:Bool) {
         guard frozen != modeContentEpochFrozen else {return}
+        if frozen { invalidateAttachmentDropTarget() }
         modeContentEpochFrozen=frozen;modeContentInputBlocked=frozen
         if !frozen {refresh()}
     }
@@ -675,6 +825,7 @@ import UniformTypeIdentifiers
     var onCompositionChange: (() -> Void)?, onStop: (() -> Void)?, onAttach: (() -> Void)?
     var onFocusChange: ((Bool) -> Void)?
     var placeholder = "Message…"
+    var attachmentPreviewPlaceholderOpacity: CGFloat = 1 { didSet { if oldValue != attachmentPreviewPlaceholderOpacity { needsDisplay = true } } }
     var sendsWithReturn = true
     var sendShortcut: NativeComposerSendShortcut?
 
@@ -712,7 +863,14 @@ import UniformTypeIdentifiers
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         if string.isEmpty && !hasMarkedText() {
-            (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: [.font: font ?? .systemFont(ofSize: 13), .foregroundColor: NSColor.placeholderTextColor])
+            if let c = enclosingScrollView?.superview as? NativeComposer, c.superview is PeekReplyHost,
+               c.splitModelWidth != nil {
+                let ink = (placeholder as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 13)])
+                guard ink.width <= visibleRect.maxX - textContainerOrigin.x + 0.5 else { return }
+            }
+            let color = NSColor.placeholderTextColor
+            let foreground = attachmentPreviewPlaceholderOpacity == 1 ? color : color.withAlphaComponent(color.alphaComponent * attachmentPreviewPlaceholderOpacity)
+            (placeholder as NSString).draw(at: textContainerOrigin, withAttributes: [.font: font ?? .systemFont(ofSize: 13), .foregroundColor: foreground])
         }
     }
     override func setFrameSize(_ newSize: NSSize) {
@@ -737,9 +895,14 @@ import UniformTypeIdentifiers
         if event.keyCode == 47 && modifiers == .command { onStop?(); return }
         if event.keyCode == 0 && modifiers == [.command, .shift] { onAttach?(); return }
         let shortcut = sendShortcut ?? (sendsWithReturn ? .return : .commandReturn)
-        if shortcut.matches(event) { onSubmit?(); return }
-        if shortcut == .return && (event.keyCode == 36 || event.keyCode == 76) && modifiers == .command {
-            insertText("\n", replacementRange: selectedRange()); return
+        if shortcut.matches(event) {
+            onSubmit?()
+            return
+        }
+        if (event.keyCode == 36 || event.keyCode == 76) &&
+            (modifiers.isEmpty || modifiers == .shift || modifiers == .command) {
+            insertText("\n", replacementRange: selectedRange())
+            return
         }
         super.keyDown(with: event)
     }

@@ -3,15 +3,35 @@ import UniformTypeIdentifiers
 
 @MainActor final class DebugPanelPage:DebugFormPage {
     let session:DebugSession
+    private let mockLaunch: Bool
+    private let resetAction: @MainActor () -> Void
+    private let schedule: (@escaping @MainActor @Sendable () -> Void) -> Void
+    private var resetting = false
+    private var resetMockButton: DebugButton!, resetAllButton: DebugButton!
     private var observation:UUID?
     private var pausedButton:DebugButton!,stepButton:DebugButton!,backgroundButton:DebugButton!,targetButton:DebugButton!
     private var injectionButtons:[DebugButton]=[],parameterSliders:[String:DebugSlider]=[:],toggleButtons:[String:DebugButton]=[:]
     private var stateLabel=DebugPaint.label("",size:11),notice=DebugPaint.label("",size:11)
-    init(session:DebugSession){self.session=session;super.init(nibName:nil,bundle:nil)}
+    init(session: DebugSession, mockLaunch: Bool = CommandLine.arguments.contains("--mock"),
+         resetAction: @escaping @MainActor () -> Void = { DebugAppReset.perform(allowed: true) },
+         schedule: @escaping (@escaping @MainActor @Sendable () -> Void) -> Void = { action in
+             Task { @MainActor in
+                 try? await Task.sleep(for: .milliseconds(300))
+                 action()
+             }
+         }) {
+        self.session = session
+        self.mockLaunch = mockLaunch
+        self.resetAction = resetAction
+        self.schedule = schedule
+        super.init(nibName: nil, bundle: nil)
+    }
     required init?(coder:NSCoder){fatalError("init(coder:)")}
     override func loadView(){
         super.loadView();view.setAccessibilityLabel("Debug panel")
         form.heading("Mock Engine")
+        resetMockButton = form.button("Reset Mock Engine") { [weak self] in self?.restart(resetTuning: false) }
+        DebugBrowserOrb.add(to: form, session: session)
         pausedButton=form.toggle("Paused",value:session.paused){[weak self] in guard let self else{return};_ = session.setPaused(!session.paused)}
         stepButton=form.button("Step"){[weak self] in _ = self?.session.step()}
         backgroundButton=form.toggle("Background sub-agent events",value:session.backgroundEvents){[weak self] in guard let self else{return};_ = session.setBackgroundEvents(!session.backgroundEvents)}
@@ -37,21 +57,42 @@ import UniformTypeIdentifiers
         }
         form.button("Copy JSON"){[weak self] in guard let self else{return};NSPasteboard.general.clearContents();NSPasteboard.general.setString(String(decoding:session.tuning.exportJSON(),as:UTF8.self),forType:.string);notice.stringValue="Tuning JSON copied. No conversation or request content is exported."}
         form.button("Export JSON…"){[weak self] in self?.export()}
-        form.button("Reset All"){[weak self] in guard let self else{return};session.tuning.reset();for p in DebugTuningParameter.all{parameterSliders[p.key]?.set(session.tuning[p])};for (key,b) in toggleButtons{b.checked=session.tuning.toggles[key] ?? false}}
-        form.note("Mock tuning applies to the shared playback source. Scene hosts subscribe to the tuning snapshot; Reset All restores parameters, never conversation history.",height:44)
+        resetAllButton = form.button("Reset All") { [weak self] in self?.restart(resetTuning: true) }
+        form.note("Reset All resets tuning and the mock engine, restarting the app with the initial A–F conversations.",
+                  height: 44)
         refresh()
     }
     override func activate(){super.activate();_ = view;session.onChange={[weak self] in self?.refresh()};observation=session.store.observe{[weak self] _ in self?.refresh()};refresh()}
     override func deactivate(){super.deactivate();if let observation{session.store.removeObserver(observation)};observation=nil;session.onChange=nil}
     func refresh(){
         guard isViewLoaded else{return};let demo=session.canInject
+        resetMockButton.isEnabled = demo && mockLaunch && !resetting
+        resetAllButton.isEnabled = demo && mockLaunch && !resetting
         pausedButton.checked=session.paused;pausedButton.isEnabled=demo;stepButton.isEnabled=demo && session.paused;backgroundButton.checked=session.backgroundEvents;backgroundButton.isEnabled=demo
         targetButton.choices=session.store.conversations.map{$0.id+" · "+$0.title};targetButton.selection=session.store.conversations.firstIndex(where:{$0.id == session.selectedID}) ?? 0;targetButton.valueText=session.selected?.title
         for b in injectionButtons{b.isEnabled=demo && session.selected?.isLiveConversation != true}
         for p in DebugTuningParameter.all { parameterSliders[p.key]?.set(session.tuning[p]); parameterSliders[p.key]?.isEnabled = !p.key.hasPrefix("mock.") || demo }
         for (key,button) in toggleButtons { button.checked = session.tuning.toggles[key] ?? false }
         stateLabel.stringValue=session.store.conversations.prefix(8).map{c in "\(c.id) · \(c.running ? "running":"idle") · approvals \(c.approvals.count) · \(c.question == nil ? "":"? ")\(c.error == nil ? "":"! ")ctx \(c.contextPercent)% · sub \(c.satellites.filter{!$0.done}.count)/\(c.satellites.count)"}.joined(separator:"\n")
-        notice.stringValue=demo ? "Demo injection only. Step advances the actual MockReplay by one tick. Playback and background events share the same clock, including before this panel opens.":"Live Core: mock playback and business injection are disabled. Local visual calibration remains available."
+        if !resetting {
+            notice.stringValue = demo
+                ? "Demo injection only. Step advances the actual MockReplay by one tick. "
+                    + "Playback and background events share the same clock, including before this panel opens."
+                : "Live Core: mock playback and business injection are disabled. "
+                    + "Local visual calibration remains available."
+        }
+    }
+    private func restart(resetTuning: Bool) {
+        guard mockLaunch, session.canInject, !resetting else { return }
+        if resetTuning { session.tuning.reset() }
+        resetting = true
+        refresh()
+        notice.stringValue = "Restarting with a fresh mock…"
+        notice.scrollToVisible(notice.bounds)
+        schedule { [weak self] in
+            guard let self, self.mockLaunch, self.session.canInject else { return }
+            self.resetAction()
+        }
     }
     private func export(){guard let window=view.window else{return};let panel=NSSavePanel();panel.nameFieldStringValue="organic-tuning.json";panel.allowedContentTypes=[.json];panel.beginSheetModal(for:window){[weak self] result in MainActor.assumeIsolated{guard result == .OK,let url=panel.url,let self else{return};do{try self.session.tuning.exportJSON().write(to:url,options:.atomic)}catch{self.notice.stringValue=error.localizedDescription}}}}
 }

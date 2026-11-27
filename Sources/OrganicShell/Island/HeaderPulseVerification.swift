@@ -175,6 +175,7 @@ import QuartzCore
         HeaderPulseRevisionVerification.run(check: check, evidence: &evidence)
         HeaderPulseThirdVerification.run(check:check,evidence:&evidence)
         HeaderPulseFourthVerification.run(check:check,evidence:&evidence)
+        ambientChecks(check: check)
         boardChecks(check: check, evidence: &evidence)
         check(NSApp.windows.allSatisfy { !$0.isVisible }, "verification opens no visible windows")
         let report: [String: Any] = ["checks": checks, "failures": failures, "evidence": evidence]
@@ -184,6 +185,61 @@ import QuartzCore
     }
 
     private static func descendants(_ view: NSView) -> [NSView] { view.subviews.flatMap { [$0] + descendants($0) } }
+
+    private static func ambientChecks(check: (Bool, String) -> Void) {
+        let rect = CGRect(x: 0, y: 0, width: 507, height: 320)
+        let window = NSWindow(contentRect: rect, styleMask: .borderless, backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        defer { window.close() }
+        let header = HeaderIsland()
+        window.contentView?.addSubview(header)
+        defer { header.dispose() }
+        let began = CACurrentMediaTime()
+        var time = began
+        header.now = { time }
+        header.noticeWallTime = { 1000 + time - began }
+        var input = HeaderIslandConfiguration(id: "rest", title: "Pulse rest", columnWidth: 507)
+        input.notices = .init(running: true, startedAt: 1000)
+        header.configure(input)
+        input.notices?.journal = [.init(id: 1, kind: .command, text: "Running")]
+        header.configure(input)
+        let pulse = header.subviews.compactMap { $0 as? HeaderPulsePresentation }.first!
+        func advance(_ seconds: Double) {
+            for _ in 0..<Int(seconds * 240) {
+                time += 1.0 / 240
+                header.sampleMotion(at: time)
+            }
+        }
+        func shows(_ clock: String) -> Bool {
+            descendants(pulse).compactMap { $0 as? NSTextField }.contains {
+                !$0.isHiddenOrHasHiddenAncestor && $0.stringValue == clock
+            }
+        }
+        advance(1.3)
+        check(pulse.state.event != nil && !pulse.clockRunning && shows("0:01"), "#382 hold has no frame clock")
+        advance(0.3)
+        check(shows("0:01"), "#382 clock stays unchanged before the next second")
+        advance(0.5)
+        check(shows("0:02") && !pulse.clockRunning, "#382 elapsed text updates without a frame clock")
+        pulse.hover(true, at: time)
+        advance(1.4)
+        check(pulse.state.hovering && !pulse.clockRunning, "#382 settled hover has no frame clock")
+        pulse.togglePin()
+        pulse.hover(false, at: time)
+        advance(0.4)
+        check(pulse.state.pinned && !pulse.clockRunning, "#382 settled pin has no frame clock")
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            let shortcut = SettingsButton(frame: CGRect(x: 0, y: 0, width: 100, height: 22))
+            window.contentView?.addSubview(shortcut)
+            shortcut.recordingShortcut = true
+            let flash = shortcut.layer?.animation(forKey: "shortcut.recording")
+            check(flash?.repeatCount == 0 && flash?.autoreverses == true, "#382 shortcut flashes one round trip")
+            shortcut.layer?.removeAnimation(forKey: "shortcut.recording")
+            shortcut.viewDidMoveToSuperview()
+            check(shortcut.recordingShortcut && shortcut.layer?.animationKeys()?.isEmpty != false,
+                  "#382 recording mark stays after its flash without replay")
+        }
+    }
 
     private static func boardChecks(check: (Bool, String) -> Void, evidence: inout [[String: Any]]) {
         guard let path = ProcessInfo.processInfo.environment["PULSE_BOARD_TRACE"],

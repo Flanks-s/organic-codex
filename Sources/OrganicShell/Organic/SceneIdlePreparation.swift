@@ -1,15 +1,21 @@
 import AppKit
 import QuartzCore
 
-/// One admitted operation per run-loop turn. No continuation can finish a cold plan on an input callback.
+/// Cold preparation always starts after a sleep, and can admit several operations per wake.
 @MainActor final class M11IdlePreparation {
     enum Stop:Error {case interrupted,unsupportedSource(String)}
     let interval:Double
+    let budget:Double
+    private var wake:Double?
     var valid:()->Bool
     var recordSlices=false
     private(set) var slices:[(name:String,ms:Double)]=[]
     private var segment:(name:String,start:Double,span:M10ColumnWorkTrace.Span,trace:ModeSignposts.Trace?)?
-    init(interval:Double,valid:@escaping ()->Bool) {self.interval=interval;self.valid=valid}
+    init(interval:Double,budget:Double=0,valid:@escaping ()->Bool) {
+        self.interval=interval
+        self.budget=budget
+        self.valid=valid
+    }
     func finish() {
         guard let segment else{return}
         let ms=(CACurrentMediaTime()-segment.start)*1000
@@ -20,7 +26,10 @@ import QuartzCore
     func step<T>(_ name:String,_ body:()->T) async throws ->T {
         // Count the entire resumed segment, including assembly after the previous operation returned.
         finish()
-        try await Task.sleep(for:.seconds(max(0.0001,interval)))
+        if budget<=0 || wake == nil || CACurrentMediaTime()-wake!>=budget {
+            try await Task.sleep(for:.seconds(max(0.0001,interval)))
+            wake=CACurrentMediaTime()
+        }
         let observing=recordSlices || M10ColumnWorkTrace.active || ModeSignposts.enabled
         let resumed=observing ? CACurrentMediaTime():0
         guard !Task.isCancelled,valid() else {throw Stop.interrupted}

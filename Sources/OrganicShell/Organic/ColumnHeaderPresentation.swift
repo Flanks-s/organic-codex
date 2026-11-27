@@ -27,11 +27,13 @@ extension ColumnNode {
             input.noticeColumnWidth=width+12
         }
         island.configure(input)
+        if let browserAttachment { island.setBrowserPresentationSuspended(browserAttachment.covers) }
     }
 
     /// Ambient motion held or let go (f202): the header's planet and dots, the brief's "…".
     func setAmbientRunning(_ on: Bool) {
         island?.setPresentationActive(on)
+        if let browserAttachment { island?.setBrowserPresentationSuspended(browserAttachment.covers) }
         for layer in briefLayers.values { for case let d as DotsLayer in layer.sublayers ?? [] { d.setRunning(on) } }
     }
 
@@ -39,9 +41,13 @@ extension ColumnNode {
     func placeIsland(_ r: CGRect, shown: Bool) {
         guard let island else { return }
         island.endMotion()
-        island.setFrameOrigin(CGPoint(x: r.minX, y: 0))
-        island.alphaValue = 1
-        island.isHidden = !shown
+        if island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .geometry) {
+            island.setFrameOrigin(CGPoint(x: r.minX, y: 0))
+        }
+        if island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .visibility) {
+            island.alphaValue = 1
+            island.isHidden = !shown || browserAttachment?.covers == true
+        }
     }
 
     /// A transition starts towards `variant`: the island is laid out for it once, and moves there frame by frame.
@@ -53,7 +59,9 @@ extension ColumnNode {
         islandFrom = islandVariant
         island.beginMotion()
         configureIsland(variant, width: width)
-        island.isHidden = false
+        if island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .visibility) {
+            island.isHidden = browserAttachment?.covers == true
+        }
     }
 
     // MARK: The first send's header rise (f078)
@@ -76,7 +84,9 @@ extension ColumnNode {
         if sample.revealTitle && !p.revealed { island.revealPromotionTitle(); p.revealed = true }
         // revealPromotionTitle configures its endpoint. Reapply the moving canvas afterwards so that frame cannot
         // clip the still-rising plate/name for one display frame.
-        island.frame = CGRect(x:x,y:0,width:(width*scale).rounded()/scale,height:height)
+        if island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .geometry) {
+            island.frame = CGRect(x: x, y: 0, width: (width * scale).rounded() / scale, height: height)
+        }
         let old = p.plan.motionSample(elapsed: max(0,t-motionProfile.frameInterval*motionExposure.shutter))
         island.placeMotion(sample.geometry, fontScale: sample.fontScale, earlier: old.geometry,
             earlierOrigin: CGPoint(x: earlierX ?? x, y: 0), earlierFontScale: old.fontScale)
@@ -90,8 +100,19 @@ extension ColumnNode {
     /// Driver A, one frame: the header between its two variants. Between brief and full it follows the form; between
     /// variants of the same fullness (Focused ↔ Split), the column's width.
     func islandFrame(rect r: CGRect, form f: Double, presence p: Double, earlierRect: CGRect? = nil, earlierForm: Double? = nil) {
+        if browserAttachment?.covers == true {
+            if let island, island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .visibility) {
+                island.isHidden = true
+            }
+            return
+        }
         // Rising from the seed, the header stays opaque (it takes the seed's place in the same frame; the column fades in).
-        guard let island, promotion == nil else { island?.alphaValue = 1; return }
+        guard let island, promotion == nil else {
+            if let island, island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .visibility) {
+                island.alphaValue = 1
+            }
+            return
+        }
         func pose(_ r:CGRect,_ f:Double)->(HeaderIslandGeometry,CGFloat) {
             func full(_ v: HeaderIslandVariant) -> Bool { v != .brief }
             let k: CGFloat
@@ -103,12 +124,16 @@ extension ColumnNode {
             return (g,g.titleFont/max(1,b.titleFont))
         }
         let (g,fontScale)=pose(r,f)
-        island.frame = CGRect(x: r.minX, y: 0, width: (r.width * scale).rounded() / scale, height: g.height)
+        if island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .geometry) {
+            island.frame = CGRect(x: r.minX, y: 0, width: (r.width * scale).rounded() / scale, height: g.height)
+        }
         if let old=earlierRect {
             let (before,k)=pose(old,earlierForm ?? f)
             island.placeMotion(g,fontScale:fontScale,earlier:before,earlierOrigin:CGPoint(x:old.minX,y:0),earlierFontScale:k)
         } else { island.placeMotion(g,fontScale:fontScale) }
-        island.alphaValue = CGFloat(min(1, max(0, p)))
+        if island.headerHolds.canWrite(HeaderIslandHold.Role.root, write: .visibility) {
+            island.alphaValue = CGFloat(min(1, max(0, p)))
+        }
     }
 
     /// Header geometry for a column width and form (full 1, brief 0): planet, capsule.
