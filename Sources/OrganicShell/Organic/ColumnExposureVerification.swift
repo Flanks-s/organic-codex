@@ -167,10 +167,31 @@ import CoreText
         print("M10 \(name) \(scale)x: \(k) frames, step \(peak), length \(maxLength), copies \(maxCopies), spikes \(spikes(changes[0]))/\(spikes(changes[1]))")
     }
     static func island(_ name:String,scale:CGFloat,output:URL) {
+        func containsIslandInk(_ bytes:[UInt8],width:Int,planet:CGRect)->Bool {
+            guard width>0,bytes.count>=4,bytes.count%(width*4)==0 else {return false}
+            if containsInk(bytes) {return true}
+            // Dim textures need contrast, not the peak brightness of a stroked glyph.
+            // Restrict this fallback to the orb so dark titles and glass cannot replace a missing body.
+            let height=bytes.count/(width*4),canvas=bytes.count-4
+            let box=planet.applying(CGAffineTransform(scaleX:scale,y:scale))
+                .intersection(CGRect(x:0,y:0,width:width,height:height))
+            guard !box.isNull,!box.isEmpty else {return false}
+            let pixels=box.integral,minimum=Int(ceil(64*scale*scale))
+            var count=0
+            for y in Int(pixels.minY)..<Int(pixels.maxY) {
+                for x in Int(pixels.minX)..<Int(pixels.maxX) {
+                    let i=(y*width+x)*4
+                    if max(Int(bytes[i])-Int(bytes[canvas]),Int(bytes[i+1])-Int(bytes[canvas+1]),Int(bytes[i+2])-Int(bytes[canvas+2]))>64 {
+                        count+=1;if count>minimum {return true}
+                    }
+                }
+            }
+            return false
+        }
         let a=HeaderIsland(),b=HeaderIsland(),views=[a,b]
         let nativeHosts=views.map{_ in IslandPlane(frame:CGRect(x:0,y:0,width:960,height:420))}
         for i in 0..<2 {nativeHosts[i].addSubview(views[i])}
-        let origin=CACurrentMediaTime()+3600
+        let origin=VerificationClock.renderOrigin
         var clock=origin
         for (i,v) in views.enumerated() {
             v.now={clock};v.motionProfile=profile;v.motionExposure.enabled=i==1
@@ -247,7 +268,11 @@ import CoreText
                 }
                 if let old=previous[i] {changes[i].append(renders[i].tileDiff(old,image).value)};previous[i]=image
             }
-            check(bytes.allSatisfy(containsInk),"\(name)/\(scale)x \(k) actual native glyphs are not blank")
+            check(bytes.indices.allSatisfy { i in
+                let planet=views[i].motionRecords.first(where:{$0.material=="island.planetGlass"})?.now
+                    ?? views[i].draggableOrbRect.offsetBy(dx:views[i].frame.minX,dy:0)
+                return containsIslandInk(bytes[i],width:renders[i].w,planet:planet)
+            },"\(name)/\(scale)x \(k) actual native glyphs are not blank")
             if k==0 || k==90 {check(native[0].dataProvider?.data == native[1].dataProvider?.data,"\(name)/\(scale)x \(k) native source pixel diff 0")}
             if k==0 || k==90 {check(bytes[0]==bytes[1],"\(name)/\(scale)x \(k==0 ? "first":"last") pixel diff 0")}
             if [0,1,2,3,5,8,12,20,35,60,90].contains(k) {tiles += (0..<2).map{renders[$0].image(bytes[$0])};labels += ["OFF · f\(k)","ON · f\(k)"]}
@@ -318,7 +343,7 @@ import CoreText
         replicator.anchorPoint = .zero;replicator.frame=CGRect(x:0,y:0,width:64,height:64)
         patch.frame=CGRect(x:16,y:16,width:32,height:32);patch.backgroundColor=NSColor(srgbRed:0.6,green:0.25,blue:0.1,alpha:1).cgColor
         let renderer=OffscreenRenderer(size:CGSize(width:64,height:64),host:host)
-        let began=CACurrentMediaTime()+3600,timeline=Timeline(began:0,duration:0.1,rate:120)
+        let began=VerificationClock.renderOrigin,timeline=Timeline(began:0,duration:0.1,rate:120)
         let samples=timeline.times.map {t in M10ColumnExposure.sample(CGRect(x:max(0,sin(t/0.1 * .pi))*60,y:0,width:32,height:32),CGRect(x:0,y:0,width:32,height:32),profile:profile,settings:.init())}
         let before=renderer.render(at:began-0.01),centre=(32*64+32)*4
         CATransaction.begin();CATransaction.setDisableActions(true)
@@ -353,7 +378,7 @@ import CoreText
         let host=CALayer();host.backgroundColor=NSColor.black.cgColor;host.addSublayer(tile.trail)
         let reference=CALayer();reference.anchorPoint = .zero;reference.frame=bitmap.rect.offsetBy(dx:160,dy:0);reference.contents=bitmap.image;reference.opacity=0;host.addSublayer(reference)
         let values=Array(tile.frames.prefix(tl.times.count)).map{NSNumber(value:1-($0["targetTransmission"] as? Double ?? 1))}
-        let begin=CACurrentMediaTime()+3700
+        let begin=VerificationClock.renderOrigin
         for t in tile.tracks {M10ColumnExposure.start(t,at:begin)}
         if let t=tl.track(reference,"opacity",values) {t.start(at:begin)}
         let renderer=OffscreenRenderer(size:CGSize(width:320,height:160),host:host)
@@ -382,7 +407,7 @@ import CoreText
             check(plane.textureTrail.instanceCount==plane.sample.count && source.layer?.opacity==0,"native glyph source outside replicator is suppressed once")
             plane.layer?.backgroundColor=NSColor.black.cgColor
             let renderer=OffscreenRenderer(size:plane.bounds.size,host:plane.layer!,scale:scale)
-            let pixels=renderer.render(at:CACurrentMediaTime()+5)
+            let pixels=renderer.render(at:VerificationClock.renderOrigin)
             check(stride(from:0,to:pixels.count,by:4).filter{max(pixels[$0],pixels[$0+1],pixels[$0+2])>20}.count>32,"real glyph texture renderer is not blank")
             renderer.write(pixels,output.appendingPathComponent("glyph-texture@\(Int(scale))x.png"))
             let blur=CIFilter(name:"CIGaussianBlur")!;blur.setValue(2,forKey:kCIInputRadiusKey)
@@ -412,7 +437,7 @@ import CoreText
         let replay=MockReplay(store:store);replay.start(live:false)
         let scene=AutoScene(size:CGSize(width:1280,height:820),store:store,profile:display,scale:2)
         scene.restOnSnapshot=false;scene.ambient=false;scene.manualSettle=true
-        var time=CACurrentMediaTime()+3600;scene.now={time};scene.install();scene.clock.invalidate();scene.prewarm()
+        var time=VerificationClock.renderOrigin;scene.now={time};scene.install();scene.clock.invalidate();scene.prewarm()
         if let id=scene.order.dropFirst(scene.columns.count).first {
             scene.land(id,reason:"m10-native-layer-source")
             let column=scene.columns.first{$0.conversation.id==id}
@@ -433,7 +458,7 @@ import CoreText
         for hz in [60.0,120.0] {
             let layer=CALayer(),a=CAKeyframeAnimation(keyPath:"opacity");a.values=[0,1];a.keyTimes=[0,1];a.duration=0.42
             let originalRate=a.preferredFrameRateRange
-            M10ColumnExposure.start(Track(layer:layer,key:"shell.rate",animation:a),at:CACurrentMediaTime(),frameInterval:1/hz)
+            M10ColumnExposure.start(Track(layer:layer,key:"shell.rate",animation:a),at:VerificationClock.renderOrigin,frameInterval:1/hz)
             check(a.preferredFrameRateRange.minimum==originalRate.minimum && a.preferredFrameRateRange.maximum==originalRate.maximum && a.preferredFrameRateRange.preferred==originalRate.preferred,"exposure leaves the original CA scheduling hint unchanged")
         }
         // The old structure fails twice: native/masked subtree, and millions of padded pixels per copy.
@@ -504,7 +529,7 @@ import CoreText
                 let ink=CALayer();ink.anchorPoint = .zero;ink.frame=CGRect(origin:origin,size:CGSize(width:120,height:60))
                 ink.contentsScale=scale;ink.contents=image;ink.isGeometryFlipped=index==1;source.addSublayer(ink)
             }
-            let renderer=OffscreenRenderer(size:size,host:host,scale:scale),time=CACurrentMediaTime()+3600
+            let renderer=OffscreenRenderer(size:size,host:host,scale:scale),time=VerificationClock.renderOrigin
             host.isGeometryFlipped=flipped
             let before=renderer.render(at:time)
             var copies:[ObjectIdentifier:CALayer]=[:]

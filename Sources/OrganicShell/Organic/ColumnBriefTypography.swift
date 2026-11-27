@@ -6,6 +6,8 @@ import CoreText
 /// NativeBriefSurface / NativeMorphRenderPacket typography. Keep this at the Organic endpoint:
 /// shared TextBlock's fixed line boxes still belong to other surfaces.
 @MainActor enum ColumnBriefTypography {
+    static let stepHeight: CGFloat = 16
+
     struct Paragraph {
         var size:CGSize
         var lines:[(line:CTLine,point:CGPoint,range:NSRange,box:CGRect)]
@@ -53,9 +55,33 @@ import CoreText
         }
         return Paragraph(size:CGSize(width:min(w,ceil(ctLines.map{CGFloat(CTLineGetTypographicBounds($0,nil,nil,nil))}.max() ?? 0)),height:h),lines:lines)
     }
-    static func attributed(_ text:String,style:TextStyle,trailing:Bool=false)->NSAttributedString {
-        let p=NSMutableParagraphStyle();p.lineBreakMode = .byWordWrapping;p.alignment=trailing ? .right:.left
-        return NSAttributedString(string:text,attributes:[.font:style.font,.foregroundColor:style.color,.kern:style.kern,.paragraphStyle:p])
+    static func attributed(_ text: String, style: TextStyle, trailing: Bool = false,
+                           oneLine: Bool = false) -> NSAttributedString {
+        let styleParagraph = NSMutableParagraphStyle()
+        styleParagraph.lineBreakMode = oneLine ? .byTruncatingTail : .byWordWrapping
+        styleParagraph.alignment = trailing ? .right : .left
+        return NSAttributedString(string: text, attributes: [.font: style.font, .foregroundColor: style.color,
+                                                             .kern: style.kern, .paragraphStyle: styleParagraph])
+    }
+
+    static func paragraph(step quote: StepQuote, width: CGFloat) -> Paragraph? {
+        guard width >= 1, case .original(let raw, _) = quote else { return nil }
+        let display = raw.split(omittingEmptySubsequences: false, whereSeparator: { $0.isNewline })
+            .joined(separator: " ")
+        guard !display.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        let style = TextStyle(font: .systemFont(ofSize: 12, weight: .medium),
+                              color: Look.ink, lineHeight: stepHeight)
+        let text = attributed(display, style: style, oneLine: true)
+        let fitted = paragraph(text, width: width, oneLine: true)
+        guard let first = fitted.lines.first else { return nil }
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        let measured = CTLineGetTypographicBounds(first.line, &ascent, &descent, nil)
+        // A slot narrower than the ellipsis itself must stay blank.
+        guard measured <= Double(width) else { return nil }
+        let box = CGRect(x: 0, y: 0, width: width, height: stepHeight)
+        let point = CGPoint(x: 0, y: ((stepHeight + ascent - descent) / 2).rounded())
+        return Paragraph(size: box.size, lines: [(first.line, point, first.range, box)])
     }
     static func tokens(_ p:Paraphrase)->[(text:String,space:Bool,kept:Bool)] {
         let chars=Array(p.text);var starts:[Int:Int]=[:]
@@ -80,7 +106,7 @@ import CoreText
         return (Paragraph(size:CGSize(width:width,height:flow.height),lines:lines),measured.indices.map{CGRect(origin:flow.points[$0],size:measured[$0].size)},words.map(\.kept))
     }
     static func groups(_ part:BriefLayout.Part,scale:CGFloat)->[(image:CGImage,frame:CGRect,range:ClosedRange<Double>)] {
-        guard let p=part.paraphrase,let image=part.image else{return []}
+        guard part.kind == .lyric, let p = part.paraphrase, let image = part.image else { return [] }
         let style=Look.lyric(columnWidth:part.frame.width+40),n=narration(p,style:style,width:part.frame.width)
         var own=0,out:[(CGImage,CGRect,ClosedRange<Double>)]=[]
         for (i,r) in n.frames.enumerated() {
@@ -94,14 +120,31 @@ import CoreText
 
 extension BriefLayout {
     /// Preserve IDs, anchors and dots while replacing the old synthetic line boxes with the product's font metrics.
-    @MainActor init(product log:SummaryLog,width:CGFloat,columnWidth:CGFloat,scale:CGFloat,showsState:Bool,room:CGFloat?=nil) {
-        let old=BriefLayout(log,width:width,columnWidth:columnWidth,scale:scale,showsState:showsState,room:room,drawsText:false)
+    @MainActor init(product log: SummaryLog, width: CGFloat, columnWidth: CGFloat, scale: CGFloat,
+                    showsState: Bool, room: CGFloat? = nil, lastLineIsCurrent: Bool = true,
+                    rich: RichProjection? = nil) {
+        let old = BriefLayout(log, width: width, columnWidth: columnWidth, scale: scale, showsState: showsState,
+                              room: room, drawsText: false, lastLineIsCurrent: lastLineIsCurrent, rich: rich)
         var parts:[Part]=[],y:CGFloat=0
+        var richRows: [Int: RichRow] = [:]
         for line in 0..<old.lineCount {
             var rowBottom:CGFloat=0
+            let richRow = old.richRows[line]
+            var adjustment: CGFloat = 0
             for part in old.parts where part.line==line {
                 let gap:CGFloat = rowBottom==0 ? 0:(part.kind == .activity || part.kind == .state ? 7:3)
-                let top=y+rowBottom+gap
+                let top = richRow.map { y + (part.frame.minY - $0.top) + adjustment } ?? (y + rowBottom + gap)
+                if part.kind == .cover || part.kind == .step {
+                    var frame = part.frame
+                    frame.origin.y = top
+                    let image = part.stepQuote.flatMap {
+                        ColumnBriefTypography.paragraph(step: $0, width: frame.width)?.image(scale: scale)
+                    } ?? part.image
+                    parts.append(Part(id: part.id, anchor: part.anchor, kind: part.kind, frame: frame,
+                                      current: part.current, line: part.line, image: image, block: nil, dots: nil,
+                                      resourceID: part.resourceID, stepQuote: part.stepQuote))
+                    continue
+                }
                 var paragraph:ColumnBriefTypography.Paragraph?,block=part.block,dots=part.dots,x=part.frame.minX
                 if let text=part.block?.text {
                     let note=part.kind == .note,style=note ? Look.briefNote:old.lyricStyle
@@ -133,9 +176,15 @@ extension BriefLayout {
                 parts.append(Part(id:part.id,anchor:part.anchor,kind:part.kind,frame:CGRect(origin:CGPoint(x:x,y:top),size:size),current:part.current,line:part.line,
                                   answerID:part.answerID,paraphrase:part.paraphrase,image:image,block:block,dots:dots))
                 rowBottom=top-y+size.height
+                if richRow != nil { adjustment += size.height - part.frame.height }
+            }
+            if let richRow {
+                rowBottom = richRow.height + adjustment
+                richRows[line] = RichRow(top: y, height: rowBottom)
             }
             y+=rowBottom+(old.lyricStyle.font.pointSize*0.62).rounded()
         }
+        self.richRows = richRows
         self.parts=parts;lineCount=old.lineCount;lyricStyle=old.lyricStyle;height=old.lineCount==0 ? 0:y-(old.lyricStyle.font.pointSize*0.62).rounded()
     }
 }

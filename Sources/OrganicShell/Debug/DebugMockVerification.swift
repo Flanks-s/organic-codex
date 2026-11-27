@@ -57,6 +57,43 @@ import AppKit
         let scene = S4TuningHost(), binding = tools.bindTuning(to:scene)
         let panelController = tools.controller(.debug), panel = panelController.acquireContent() as! DebugPanelPage
         func tree(_ root: NSView) -> [NSView] { [root]+root.subviews.flatMap(tree) }
+        var resetCalls = 0
+        let resetPage = DebugPanelPage(session: tools.session, mockLaunch: true,
+                                       resetAction: { resetCalls += 1 }, schedule: { $0() })
+        let resetAll = tree(resetPage.view).compactMap { $0 as? DebugButton }.first { $0.title == "Reset All" }!
+        _ = resetAll.accessibilityPerformPress()
+        let notices = tree(resetPage.view).compactMap { $0 as? NSTextField }.map(\.stringValue)
+        check(notices.contains("Restarting with a fresh mock…"),
+              "Reset All at default tuning announces a fresh mock restart")
+        check(resetCalls == 1 && tools.session.tuning.snapshot == .defaults,
+              "Reset All at default tuning requests a restart")
+        let mockPage = DebugPanelPage(session: tools.session, mockLaunch: true,
+                                      resetAction: { resetCalls += 1 }, schedule: { $0() })
+        let mockButtons = tree(mockPage.view).compactMap { $0 as? DebugButton }
+        check(mockButtons.contains { $0.title == "At Rest" } && !mockButtons.contains { $0.title == "Rest" },
+              "browser rest scene is labelled At Rest")
+        let resetMock = mockButtons.first { $0.title == "Reset Mock Engine" }!
+        _ = tools.session.tuning.set(DebugTuningParameter.autoResponse.key, 0.8)
+        _ = resetMock.accessibilityPerformPress()
+        check(resetCalls == 2 && tools.session.tuning[.autoResponse] == 0.8,
+              "Reset Mock Engine requests a restart without changing tuning")
+        let changedPage = DebugPanelPage(session: tools.session, mockLaunch: true,
+                                         resetAction: { resetCalls += 1 }, schedule: { $0() })
+        let changedReset = tree(changedPage.view).compactMap { $0 as? DebugButton }.first { $0.title == "Reset All" }!
+        _ = changedReset.accessibilityPerformPress()
+        check(resetCalls == 3 && tools.session.tuning.snapshot == .defaults,
+              "Reset All restores changed tuning and requests a restart")
+        let livePage = DebugPanelPage(session: tools.session, mockLaunch: true,
+                                      resetAction: { resetCalls += 1 }, schedule: { $0() })
+        _ = livePage.view
+        store.usesLiveCore = true
+        livePage.refresh()
+        let liveButtons = tree(livePage.view).compactMap { $0 as? DebugButton }
+        let liveReset = liveButtons.filter { ["Reset All", "Reset Mock Engine"].contains($0.title) }
+        for button in liveReset { _ = button.accessibilityPerformPress() }
+        check(liveReset.count == 2 && liveReset.allSatisfy { !$0.isEnabled } && resetCalls == 3,
+              "live disables both reset buttons")
+        store.usesLiveCore = false
         let characterSlider = tree(panel.view).compactMap { $0 as? DebugSlider }.first { $0.accessibilityLabel() == DebugTuningParameter.mockCharsPerTick.label }!
         check(characterSlider.isEnabled,"S4 the real panel enables streamed characters for mock")
         characterSlider.set(37,notify:true)
@@ -117,6 +154,40 @@ import AppKit
         check(replay.totalTicks == ticks && replay.emitted == emitted,"S4 Live transition fences all old sleeps")
         binding.invalidate();tools.shutdown();await clock.finishAll()
         check(NSApp.windows.allSatisfy { !$0.isVisible },"S4 verification opens no windows")
+
+        let suite = "OrganicShell.DebugReset.Verification"
+        let defaults = UserDefaults(suiteName: suite)!
+        defaults.set("old", forKey: SavedWindow.key("mock"))
+        defaults.set("live", forKey: SavedWindow.key("live:example"))
+        defaults.set("settings", forKey: "settings.test")
+        let environment = ["ORGANIC_DEMO_AUTOPLAY": "8", "ORGANIC_ENABLE_FEATURES": "collapse"]
+        var opened = 0
+        var exited = 0
+        var received: [String] = []
+        var receivedEnvironment: [String: String] = [:]
+        var newInstance = false
+        let open: (URL, NSWorkspace.OpenConfiguration, @escaping @MainActor @Sendable (Bool) -> Void) -> Void = {
+            _, config, done in
+            opened += 1
+            received = config.arguments
+            receivedEnvironment = config.environment
+            newInstance = config.createsNewApplicationInstance
+            done(true)
+        }
+        DebugAppReset.perform(allowed: false, defaults: defaults, open: open, terminate: { exited += 1 })
+        check(opened == 0 && defaults.string(forKey: SavedWindow.key("mock")) == "old",
+              "reset rejects live without changing persisted state")
+        DebugAppReset.perform(allowed: true, defaults: defaults,
+                              original: ["--mock", "--demo-input", "scene", "--debug-panel"],
+                              environment: environment, open: open, terminate: { exited += 1 })
+        check(defaults.object(forKey: SavedWindow.key("mock")) == nil, "reset deletes mock windows")
+        check(defaults.string(forKey: SavedWindow.key("live:example")) == "live"
+              && defaults.string(forKey: "settings.test") == "settings", "reset preserves live and settings")
+        check(received == ["--mock", "--debug-panel", "--debug-reset"] && newInstance,
+              "reset removes input and launches a new instance with its marker")
+        check(receivedEnvironment == environment && opened == 1 && exited == 1 && DebugAppReset.restarting,
+              "reset preserves environment and exits once after opening")
+        defaults.removePersistentDomain(forName: suite)
     }
 }
 #endif

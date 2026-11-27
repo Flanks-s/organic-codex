@@ -12,6 +12,10 @@ import QuartzCore
         func wait(_ t:Double) {RunLoop.main.run(until:Date(timeIntervalSinceNow:max(0,t)))}
         let only=ProcessInfo.processInfo.environment["M1131_R5_CASE"] ?? "all"
         if only == "all" || only == "budget" {
+            // Debt #63: manual tickets only. The driver section below runs the real flight on real time,
+            // so the boundary must be back on the real clock before it starts (director #323).
+            let clock=ModeContentVerificationClock()
+            defer {clock.restore()}
             let host=NSView(frame:CGRect(x:0,y:0,width:1280,height:820))
             ModeContentWorkBoundary.verificationManualTickets=true
             defer {ModeContentWorkBoundary.cancel(in:host);ModeContentWorkBoundary.verificationManualTickets=false}
@@ -21,7 +25,7 @@ import QuartzCore
                     ModeContentWorkBoundary.schedule(in:host,interval:interval) {
                         budgets.append(ModeContentWorkBoundary.captureBudget())
                     }
-                    let now=CACurrentMediaTime()
+                    let now=clock.now
                     // A display callback may enter late; work still needs its measured CPU window.
                     ModeContentWorkBoundary.verificationDisplayTicket(timestamp:now-interval+delay,target:now+delay,interval:interval)
                     wait(0.001)
@@ -34,10 +38,10 @@ import QuartzCore
                 check(jobs <= (hz == 120 ? 43:29),"budget processes 165 ms within the bounded cycle count at \(hz) Hz")
                 facts.append(["kind":"budget","hz":hz,"budgetsMS":budgets.map {$0*1000},"workMS":165,"cycles":jobs,"wallMS":Double(jobs)*interval*1000])
                 var remaining=0.165,costs:[Double]=[],grants:[Double]=[],margins:[Double]=[],cycles=0
-                let workOrigin=CACurrentMediaTime()+0.01
+                let workOrigin=clock.now+0.01,workBegan=CACurrentMediaTime()+0.01
                 while remaining>0.00001,cycles<220 {
-                    wait(workOrigin+Double(cycles)*interval-CACurrentMediaTime())
-                    let stamp=CACurrentMediaTime(),target=stamp+interval*0.75
+                    wait(workOrigin+Double(cycles)*interval-clock.now)
+                    let stamp=clock.now,target=stamp+interval*0.75
                     ModeContentWorkBoundary.schedule(in:host,interval:interval) {
                         let began=CACurrentMediaTime(),grant=ModeContentWorkBoundary.captureBudget(at:began)
                         grants.append(grant*1000)
@@ -47,13 +51,15 @@ import QuartzCore
                         costs.append(cost*1000);margins.append((interval-max(0.002,interval*0.15)-cost)*1000)
                     }
                     ModeContentWorkBoundary.verificationDisplayTicket(timestamp:stamp-interval*0.25,target:target,interval:interval)
-                    let late=stamp+0.003;while CACurrentMediaTime()<late {}
+                    let late=CACurrentMediaTime()+0.003;while CACurrentMediaTime()<late {}
                     wait(0.001);cycles+=1
                 }
                 check(remaining<0.00001,"budget really executes all 165 ms at \(hz) Hz")
                 check(cycles <= (hz == 120 ? 44:30),"budget actual 165 ms work has bounded tickets at \(hz) Hz")
                 check(margins.allSatisfy {$0>=0},"budget every measured slice leaves the cycle commit reserve at \(hz) Hz")
-                facts.append(["kind":"work165","hz":hz,"cycles":cycles,"grantsMS":grants,"costsMS":costs,"marginsMS":margins,"remainingMS":remaining*1000,"measuredWallMS":(CACurrentMediaTime()-workOrigin)*1000])
+                facts.append(["kind":"work165","hz":hz,"cycles":cycles,"grantsMS":grants,
+                              "costsMS":costs,"marginsMS":margins,"remainingMS":remaining*1000,
+                              "measuredWallMS":(CACurrentMediaTime()-workBegan)*1000])
 
             }
         }

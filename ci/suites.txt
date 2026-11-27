@@ -1,0 +1,4 @@
+core !python3 tools/m11/core-4954-check.py "$out/core" --cache .core-gate
+panels-c !OC_ITEM_DIR="$out/work" OUT="$out" OC_JOB=ci python3 tools/m1140/c-check.py positive
+panels-d !OC_ITEM_DIR="$out/work" OUT="$out" OC_JOB=ci python3 tools/m1140/d-check.py edit-positive
+panels-window !OC_ITEM_DIR="$out/work" OUT="$out" OC_JOB=ci python3 tools/m1140/p3-check.py positive

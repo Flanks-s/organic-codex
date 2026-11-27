@@ -83,6 +83,10 @@ extension ColumnNode {
 
     func beginFullReflow(_ reflow: ColumnFullReflow) {
         fullReflow?.layer.removeFromSuperlayer();fullReflow?.overlayLayer?.removeFromSuperlayer();fullReflow = reflow
+        if reflow.target == nil {
+            transcriptClip.frame = reflow.area
+            shapeFade(transcriptClip.mask, reflow.area.size)
+        }
         if let overlay=reflow.overlayLayer {overlay.position=nativeArea.origin;inkMaterial.addSublayer(overlay)}
         transcriptClip.addSublayer(reflow.layer); transcript.opacity = 0; transcriptClip.opacity = 1
         if let bounds=reflow.clipBounds {
@@ -102,7 +106,7 @@ extension ColumnNode {
     func fullReflowTracks(_ reflow: ColumnFullReflow, timeline: Timeline, rects: [CGRect]) -> [Track] {
         var tracks = reflow.tracks(timeline)
         let bounds = rects.map { r -> NSValue in
-            let b=reflow.clipBounds ?? CGRect(origin:.zero,size:reflow.target.area.size)
+            let b=reflow.clipBounds ?? CGRect(origin:.zero,size:reflow.area.size)
             return NSValue(rect:CGRect(x:0,y:b.minY,width:r.width,height:b.height))
         }
         tracks.appendIf(timeline.track(transcriptClip, "bounds", bounds, smooth: true))
@@ -258,6 +262,7 @@ extension ColumnNode {
         let width: CGFloat, height: CGFloat, form: Double
         let hidden: Bool, island: Bool
         let revision: Int
+        let cover: Int
         let band: ClosedRange<CGFloat>?
         let imageToken: UInt
         let channel:Int
@@ -266,7 +271,11 @@ extension ColumnNode {
     /// Prepared and cached together with the immutable transition. Never bake or flush AppKit after its clock
     /// starts: that lost two display frames even after the expensive render-server subtree had been removed.
     func preparePresenceInk(snapshot s: Snapshot?, width: CGFloat, form f: Double, hideGoals: Bool, transcriptOverride: (image:CGImage,size:CGSize)? = nil, channel:M10ColumnMatte.Channel = .original) -> [M10ColumnTexture.Bitmap] {
-        let key=InkKey(snapshot:s?.key ?? applied,width:width,height:sceneHeight,form:f,hidden:hideGoals,island:island != nil,revision:s?.key.revision ?? applied?.revision ?? conversation.revision,band:cardBand,imageToken:transcriptOverride.map{CFHash($0.image)} ?? 0,channel:channel.rawValue)
+        let key = InkKey(snapshot: s?.key ?? applied, width: width, height: sceneHeight, form: f,
+                         hidden: hideGoals, island: island != nil,
+                         revision: s?.key.revision ?? applied?.revision ?? conversation.revision,
+                         cover: coverVersion, band: cardBand,
+                         imageToken: transcriptOverride.map { CFHash($0.image) } ?? 0, channel: channel.rawValue)
         if let cached=bakedInkCache[key] { exposureBakeMs=0;return cached }
         let began=CACurrentMediaTime()
         func material(_ image:CGImage?)->CGImage? {

@@ -18,6 +18,72 @@ import QuartzCore
         _ = NSApplication.shared
         let output = URL(fileURLWithPath: CommandLine.arguments.dropFirst().first ?? "runs/m10-dock")
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        if CommandLine.arguments.contains("--tide-round11") {
+            try DockTideRound11Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round11: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round10") {
+            try DockTideRound10Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round10: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round9") {
+            try DockTideRound9Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round9: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round8") {
+            try DockTideRound8Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round8: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round7") {
+            try DockTideRound7Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round7: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round6") {
+            try DockTideRound6Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round6: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round5") {
+            try DockTideRound5Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round5: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round4") {
+            try DockTideRound4Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round4: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round3") {
+            try DockTideRound3Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round3: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-round2") {
+            try DockTideRound2Verification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 round2: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
+        if CommandLine.arguments.contains("--tide-shape") {
+            try DockTideVerification.run(to:output,check:check)
+            try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
+            print("M11.34 material: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
         if CommandLine.arguments.contains("--drag-neighbors") {
             try DockDragNeighborsVerification.run(to:output,check:check)
             try JSONSerialization.data(withJSONObject:["checks":checks,"findings":findings],options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("verification.json"))
@@ -116,6 +182,11 @@ import QuartzCore
         if CommandLine.arguments.contains("--gaussian") {try M10DockGaussianVerification.run(output);return}
         if CommandLine.arguments.contains("--switches") {switches();print("M10 Dock switches: \(checks) checks, \(findings.count) findings");exit(findings.isEmpty ? 0:1)}
         if CommandLine.arguments.contains("--scene") {exit(SelfTest.run(to:output.path,size:CGSize(width:1080,height:760)))}
+        if CommandLine.arguments.contains("--peek-island") || CommandLine.arguments.contains("--peek-perf") {
+            try await peekIsland(output:output)
+            print("M11.25: \(checks) checks, \(findings.count) findings")
+            exit(findings.isEmpty ? 0:1)
+        }
         if CommandLine.arguments.contains("--ordinary") {try ordinaryFrames(output:output);print("ordinary pixel control: \(checks) checks, \(findings.count) findings");exit(findings.isEmpty ? 0:1)}
         if let item=["--m1121","--m1122","--m1123"].first(where:{CommandLine.arguments.contains($0)}) {
             switch item {
@@ -378,16 +449,16 @@ import QuartzCore
         dock.moveHeld(to:CGPoint(x:700,y:100));clock+=1/60;dock.heldFrame(at:clock)
         check(dock.composerMotion.activeCount>0,"actual Dock callback treats held composer")
         dock.resetMotion();dock.release()
-        let paint=PeekBarFace(frame:CGRect(x:0,y:0,width:300,height:48))
-        paint.configure(seed[0],badge:.init(tone:.red,symbol:.count(3)),size:CGSize(width:300,height:48))
-        let glyphOnly=paint.glyphBitmap(scale:2)
-        check(glyphOnly.width==600,"caption glyph snapshot backing size")
-        let plain=NativeViewBitmap.capture(paint,scale:2)
-        paint.glyphExposureActive=true
-        let plate=NativeViewBitmap.capture(paint,scale:2)
-        check(plate.dataProvider?.data != plain.dataProvider?.data,"caption withdraws glyphs but retains solid plate")
-        paint.glyphExposureActive=false
-        check(NativeViewBitmap.capture(paint,scale:2).dataProvider?.data==plain.dataProvider?.data,"caption resumes exact native pixels")
+        let paint=NativeComposer(conversation:seed[0])
+        paint.targetWidth=300;paint.frame=CGRect(x:0,y:0,width:300,height:48)
+        let reply=PeekReplyHost(id:seed[0].id,composer:paint,size:paint.bounds.size)
+        reply.addSubview(paint);reply.install();paint.layoutSubtreeIfNeeded()
+        let plain=NativeViewBitmap.capture(reply,scale:2)
+        check(plain.width==600,"reply native snapshot backing size")
+        check(reply.isCurrent && paint.placeholder=="Reply\u{2026}",
+              "reply retains native input and temporary placeholder")
+        reply.retire(returning:false)
+        check(!reply.isCurrent && paint.hostInteraction==nil,"reply withdraws native hit and interaction on retirement")
         let caption=NativeLabel(labelWithString:"Outgoing words")
         caption.frame=CGRect(x:0,y:0,width:180,height:24);caption.alphaValue=0
         let glyphCache=M10DockGlyph();glyphCache.prepare(caption,key:"zero-alpha",scale:2)

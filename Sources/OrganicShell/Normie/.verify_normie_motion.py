@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py normie-motion, native. Kept, not deleted (#181).
 """M10-C windowless checks. Compiles to /tmp; never launches the app or any backend."""
 from pathlib import Path
 import argparse

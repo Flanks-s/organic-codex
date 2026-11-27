@@ -97,6 +97,12 @@ import AppKit
             let c=store.conversation("A")!,other=store.conversation("B")!
             let composer=NativeComposer(conversation:c,store:store)
             composer.sendShortcut = .commandReturn;composer.onStop={};composer.verificationScale=scale
+            let defaultComposer=NativeComposer(conversation:c,store:store)
+            defaultComposer.sendShortcut = AutoScene.sendShortcut
+            _ = defaultComposer.prepareNormieLayout(width:768,detailHeight:760)
+            check(defaultComposer.placeholder == "Message Codex — ↩ to send", "Default Normie Return placeholder")
+            check(defaultComposer.textView.accessibilityHelp()?.contains("Shift Return") == true,
+                  "Default Normie accessibility describes Shift Return")
             let editor=composer.textView,undo=editor.undoManager
             let canvas=NativeComposerM9Canvas(frame:CGRect(x:0,y:0,width:768,height:120))
             canvas.addSubview(composer)

@@ -11,10 +11,48 @@ import AppKit
     private let devicePicker = NewChatDevicePicker()
     private var observation: UUID?
     private var modeContentEpochFrozen=false,modeContentRefreshPending=false
+    private var referenceHostActive = false
+    private weak var pendingSources: Conversation?
+    private var referenceAdmission: Bool { isNormie && !modeContentEpochFrozen && !isCollapsed && referenceHostActive }
+    private func reconcileReferences() {
+        if pendingSources !== selectedConversation { pendingSources = nil }
+        referenceRouting.reconcile(); inspector.referenceInputActive = referenceAdmission
+        if let pendingSources, referenceAdmission {
+            Task { [weak self, weak pendingSources] in
+                guard let self, let pendingSources, self.pendingSources === pendingSources, self.referenceAdmission,
+                      self.selectedConversation === pendingSources else { return }
+                self.pendingSources = nil; self.showSources()
+            }
+        }
+    }
+    private lazy var referenceRouting: TranscriptReferenceRouting = {
+        let route = TranscriptReferenceRouting()
+        route.selected = { [weak self] in self?.selectedConversation }
+        route.admitted = { [weak self] in
+            guard let self else { return false }
+            return self.referenceAdmission
+        }
+        route.web = { [weak self] url in self?.actions.referenceWeb?(url) }
+        route.preview = { [weak actions] target, c in
+            await actions?.referencePreview?(target, c) ?? .init(state: .unavailable, message: "No registered preview is available for this target.")
+        }
+        route.show = { [weak self] c, source, result in
+            guard let self, self.selectedConversation === c else { return }
+            self.inspector.show(c); self.inspector.showReference(source, result: result); self.requestInspector(shown: true)
+        }
+        return route
+    }()
+    func openReference(_ c: Conversation, _ request: TranscriptReferenceRequest) { pendingSources = nil; referenceRouting.open(c, request) }
+    func showSources() {
+        referenceRouting.revoke()
+        guard referenceAdmission else { pendingSources = selectedConversation; return }
+        inspector.show(selectedConversation); inspector.showSources(); requestInspector(shown: true)
+    }
     func setModeContentEpochFrozen(_ frozen:Bool) {
         modeContentEpochFrozen=frozen
         detail.setModeContentInputBlocked(frozen)
         if !frozen,modeContentRefreshPending {modeContentRefreshPending=false;refresh()}
+        reconcileReferences()
     }
     private func storePresentationChanged() {
         if NormieIdleMotionCapture.orreryEnabled {detail.invalidateIdleMotionPictures()}
@@ -45,7 +83,7 @@ import AppKit
     func refreshComposerPresentationBinding(){detail.republishComposerPresentation()}
     var onNotice: ((String) -> Void)?
     var account = NormieAccount() { didSet { sidebar.account = account;if account != oldValue,sidebar.isViewLoaded {NotificationCenter.default.post(name:Notification.Name("Organic.ModePreparationInputsChanged"),object:sidebar.view)} } }
-    var sidebarVisible = true
+    var sidebarVisible = true { didSet { updateSidebarPresentation() } }
     var inspectorVisible = false { didSet { updateInspectorPresentation() } }
     /// The window owns the split when it mounts our three controllers separately. State is committed before this
     /// callback; the host should show/hide its inspector, rather than toggle it blindly. Nil uses our standalone split.
@@ -53,10 +91,13 @@ import AppKit
     var isNormie = true { didSet {
         if !isNormie { devicePicker.close() }
         if NormieIdleMotionCapture.orreryEnabled {detail.setModePresentationActive(isNormie)}
+        updateSidebarPresentation()
         updateInspectorPresentation()
+        reconcileReferences()
     } }
-    var isCollapsed = false { didSet { updateInspectorPresentation() } }
+    var isCollapsed = false { didSet { updateInspectorPresentation(); reconcileReferences() } }
     private func updateInspectorPresentation() { inspector.presentationActive = inspectorVisible && isNormie && !isCollapsed }
+    private func updateSidebarPresentation() { sidebar.presentationActive = isNormie && sidebarVisible }
     var isTerminalShown:Bool{detail.isTerminalShown}
     var onTerminalShownChange:((Bool)->Void)?
     var terminalMenuTitle:String{isTerminalShown ? "Hide Terminal":"Show Terminal"}
@@ -168,6 +209,14 @@ import AppKit
         detail.onTerminalShownChange={[weak self] value in self?.onTerminalShownChange?(value)}
         detail.onUndo = { [weak self] in _ = self?.undoArchive() }
         detail.onReview = { [weak self] in self?.reviewChanges() }
+        detail.onReference = { [weak self] c, request in self?.openReference(c, request) }
+        detail.onReferenceHostState = { [weak self] c, active in
+            guard let self, self.selectedConversation === c else { return }
+            self.referenceHostActive = active; self.reconcileReferences()
+        }
+        inspector.onReference = { [weak self] c, request in self?.openReference(c, request) }
+        inspector.onReferenceDismiss = { [weak self] in self?.pendingSources = nil; self?.referenceRouting.revoke() }
+        inspector.onSourcesRequest = { [weak self] in self?.showSources() }
         detail.onContextChange = { [weak self] value in self?.newContext = value }
         detail.onSelectConversation = { [weak self] id in _ = self?.select(id) }
         detail.onConfigureComposer = { [weak self] composer, c, token in self?.bindComposer(composer, conversation: c, token: token) }
@@ -190,6 +239,7 @@ import AppKit
         sidebarModel.refresh(); refreshDetail()
     }
     private func refreshDetail() {
+        reconcileReferences()
         // The inactive mode has no native lease to refresh. Its next admission refreshes the selected
         // conversation explicitly; streaming deltas only invalidate its optional motion resources.
         if NormieIdleMotionCapture.orreryEnabled,!isNormie {return}
@@ -349,6 +399,7 @@ import AppKit
         inspector.show(selectedConversation); inspector.showChanges(); requestInspector(shown: true)
     }
     func requestInspector(shown: Bool) {
+        if !shown { pendingSources = nil; referenceRouting.revoke() }
         guard !shown || isNormie else { return }
         if shown { inspector.loadViewIfNeeded() }
         inspectorVisible = shown

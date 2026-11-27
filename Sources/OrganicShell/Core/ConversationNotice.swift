@@ -47,7 +47,8 @@ enum ConversationNoticeAction: Equatable, Sendable {
 
 struct ConversationNotice: Equatable, Sendable {
     enum Kind: String, Equatable, Sendable {
-        case command, step, spawn, finish, tests, approval, question, retryingError, stoppedError, done, context, compacted, reply
+        case command, step, plan, spawn, finish, tests, approval, question, retryingError, stoppedError, done
+        case context, compacted, reply
     }
     struct Button: Equatable, Sendable {
         var title: String
@@ -56,6 +57,7 @@ struct ConversationNotice: Equatable, Sendable {
     var id: Int = 0
     var kind: Kind
     var text: String
+    var turnID:String?
     var requestID: String?
     var request: JSONValue = .null
     var workspace: String?
@@ -70,7 +72,7 @@ struct ConversationNotice: Equatable, Sendable {
     var hold: Double {
         switch kind {
         case .command, .done: 3
-        case .step, .tests, .context, .compacted: 2.4
+        case .step, .plan, .tests, .context, .compacted: 2.4
         case .spawn: 2
         case .finish: 2.2
         case .approval, .question: 7
@@ -104,6 +106,8 @@ struct ConversationNoticeFeed {
     private var testProgress: Double?
     private var terminalStatus: String?
     private var satelliteStates: [String: Bool]?
+    private var planTurn:String?
+    private var planCompleted=0,planTotal=0
 
     private mutating func emit(_ notice: ConversationNotice) {
         serial += 1
@@ -121,7 +125,11 @@ struct ConversationNoticeFeed {
             guard turn != lastTurnID else { return }
             lastTurnID = turn; terminalTurnID = nil; terminalStatus = nil
             startedAt = event.time ?? Date().timeIntervalSince1970; endedAt = nil; testProgress = nil; satelliteStates = [:]
+            planTurn=turn
+            planCompleted=0
+            planTotal=0
             emit(.init(kind: .command, text: "Working"))
+            emitPlan(in:c)
         case "turn/completed":
             guard let turn, terminalTurnID != turn else { return }
             terminalTurnID = turn; endedAt = event.time ?? Date().timeIntervalSince1970; testProgress = nil
@@ -155,7 +163,7 @@ struct ConversationNoticeFeed {
                 if let last = lines.last { journal[index].text = String(last.suffix(240)) }
             }
         case "turn/plan/updated":
-            if !c.plan.isEmpty { emit(.init(kind: .step, text: "Plan steps \(c.plan.filter(\.done).count)/\(c.plan.count) complete")) }
+            emitPlan(in:c)
         case "core/approvalRequested":
             if let id = p["approvalId"]?.stringValue,
                let notice = Self.pending(in: c).first(where: { $0.requestID == id }) { emit(notice) }
@@ -181,6 +189,18 @@ struct ConversationNoticeFeed {
         }
     }
 
+    @MainActor private mutating func emitPlan(in c:Conversation) {
+        let facts=c.phaseFacts
+        guard !facts.isReplay,facts.total>0 else {return}
+        guard planTurn != facts.turnID || planCompleted != facts.completed || planTotal != facts.total else {return}
+        planTurn=facts.turnID
+        planCompleted=facts.completed
+        planTotal=facts.total
+        let base="Plan \(facts.completed)/\(facts.total)"
+        let step=c.plan.first(where:{!$0.done})?.title.trimmingCharacters(in:.whitespacesAndNewlines) ?? ""
+        emit(.init(kind:.plan,text:step.isEmpty ? base : base+" · "+step,turnID:facts.turnID))
+    }
+
     @MainActor func snapshot(in c: Conversation) -> ConversationNoticeSnapshot {
         .init(journal: journal, pending: Self.pending(in: c), running: c.running, startedAt: startedAt, endedAt: endedAt,
               progress: testProgress, terminalStatus: terminalStatus, turnID: lastTurnID)
@@ -189,6 +209,9 @@ struct ConversationNoticeFeed {
     /// History establishes a baseline without producing arrivals. Keep the journal cursor monotonic.
     @MainActor mutating func restore(in c: Conversation, started: Double? = nil, ended: Double? = nil,
                                      confirmedTurn: String? = nil, status: String? = nil) {
+        planTurn=c.activeTurnID ?? confirmedTurn
+        planCompleted=c.plan.filter(\.done).count
+        planTotal=c.plan.count
         if let active=c.activeTurnID {
             // Metadata is usable only when its source identity matches the merged active turn.
             let started = confirmedTurn == active ? started : nil

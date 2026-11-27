@@ -155,11 +155,22 @@ typealias SheetWindowFactory = @MainActor (SheetWindowConfiguration, @escaping @
 }
 
 /// Product Design/Spinner.swift: AppKit's render-server animation, not a Swift timer or a textual ellipsis.
-@MainActor private final class SheetHistorySpinner:NSProgressIndicator {
+@MainActor private final class SheetHistorySpinner: NSProgressIndicator, AmbientSpinner {
     private var animating=false
+    private var running = false
     init(size:NSControl.ControlSize) { super.init(frame:.zero);style = .spinning;isIndeterminate=true;isDisplayedWhenStopped=false;usesThreadedAnimation=true;controlSize=size;setAccessibilityElement(false) }
     required init?(coder:NSCoder) { fatalError("init(coder:) has not been implemented") }
-    func setRunning(_ value:Bool) { guard animating != value else { return };animating=value;if value { startAnimation(nil) } else { stopAnimation(nil) } }
+    func setRunning(_ value: Bool) {
+        running = value
+        refreshAmbientSpinner()
+    }
+    func refreshAmbientSpinner() {
+        isDisplayedWhenStopped = running
+        let moving = running && !isHiddenOrHasHiddenAncestor && canAnimateSpinner
+        guard animating != moving else { return }
+        animating = moving
+        if moving { startAnimation(nil) } else { stopAnimation(nil) }
+    }
     override func draw(_ dirtyRect:NSRect) { super.draw(dirtyRect) }
     override func hitTest(_ point:NSPoint)->NSView? { nil }
 }
@@ -172,6 +183,7 @@ typealias SheetWindowFactory = @MainActor (SheetWindowConfiguration, @escaping @
     var onDismiss: ((String) -> Void)?
     var resolveIdentity: (Conversation) -> OrbIdentity = { .assigned($0.identityIndex) }
     var openIDs: Set<String> { Set(entries.keys) }
+    var ambientWindows: [NSWindow] { entries.values.compactMap { $0.history.window } }
     init(factory: @escaping SheetWindowFactory = { SheetAppKitWindow(configuration: $0, onClose: $1) }) { self.factory = factory }
     isolated deinit { for entry in entries.values { entry.handle.dismiss() } }
     func history(subagentID: String) -> SheetSubAgentHistory? { entries[subagentID]?.history }
@@ -188,6 +200,7 @@ typealias SheetWindowFactory = @MainActor (SheetWindowConfiguration, @escaping @
             guard let self, self.entries[subagentID]?.generation == generation else { return }
             self.entries.removeValue(forKey: subagentID); self.onDismiss?(subagentID)
         }
+        handle.host.window?.setSpinnerAmbient(false)
         history.frame = handle.host.bounds; history.autoresizingMask = [.width, .height]; handle.host.addSubview(history); history.layoutSubtreeIfNeeded()
         entries[subagentID] = Entry(parentID: parent.id, generation: generation, handle: handle, history: history)
         handle.present(at: screenPoint); onOpen?(subagentID); return true

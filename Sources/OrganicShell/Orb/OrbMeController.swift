@@ -54,7 +54,10 @@ struct OrbMeHoverState {
         }
         if model.organic {
             _=action("New Chat","square.and.pencil",.newChat); _=action("Show Sidebar","sidebar.left",.showSidebar)
-            _=action("Collapse to Side","rectangle.righthalf.inset.filled",.collapse); menu.addItem(.separator())
+            if OrganicFeatureAvailability.current.collapse {
+                _ = action("Collapse to Side", "rectangle.righthalf.inset.filled", .collapse)
+            }
+            menu.addItem(.separator())
         }
         menu.addItem(.sectionHeader(title:model.name+" · "+model.plan))
         _=action("Profile","person.crop.circle",.profile)

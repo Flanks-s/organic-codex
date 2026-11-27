@@ -318,6 +318,8 @@ struct AutoLayout: Equatable {
     var draftColumn: CGRect?, draftBar: CGRect?
     /// Shell v2: this is Focused or Split's arrangement (FocusLayout), where every column is full at its own width.
     var focused = false
+    /// Explicit two-input projection. Ordinary Auto and single Focused formulas remain unchanged.
+    var separateInputs = false
 
     /// Peek (2026-10-24 review r3): the model picker's surface, a blur halo with the content floating on it, right above
     /// the orb. When the column above the orb is a brief, the halo takes that brief's frame. When it is the full column

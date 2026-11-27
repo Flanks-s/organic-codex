@@ -31,6 +31,8 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
     var onSaveEndpoint:((URL) async throws -> Void)?
     var onOpenLocal:((URL) async throws -> Void)?
     var onInstallSkillFolder:((URL) async throws -> JSONValue)?
+    weak var sidechats: SidechatRuntime?
+    var confirmSidechatClosure: (@MainActor ([SidechatRuntime.CloseTarget]) async -> Bool)?
     private var reconnectAction:(() async throws -> Void)?
     private var client:(any CoreTransport)?
     private weak var runtime:(any ConversationRuntime)?
@@ -92,6 +94,7 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
         let withdrawn=Dictionary(uniqueKeysWithValues:snapshots.keys.map{($0,JSONValue.null)})
         generation+=1;for task in notificationTasks.values{task.cancel()};notificationTasks=[:]
         self.client=client; self.runtime=runtime; self.service=service; endpointIdentity=endpoint
+        sidechats = (runtime as? LiveConversationRuntime)?.sidechats
         reconnectAction=reconnect; snapshots=[:]; errors=[:]; busy=[]; pendingLoginID=nil; notice=nil
         paneVersions=[:];resourceVersions=[:];completedLogins=[:];asynchronousErrors=[:];deliveredNotifications=[];deliveryOrder=[]
         notificationPermission="Not checked"
@@ -213,7 +216,15 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
         busy.insert("write"); errors["write"]=nil; onChange?()
         defer { if epoch == generation { busy.remove("write"); onChange?() } }
         var values:[String:JSONValue]=[:],message:String?,browser:String?
-        func rpc(_ method:String,_ params:JSONValue) async throws -> JSONValue { try validate(operation.scope,epoch:epoch); return try await client.rpc(method,params:params.objectValue ?? [:]) }
+        func rpc(_ method: String, _ params: JSONValue = [:]) async throws -> JSONValue {
+            func qualify() throws { try validate(operation.scope, epoch: epoch) }
+            try qualify()
+            if SidechatRuntime.refreshMethods.contains(method), let sidechats, sidechats.guardsSettings {
+                return try await sidechats.refreshSettings(method, params: params, qualify: qualify,
+                                                           confirm: confirmSidechatClosure)
+            }
+            return try await client.rpc(method, params: params.objectValue ?? [:])
+        }
         func archiveAcknowledged(_ id:String,_ archived:Bool) throws {
             try validate(operation.scope,epoch:epoch)
             if let store=runtime?.store,let conversation=store.backendConversation(id) {
@@ -231,7 +242,7 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
                 if let version=user?["version"] { args["expectedVersion"]=version }
             }
             try validate(operation.scope,epoch:epoch)
-            _ = try await client.rpc("config/batchWrite",params:args)
+            _ = try await rpc("config/batchWrite", .object(args))
             values["config"]=try await client.rpc("config/read",params:["includeLayers":true])
         }
         func edits(_ key:String,_ value:JSONValue) -> JSONValue { ["edits":[["keyPath":.string(key),"value":value,"mergeStrategy":"upsert"]],"reloadUserConfig":true] }
@@ -246,7 +257,9 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
                 guard let id=p["loginId"]?.stringValue ?? pendingLoginID else { throw CoreWire.failure("There is no pending sign-in.") }
                 _ = try await rpc("account/login/cancel",["loginId":.string(id)]); values["login"] = .null
             case .logout:
-                _ = try await client.rpc("account/logout"); values["account"]=try await client.rpc("account/read"); values["limits"] = .null
+                _ = try await rpc("account/logout")
+                values["account"] = try await client.rpc("account/read")
+                values["limits"] = .null
             case .configWrite: try await saveConfig(p); message="Saved by Core; new defaults apply to new chats."
             case .skillWrite: _ = try await rpc("skills/config/write",p); values["skills"]=try await client.request("POST",path:"/app-server/skills/list",body:["forceReload":true])
             case .skillInstall:
@@ -270,7 +283,8 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
             case .mcpWrite:
                 guard let name=p["name"]?.stringValue,!name.isEmpty,let settings=p["values"]?.objectValue else { throw CoreWire.failure("MCP name and values are required.") }
                 try await saveConfig(edits("mcp_servers",.object([name:.object(settings)])))
-                _ = try await client.rpc("config/mcpServer/reload"); values["mcp"]=try await paginated("mcpServerStatus/list",client:client)
+                _ = try await rpc("config/mcpServer/reload")
+                values["mcp"] = try await paginated("mcpServerStatus/list", client: client)
             case .mcpLogin:
                 let result=try await rpc("mcpServer/oauth/login",p); browser=result["authorizationUrl"]?.stringValue
                 guard let browser,let url=URL(string:browser),["http","https"].contains(url.scheme ?? "") else { throw CoreWire.failure("Core returned no authorization URL.") }
@@ -305,10 +319,17 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
                 values["archived"]=try await client.rpc("thread/list",params:["archived":true,"limit":50,"sortKey":"updated_at"])
             case .archiveAll:
                 let listing=try await paginated("thread/list",client:client,params:["archived":false])
-                for thread in listing["data"]?.arrayValue ?? [] {
-                    guard let id=thread["id"]?.stringValue else { continue }
-                    _ = try await rpc("thread/archive",["threadId":.string(id)])
-                    try archiveAcknowledged(id,true)
+                let ids = (listing["data"]?.arrayValue ?? []).compactMap { $0["id"]?.stringValue }
+                @MainActor func archive() async throws {
+                    for id in ids {
+                        _ = try await rpc("thread/archive", ["threadId": .string(id)])
+                        try archiveAcknowledged(id, true)
+                    }
+                }
+                if let sidechats {
+                    try await sidechats.withArchive(Set(ids), confirm: confirmSidechatClosure, commit: archive)
+                } else {
+                    try await archive()
                 }
                 values["archived"]=try await client.rpc("thread/list",params:["archived":true,"limit":50])
             case .loadArchived:
@@ -338,6 +359,8 @@ enum CoreNotificationDeliveryResult:Equatable,Sendable {
             snapshots.merge(values) { _,new in new };notice=message
             publish(.init(snapshots:values,notice:message,clearedErrors:cleared))
             return .init(snapshots:values,notice:message,browserURL:browser)
+        } catch is CancellationError {
+            return .init()
         } catch {
             if epoch == generation { errors["write"]=error.localizedDescription }; throw error
         }

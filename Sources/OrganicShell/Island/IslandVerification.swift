@@ -18,6 +18,37 @@ import ObjectiveC
         let dragProvider=IslandDragVerificationProvider(frame:dragCanvas.bounds)
         let dragHeader=HeaderIsland();dragHeader.configure(.init(id:"drag",title:"Drag source",columnWidth:600,ambient:false))
         dragCanvas.addSubview(dragHeader)
+        let realHeader: AnyObject = dragHeader
+        let holdSource = realHeader as? any HeaderIslandHoldSource
+        check(holdSource != nil, "real header exposes the shared hold ledger")
+        if let holdSource {
+            let first = NSObject()
+            let second = NSObject()
+            let role = HeaderIslandHold.Role.interaction
+            let resumeFirst = holdSource.headerHolds.suspend([role], by: first)
+            let b = holdSource.headerHolds.claim(role, by: second, writes: [.interaction])
+            check(b != nil && !dragHeader.hostPresentation.acceptsInput && !dragHeader.planetButton.participates,
+                  "holds suspend real header and planet input")
+            resumeFirst()
+            check(!dragHeader.hostPresentation.acceptsInput, "one release preserves another hold")
+            if let b { _ = holdSource.headerHolds.release(b) }
+            check(dragHeader.hostPresentation.acceptsInput, "last release restores header input")
+            let planet = HeaderIslandHold.Role.planet
+            if var pose = holdSource.headerHoldOriginalPlacement(for: planet) {
+                pose.frame.origin.x += 20
+                let moved = holdSource.headerHolds.claim(planet, by: first, writes: [.geometry], initial: pose)
+                let heldFrame = dragHeader.orb.glassView.frame
+                dragHeader.configure(.init(id: "drag", title: "Changed title", columnWidth: 500, ambient: false))
+                check(dragHeader.orb.glassView.frame == heldFrame, "configure preserves held planet geometry")
+                if let moved { _ = holdSource.headerHolds.release(moved) }
+            } else {
+                check(false, "real planet offers an original placement")
+            }
+            let stale = holdSource.headerHolds.claim(role, by: first, writes: [.interaction])
+            dragHeader.configure(.init(id: "replacement", title: "Replacement", columnWidth: 600, ambient: false))
+            check(stale.map { !holdSource.headerHolds.validates($0) } == true, "target change revokes holds")
+            dragHeader.configure(.init(id: "drag", title: "Drag source", columnWidth: 600, ambient: false))
+        }
         check(dragHeader.orbDragProvider() == nil,"unbound header keeps its original Customize path")
         dragCanvas.addSubview(dragProvider)
         check(dragHeader.orbDragProvider() === dragProvider,"header discovers only its shared-canvas provider")
@@ -102,7 +133,7 @@ import ObjectiveC
             check(key.symbol == ConversationIdentity.symbols[draw.symbol.rawValue] && key.tint == ConversationIdentity.tints[draw.tint.rawValue],"Core and Orb identity key \(n)")
         }
 
-        let holds:[Double]=[1.5,2.4,2,2.2,2.4,2.4,3,4,4,5]
+        let holds:[Double]=[1.5,2.4,2,2.2,2.4,2.4,3,4,4,5,2.4]
         for (i,kind) in HeaderIslandEvent.Kind.allCases.enumerated() {
             let e=HeaderIslandEvent(kind:kind,text:kind == .finish ? "Finished":"Event",satellite:"last",at:10)
             check(e.hold == holds[i],"\(kind) product hold")
@@ -125,7 +156,11 @@ import ObjectiveC
         check(merge.lobeRevision == revision && merge.activity?.text == "merged" && merge.activity?.at == 0,"same kind within 250ms updates text without another lobe")
         merge.tick(now:2.41); check(merge.activity != nil,"merged event renews hold")
         merge.tick(now:2.6); check(merge.activity == nil,"merged event eventually expires")
-        let routes:[HeaderIslandEvent.Kind:HeaderIslandRoute]=[.changes:.panel(.changes),.context:.panel(.context),.compacted:.panel(.context),.spawn:.panel(.subAgents),.finish:.satellite("last"),.done:.transcript,.error:.transcript,.approval:.transcript,.question:.transcript,.working:.transcript]
+        let routes:[HeaderIslandEvent.Kind:HeaderIslandRoute]=[
+            .changes:.panel(.changes),.context:.panel(.context),.compacted:.panel(.context),
+            .spawn:.panel(.subAgents),.finish:.satellite("last"),.done:.transcript,.error:.transcript,
+            .approval:.transcript,.question:.transcript,.working:.transcript,.plan:.transcript
+        ]
         for (kind,route) in routes { check(HeaderIslandEvent(kind:kind,text:"",satellite:"last",at:0).route == route,"\(kind) click route") }
         var a=HeaderIslandSignals(),b=a; b.running=true
         check(HeaderIslandEvent.between(a,b,contextArmed:true,now:0)?.kind == .working,"working edge")

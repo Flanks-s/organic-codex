@@ -55,12 +55,12 @@ import AppKit
         scene.pointerDragged(point)
 
     }
-    @discardableResult func end(at point:CGPoint)->Bool {
+    @discardableResult func end(at point:CGPoint,performClick:Bool=true)->Bool {
         guard isActive,let scene else {stopInput();return false}
         let click=phase == .pressed && clickRect.contains(point),island=source
         let dragged=scene.pointerUp(point)
         stopInput()
-        if !dragged,click,!scene.pressCancelled {island?.planetButton.performClick(nil)}
+        if performClick,!dragged,click,!scene.pressCancelled {island?.planetButton.performClick(nil)}
         return dragged
     }
     func cancel() {

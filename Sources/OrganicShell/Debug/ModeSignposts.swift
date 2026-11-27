@@ -197,9 +197,20 @@ import os.signpost
     }
 }
 
-/// Uses AppKit's original event and shortcut dispatch. No global monitor or CGEvent injection.
+@MainActor protocol ForegroundEscapeRouting: NSWindowDelegate {
+    func routeForegroundEscape(_ event: NSEvent) -> Bool
+}
+
+/// Uses AppKit's event and shortcut dispatch. No global monitor or CGEvent injection.
 @MainActor final class ModeProbeApplication: NSApplication {
     override func sendEvent(_ event: NSEvent) {
-        ModeSignposts.dispatch(event) { super.sendEvent(event) }
+        ModeSignposts.dispatch(event) {
+            // The window's foreground modal takes Escape before AppKit invokes local monitors.
+            if event.type == .keyDown, event.keyCode == 53,
+               (event.window?.delegate as? any ForegroundEscapeRouting)?.routeForegroundEscape(event) == true {
+                return
+            }
+            super.sendEvent(event)
+        }
     }
 }

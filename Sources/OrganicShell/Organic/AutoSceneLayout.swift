@@ -8,14 +8,38 @@ extension AutoScene {
     struct Scheme: Equatable {
         var mode = Mode.auto
         var split: [String] = []
+        var splitPresentationVersion = SplitPresentationLayout.version
         var left: [String] = [], right: [String] = []
         /// Auto with New Chat's draft open (WindowModel.composingNew): the draft is the full column at the right.
         var draft = false
         /// Members parked right of me (WindowModel.parked): the briefs the draft squeezed out, kept there by its send.
         var parked: [String] = []
+
+        func balanced(members: [String]) -> Scheme {
+            guard mode == .focused else { return self }
+            var result = self
+            let valid = Set(members).subtracting(split)
+            var seen = Set<String>()
+            var screen = (Array(left.reversed()) + parked + right).filter {
+                valid.contains($0) && seen.insert($0).inserted
+            }
+            for id in members where valid.contains(id) && seen.insert(id).inserted {
+                let count = screen.count
+                if count / 2 < count - count / 2 { screen.insert(id, at: 0) }
+                else { screen.append(id) }
+            }
+            let middle = screen.count / 2
+            result.left = Array(screen[..<middle].reversed())
+            result.right = Array(screen[middle...])
+            result.parked = []
+            return result
+        }
     }
     var fullIndex: Int { columns.firstIndex { $0.conversation.id == current } ?? 0 }
     var isFocused: Bool { scheme.mode == .focused }
+    var sidechatLayoutSize: CGSize {
+        CGSize(width: max(0, size.width - sidechatReserve), height: size.height)
+    }
 
     /// Canopy washes (Canopy.swift:30-51): moss from the top right, teal from the bottom left, sized by the longer side.
     func layoutWashes() {
@@ -36,16 +60,32 @@ extension AutoScene {
     /// displayOrder: a full member past the columns shows in the last one).
     func arrange(_ members: [Conversation], current: String, scheme next: Scheme? = nil) -> (AutoLayout, [String]) {
         let ids = members.map(\.id)
-        let sch = next ?? scheme
+        let sch = (next ?? scheme).balanced(members: ids)
+        let arrivals=members.map(\.id).filter { id in !self.members.contains{$0.id==id} }
+        let keepTrashColumns=orbTrash.applyingDelta || arrivals.isEmpty || arrivals.allSatisfy(sch.parked.contains)
+        if let browserPort {
+            let certificate = orbTrash.constraint
+            let protected = keepTrashColumns ? certificate?.arrange(members,current:current,scheme:sch,size:size,metrics:metrics,scale:scale) : nil
+            let leases = dock.trashLeaseFacts()
+            let proposed = browserPort.project(members: members, current: current, scheme: sch, size: size,
+                metrics: metrics, scale: scale, protected: protected, hasConstraint: certificate.map { _ in true } ?? false,
+                hasLease: leases.tide != nil || leases.addToken != nil)
+            if let projected = protected ?? proposed { return projected }
+        } else if keepTrashColumns,let certificate=orbTrash.constraint,let projected=certificate.arrange(members,current:current,scheme:sch,size:size,metrics:metrics,scale:scale) { return projected }
         if sch.mode == .focused {
-            // Focused / Split: the capsule centred under its columns, the others as orbs either side in the order they
-            // took on the way in; a member that arrives meanwhile joins the shorter side, the right one on a tie.
-            let split = sch.split.filter(ids.contains)
-            var left = sch.left.filter { ids.contains($0) && !split.contains($0) }, right = sch.right.filter { ids.contains($0) && !split.contains($0) && !left.contains($0) }
-            for id in ids where !split.contains(id) && !left.contains(id) && !right.contains(id) {
-                if left.count < right.count { left.append(id) } else { right.append(id) }
+            if let pair = splitArrangement(members, scheme: sch) {
+                if sidechatReserve > 0,
+                   let reduced = FocusLayout.explicitPair(size: sidechatLayoutSize,
+                                                          bankCount: members.count - 2, metrics: metrics) {
+                    return (snapped(reduced), pair.1)
+                }
+                return (snapped(pair.0), pair.1)
             }
-            let f = FocusLayout(size: size, segments: split.count, leftOrbs: left.count, rightOrbs: right.count, satellites: false, metrics: metrics)
+            // The balanced banks keep screen order, with their nearest orb first.
+            let split = sch.split.filter(ids.contains)
+            let left = sch.left, right = sch.right
+            let f = FocusLayout(size: sidechatLayoutSize, segments: split.count, leftOrbs: left.count,
+                                rightOrbs: right.count, satellites: false, metrics: metrics)
             var l = AutoLayout()
             l.columns = f.columns; l.bars = f.segments; l.me = f.me; l.orbs = f.leftOrbs + f.rightOrbs; l.focused = true
             return (snapped(l), split + left + right)
@@ -54,12 +94,13 @@ extension AutoScene {
         let rest = ids.filter { !parked.contains($0) }
         if sch.draft { return draftArrangement(rest, current: current, parked: parked) }
         if !parked.isEmpty { return autoArrangement(rest, current: current, parked: parked) }
-        var n = AutoLayout(size: size, count: ids.count, fullIndex: 0, metrics: metrics).columns.count
+        var n = AutoLayout(size: sidechatLayoutSize, count: ids.count, fullIndex: 0, metrics: metrics).columns.count
         var l = AutoLayout()
         var order = ids
         for _ in 0..<2 {
             order = Self.displayOrder(ids, current: current, columns: n)
-            l = snapped(AutoLayout(size: size, count: ids.count, fullIndex: order.firstIndex(of: current) ?? 0, metrics: metrics))
+            l = snapped(AutoLayout(size: sidechatLayoutSize, count: ids.count,
+                                   fullIndex: order.firstIndex(of: current) ?? 0, metrics: metrics))
             if l.columns.count == n { break }
             n = l.columns.count
         }
@@ -68,10 +109,12 @@ extension AutoScene {
 
     /// Auto with members parked right of me (OrganicDockBridge.arrange): the columns, then the parked, then the bank.
     private func autoArrangement(_ ids: [String], current: String, parked: [String]) -> (AutoLayout, [String]) {
-        let first = snapped(AutoLayout(size: size, count: ids.count, fullIndex: ids.firstIndex(of: current), leading: parked.count, metrics: metrics))
+        let first = snapped(AutoLayout(size: sidechatLayoutSize, count: ids.count,
+                                       fullIndex: ids.firstIndex(of: current), leading: parked.count, metrics: metrics))
         let order = Self.displayOrder(ids, current: current, columns: first.columns.count)
         let l = order == ids ? first
-            : snapped(AutoLayout(size: size, count: order.count, fullIndex: order.firstIndex(of: current), leading: parked.count, metrics: metrics))
+            : snapped(AutoLayout(size: sidechatLayoutSize, count: order.count,
+                                 fullIndex: order.firstIndex(of: current), leading: parked.count, metrics: metrics))
         let n = l.columns.count
         return (l, Array(order.prefix(n)) + parked + Array(order.dropFirst(n)))
     }
@@ -184,28 +227,16 @@ extension AutoScene {
         if !isMoving { restIslands() }
     }
 
-    /// Split with Next Conversation (OWC splitWithNext): from Auto, Focused on the shown one first; then the next orb on
-    /// the right (else the left) joins the capsule, while it has room.
+    /// Publish one explicit pair with the next screen neighbour. An existing pair disables this command.
     func splitWithNext() {
-        if scheme.mode == .auto { enterFocused(current, reason: "menu") }
-        guard scheme.mode == .focused, let next = scheme.right.first ?? scheme.left.first else { return }
-        graft(next, at: scheme.split.count, reason: "menu")
+        guard let plan = nextSplitPlan() else { return }
+        _ = commitSplit(plan, reason: "split-command")
     }
 
-    /// The window narrowed past what the capsule holds: its last segments go back to being orbs (WindowModel.fitSplit;
-    /// audit A08). Called once a resize has laid out.
+    /// Narrow windows return to one Focused input through the same structural commit.
     func fitSplit() {
-        guard scheme.mode == .focused, scheme.split.count > 1 else { return }
-        let limit = max(1, FocusLayout.capacity(width: size.width, members: members.count, metrics: metrics))
-        guard scheme.split.count > limit else { return }
-        var next = scheme
-        while next.split.count > limit, let last = next.split.last {
-            next.split.removeLast()
-            if next.left.count < next.right.count { next.left.insert(last, at: 0) } else { next.right.insert(last, at: 0) }
-            if let pair = compare, pair.left == last || pair.right == last { compare = nil; compareAsk = nil; dock.setMeDivider(nil) }
-        }
-        let full = next.split.contains(current) ? current : next.split[0]
-        transition(to: members, current: full, scheme: next, spring: Self.focusSpring, reason: "fit-split")
+        fitSeparateSplit()
+        onSplitEligibilityChanged?()
     }
 
     // MARK: Focused / Split (f038–f042; WindowModel enterFocused, graft, ungraft, exitToAuto)
@@ -213,18 +244,17 @@ extension AutoScene {
     /// The product's Focused spring (Tuning focusResponse / focusDamping: me lands, the capsule forms).
     static var focusSpring: (response: Double, damping: Double) { Tuning.shared.focusSpring }
 
-    /// One conversation takes the window: its column centred at reading width, its bar the capsule with me at its left
-    /// end, every other one an orb on the side it is on now (left of it left, nearest nearest), so none crosses the
-    /// capsule on the way.
+    /// One conversation takes the window; the remaining screen order is split evenly around its capsule.
     func enterFocused(_ id: String, reason: String) {
         guard scheme.mode == .auto, members.contains(where: { $0.id == id }) else { return }
         // Sides as they are on screen, left to right: parked orbs just right of me, the columns, the bank
         // (WindowModel.previewSides; audit A11).
         let parked = scheme.parked.filter { p in members.contains { $0.id == p } }
         let screen = parked + order.filter { !parked.contains($0) }
-        guard let k = screen.firstIndex(of: id) else { return }
+        guard screen.contains(id) else { return }
         autoSnapshot = (members, current, parked)
-        let next = Scheme(mode: .focused, split: [id], left: Array(screen[..<k].reversed()), right: Array(screen[(k + 1)...]))
+        let next = Scheme(mode: .focused, split: [id], right: screen.filter { $0 != id })
+            .balanced(members: members.map(\.id))
         transition(to: members, current: id, scheme: next, spring: Self.focusSpring, reason: reason)
     }
 
@@ -242,25 +272,19 @@ extension AutoScene {
         transition(to: next, current: full, scheme: Scheme(parked: parked), spring: Self.focusSpring, reason: reason)
     }
 
-    /// An orb dropped into the capsule joins it at `index` (Split, f040), while the capsule has room for another segment.
+    /// Legacy graft callers may create the first pair; menu replacement uses openInSplit directly.
     func graft(_ id: String, at index: Int, reason: String) {
-        guard scheme.mode == .focused, !scheme.split.contains(id), members.contains(where: { $0.id == id }) else { return }
-        let limit = FocusLayout.capacity(width: size.width, members: members.count, metrics: metrics)
-        guard scheme.split.count < limit else { return }
-        var next = scheme
-        next.split.insert(id, at: min(max(0, index), next.split.count))
-        next.left.removeAll { $0 == id }; next.right.removeAll { $0 == id }
-        transition(to: members, current: id, scheme: next, spring: Self.focusSpring, reason: reason)
+        guard scheme.mode == .focused, scheme.split.count == 1 else { return }
+        _ = openInSplit(id, reason: reason)
     }
 
     /// A segment dragged out of the capsule becomes an orb again; one left means Focused (f042).
     func ungraft(_ id: String, reason: String) {
-        guard scheme.mode == .focused, scheme.split.count > 1, let i = scheme.split.firstIndex(of: id) else { return }
-        if let pair = compare, pair.left == id || pair.right == id { compare = nil; dock.setMeDivider(nil) }
-        var next = scheme
-        next.split.remove(at: i)
-        if next.left.count < next.right.count { next.left.insert(id, at: 0) } else { next.right.insert(id, at: 0) }
-        let full = current == id ? next.split[min(i, next.split.count - 1)] : current
-        transition(to: members, current: full, scheme: next, spring: Self.focusSpring, reason: reason)
+        guard scheme.mode == .focused, scheme.split.count == 2, scheme.split.contains(id),
+              let source = orbTrash.project(), let keep = scheme.split.first(where: { $0 != id }) else { return }
+        let plan = SplitPresentationLayout.Plan(source: source, split: [keep],
+            right: [id] + Array(scheme.left.reversed()) + scheme.parked + scheme.right,
+            current: keep, size: size, metrics: metrics)
+        _ = commitSplit(plan, reason: reason)
     }
 }
