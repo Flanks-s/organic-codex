@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): historical comparison. Kept, not deleted (#181).
 """Standalone offscreen checks. Hidden filename keeps SwiftPM from treating this helper as an app resource."""
 from pathlib import Path
 import argparse

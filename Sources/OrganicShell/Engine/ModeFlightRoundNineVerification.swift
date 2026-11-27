@@ -112,7 +112,7 @@ import QuartzCore
         part.backgroundColor=card.backgroundColor;part.borderColor=card.borderColor;part.borderWidth=card.borderWidth
         native.addSublayer(part)
         let renderer=OffscreenRenderer(size:size,host:native,scale:scale)
-        let pixels=renderer.render(at:CACurrentMediaTime())
+        let pixels=renderer.render(at:VerificationClock.renderOrigin)
         renderer.write(pixels,output.appendingPathComponent("corner-native-\(Int(scale))x.png"))
         var maximumBoundaryError=0
         for y in [0,1,2,3,5,8,12,17,20,25,28] {

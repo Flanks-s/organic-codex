@@ -1,0 +1,3 @@
+column-work SELFTEST_COLUMN_WORK=1
+m10-columns SELFTEST_M10_COLUMNS=1
+m10-columns-reduced SELFTEST_M10_COLUMNS=1 CI_DISPLAY=reduce-motion,reduce-transparency

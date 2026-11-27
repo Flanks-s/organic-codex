@@ -7,6 +7,93 @@ import QuartzCore
 /// main-thread frame changes (P2), so nodes are driven per frame (driver A) on springs that start with the columns'.
 @MainActor final class DockNode {
     enum Role { case bar, orb }
+    #if M1138_CAPTURE
+    func splitRealwinElements() -> [[String: Any]] {
+        guard SplitRealwinCapture.enabled else { return [] }
+        SplitRealwinCapture.beginRoot(view)
+        var rows: [[String: Any]] = [], sources: [ObjectIdentifier: (String, String)] = [:]
+        func add(_ v: NSView, _ id: String, _ kind: String, _ owner: String?, role: String = "") {
+            guard var row = SplitRealwinCapture.sample(v, in: view, id: id, instance: id, kind: kind, owner: owner) else { return }
+            row["role"] = role; row["member"] = id.split(separator: ".").last.map(String.init) ?? ""
+            if id == "capsule" { row["member"] = capsuleOwnerID ?? "unbound" }
+            row["capsuleBinding"] = ["owner": capsuleOwnerID ?? "unbound", "sharesPose": capsuleSharesOwnerPose, "author": "DockNode.transition"]
+            row["sourceHost"] = v.superview.map { SplitRealwinCapture.token($0) } ?? "none"
+            rows.append(row)
+        }
+        func orb(_ p: OrbComponent?, _ id: String, _ owner: String, ownGlass: Bool) {
+            guard let p else { return }
+            let satellites = SplitRealwinCapture.satelliteRoots(p)
+            if ownGlass { add(p.glassView, owner, "glass", nil, role: "planet") }
+            for (name, surface) in [("front", p.frontView), ("back", p.backView)] {
+                if let l = surface.layer?.sublayers?.first {
+                    rows += SplitRealwinCapture.leafRows(l, in: view, id: id+"."+name, owner: owner, member: id, plane: name, satellites: satellites)
+                }
+            }
+            if let body = p.sceneBodyView ?? p.glassView.contentView?.subviews.first(
+                where: { !($0 is SplitOpaqueMaterialPresenter) }), let l = body.layer?.sublayers?.first {
+                rows += SplitRealwinCapture.leafRows(l, in: view, id: id+".body", owner: owner, member: id, plane: "body")
+            }
+        }
+        add(focusedGlass, "capsule", "glass", nil, role: "input")
+        let llStart = rows.count
+        orb(meDecoration, "LL", "glass.LL", ownGlass: true)
+        if capsuleOwnerID != nil {
+            for index in llStart..<rows.count where rows[index]["kind"] as? String == "planet" {
+                rows[index]["allowedHosts"] = ["capsule"]
+                rows[index]["hostEvidence"] = "retained-native-single-capsule-LL-binding"
+            }
+        }
+        for (id, item) in items.sorted(by: { $0.key < $1.key }) {
+            let material = "input."+id
+            let owner = base.focused && segmentIDs.contains(id) ? "capsule" : material
+            add(item.glass, material, "glass", nil, role: item.role == .bar ? "input" : "bank")
+            orb(item.identity, "identity."+id, "identity."+id, ownGlass: true)
+            let start = rows.count
+            orb(item.decoration, "planet."+id, material, ownGlass: false)
+            for index in start..<rows.count {
+                rows[index]["authoredFade"] = ["author": "DockNode.Item.face", "from": Double(item.face.from),
+                    "to": Double(item.face.to), "start": item.face.start, "duration": item.face.duration]
+            }
+            add(item.label, id+".brief", "ink", owner)
+            sources[ObjectIdentifier(item.label)] = (id+".brief", owner)
+            rows += SplitRealwinCapture.glyph(item.wordTrail, source: item.label, in: view, id: id+".brief", owner: owner)
+            add(item.peekFace, id+".peek", "ink", owner)
+            rows += SplitRealwinCapture.glyph(item.peekTrail, source: item.peekFace, in: view, id: id+".peek", owner: owner)
+            guard let c = item.composer else { continue }
+            let controls: [(String, NSView)] = [("model", c.modelButton), ("send", c.sendButton),
+                ("voice", c.voiceButton), ("waveform", c.voiceWaveform), ("dictation", c.dictationButton),
+                ("attach", c.attachButton), ("permission", c.accessButton), ("attachments", c.attachmentScrollView),
+                ("stop", c.stopButton), ("context", c.contextButton), ("queue", c.queueButton), ("placeholder", c.textView)]
+            for (name, control) in controls {
+                let logical = id+"."+name
+                add(control, logical, "ink", owner)
+                sources[ObjectIdentifier(control)] = (logical, owner)
+                if let button = control as? NativeComposerMenuButton {
+                    rows[rows.count-1]["paintContainer"] = true
+                    rows += SplitRealwinCapture.subpaints(button, in: view, id: logical, owner: owner)
+                }
+            }
+            sources[ObjectIdentifier(c.scrollView)] = (id+".placeholder", owner)
+            add(c.scrollView, id+".placeholder-source", "source", owner)
+            rows[rows.count-1]["sourceDescriptor"] = true
+        }
+        for (source, part) in SplitRealwinCapture.exposure(composerMotion) {
+            guard let binding = sources[ObjectIdentifier(source)] else { continue }
+            func walk(_ l: CALayer) {
+                if l.contents != nil {
+                    var row = SplitRealwinCapture.sample(l, in: view, id: binding.0, instance: "part", kind: "ink", owner: binding.1)
+                    row["copy"] = SplitRealwinCapture.token(part)
+                    row["nativeSource"] = SplitRealwinCapture.token(source)
+                    row["sourceHost"] = source.superview.map { SplitRealwinCapture.token($0) } ?? "none"
+                    row["renderer"] = "M10.Part"; rows.append(row)
+                }
+                for child in l.sublayers ?? [] { walk(child) }
+            }
+            walk(part)
+        }
+        return rows
+    }
+    #endif
 
     @MainActor final class Item {
         let conversation: Conversation
@@ -29,6 +116,7 @@ import QuartzCore
         let label = NativeLabel(labelWithString: "")
         /// The conversation's composer, from the first time its bar is full; hidden while it is not.
         var composer: NativeComposer?
+        var splitEditorEndpoint: (CGRect, NativeComposerSegment?)?
         /// The orb's face: the product's decoration (Sol's port, `Orb/`): planet, liquid, badge, satellites. Its body
         /// lives in the glass; its back and front planes sit under and over the dock's glass container.
         let decoration: OrbComponent
@@ -41,15 +129,14 @@ import QuartzCore
         var target = CGRect.zero
         /// As of the last commit: what the node is, the composer is showing, and its slot among bars or orbs.
         var role = Role.orb, full = false, slot = 0
-        /// A peek capsule's face: the conversation's name, a chevron and its badge (BriefBar `titled`).
-        let peekFace = PeekBarFace()
+        /// Native reply paint viewport; also the existing content-transition opacity endpoint.
+        let peekFace = DockNode.Passage()
         /// Where its own spring and hover put it on the last frame, before a peek's bud.
         var regular = CGRect.zero
         let motion = M10DockHistory(), orbMotion = M10DockHistory(), wordMotion = M10DockHistory()
-        let wordTrail = M10DockGlyph(), peekTrail = M10DockGlyph()
-        let wordGaussian = M10DockGaussian(), peekGaussian = M10DockGaussian()
+        let wordTrail = M10DockGlyph()
+        let wordGaussian = M10DockGaussian()
         var semanticZoomUntil = 0.0
-        let peekWordMotion = M10DockHistory()
         /// The planet's veil while it is budded out into a peek (sampled like `face`).
         var veil = (from: Float(0), to: Float(0), start: 0.0, duration: 0.0)
         init(_ c: Conversation) {
@@ -65,10 +152,11 @@ import QuartzCore
             chromeHost.layer?.masksToBounds = true
             chromeHost.layer?.addSublayer(selection)
             chromeHost.addSubview(barFace)
-            peekFace.alphaValue = 0
-            content.addSubview(peekFace)
+            peekFace.wantsLayer = true; peekFace.alphaValue = 0
+            chromeHost.addSubview(peekFace)
             glass.contentView = content
             decoration = OrbComponent(id: c.id, glassView: glass)
+            DockNode.installSplitOpacity(on: glass)
         }
         /// The bar's content follows the glass's frame and keeps its place; the decoration only transforms. Budded out
         /// into a peek, the orb's content stays where the orb is (`orb`, glass-local; OrganicDockProjection orbContentFrame).
@@ -95,27 +183,68 @@ import QuartzCore
     /// Only a composer takes the pointer; everything else in the dock passes it on to the scene, which treats
     /// brief bars and orbs as its own click targets.
     final class Passage: NSView, IslandOrbDragProvider {
+        var routeOrbInput: ((HeaderIsland, NSEvent) -> Bool)?
+        var routeTideOrbInput: ((String, NSEvent) -> Bool)?
+        var routeTidePlanetInput: ((String, NSEvent, DockTideHitView) -> Bool)?
+        var orbInputContains: ((CGPoint) -> Bool)?
+        var cancelOrbInput: (() -> Bool)?
+        func routeOrbInput(from island: HeaderIsland, event: NSEvent) -> Bool { routeOrbInput?(island,event) ?? false }
         weak var dockOwner:DockNode?
         func beginOrbDrag(from island:HeaderIsland,event:NSEvent) -> (any IslandOrbDragGesture)? {
             dockOwner?.headerDragControllerForPress()?.beginOrbDrag(from:island,event:event)
         }
         @discardableResult func cancelOrbDrag()->Bool {
+            if cancelOrbInput?() == true { return true }
             if let drag=dockOwner?.headerOrbDragging,drag.phase == .pressed || drag.phase == .carrying || drag.phase == .tearing {
                 drag.cancel();return true
             }
             // Any held node, not only a header's: an island showing an event must not take the Esc meant for the drag.
             return dockOwner?.cancelHeldPress?() == true
         }
+        override func viewDidMoveToWindow() {super.viewDidMoveToWindow();dockOwner?.attachTideWindow(window)}
         override var isFlipped: Bool { true }
+        override func acceptsFirstMouse(for event:NSEvent?)->Bool {true}
         /// VoiceOver's dock nodes, beside the native composers (AutoScene.dockAccessibilityChildren, f197).
         var accessibilityNodes: (() -> [Any])?
         override func accessibilityChildren() -> [Any]? { (super.accessibilityChildren() ?? []) + (accessibilityNodes?() ?? []) }
         override func hitTest(_ point: NSPoint) -> NSView? {
             guard let hit = super.hitTest(point) else { return nil }
+            if dockOwner?.tidePlanetHit(at:convert(point,from:superview),hit:hit) != nil { return self }
             var view: NSView? = hit
-            while let v = view { if v is NativeComposer { return hit }; view = v.superview }
+            while let v = view {
+                if v is NativeComposer || v is PeekReplyHost || v is DockTideHitView {
+                    return hit
+                }
+                view = v.superview
+            }
             return nil
         }
+        private func tidePlanetHit(_ event:NSEvent)->DockTideHitView? {
+            let local=convert(event.locationInWindow,from:nil)
+            guard let hit=super.hitTest(convert(local,to:superview)) else {return nil}
+            return dockOwner?.tidePlanetHit(at:local,hit:hit)
+        }
+        override func mouseDown(with event:NSEvent) {
+            guard let target=tidePlanetHit(event),let id=target.orbID else {super.mouseDown(with:event);return}
+            target.cancelPress()
+            if routeTidePlanetInput?(id,event,target) != true {target.mouseDown(with:event)}
+        }
+        override func rightMouseDown(with event:NSEvent) {
+            guard let target=tidePlanetHit(event),let id=target.orbID else {super.rightMouseDown(with:event);return}
+            if routeTideOrbInput?(id,event) != true {target.rightMouseDown(with:event)}
+        }
+    }
+
+    /// Only the notice's planet disc joins the shared gesture. Text, borrowed briefs and buttons retain Tide input.
+    private func tidePlanetHit(at point:CGPoint,hit:NSView)->DockTideHitView? {
+        var ancestor:NSView?=hit
+        while let node=ancestor,node !== view {
+            if node is NSButton {return nil}
+            if let target=node as? DockTideHitView,let id=target.orbID,
+               id==tidePresentedOwner,items[id]?.role == .orb,frame(of:id)?.contains(point)==true {return target}
+            ancestor=node.superview
+        }
+        return nil
     }
 
     let view: NSView
@@ -178,16 +307,23 @@ import QuartzCore
         for case let glass as NSGlassEffectView in content.subviews { observeGlass(glass,at:now) }
     }
     func makeTransitionEpoch(at time: Double) -> TransitionEpoch {
+        var poses=items.mapValues { $0.spring.sample(sampledElapsed ?? 0) }
+        var worlds=items.mapValues { $0.motion.rect ?? $0.glass.frame }
+        for (id,source) in tideLayoutSources {
+            guard let item=items[id] else{continue}
+            poses[id]=(localFrame(source.rect,role:item.role,slot:item.slot,at:time),source.velocity)
+            worlds[id]=source.rect
+        }
         return TransitionEpoch(began:time,physicalReleaseID:Self.sharedEpochEnabled ? (releasedGlassID ?? (glassReleases.isEmpty ? nil:"continuation")):nil,
             capsule:capsuleSpring.sample((capsuleSampleTime ?? time)-capsuleBegan),
             me:(meMotion.rect ?? me?.frame ?? .zero,meSpring.sample((meSampleTime ?? time)-meBegan).velocity),
             identities:items.compactMapValues { item in
                 guard item.identity != nil else { return nil }
+                if let side=tideSides[item.conversation.id],side.pose.shown {return (side.orbGlass.frame,.zero)}
                 let t=item.identityMotion.observationTime ?? capsuleSampleTime ?? time
                 let pose=item.identitySpring.sample(t-item.identityBegan)
                 return (item.identityMotion.rect ?? item.identityFrame,pose.velocity)
-            },items:items.mapValues { $0.spring.sample(sampledElapsed ?? 0) },
-            worldItems:items.mapValues { $0.motion.rect ?? $0.glass.frame })
+            },items:poses,worldItems:worlds)
     }
     @MainActor private final class GlassRelease {
         let spring: RectSpring
@@ -368,15 +504,185 @@ import QuartzCore
         var hidden: Bool
     }
     private var collectingGlass = false, resolvingGlass = false
+    var onTrashFrame: ((Double)->Void)?
+    var onTrashApplied: (()->Void)?
+    var onSettledSample: (() -> Void)?
+    private var settledSamplePending = false
+    weak var browserDockPort: (any BrowserDockPort)?
+    private var trashHiddenGlass=Set<ObjectIdentifier>()
+    private var trashHiddenMember: String?
+    private var refuseHiddenGlass = Set<ObjectIdentifier>()
+    private(set) var refuseHiddenMember: String?
+    private var trashReflowPending=false
+    private var trashLiveMembers=Set<String>()
+    private var freeCarry: (x:OrbTrashMotion,y:OrbTrashMotion,grab:CGPoint)?
     private var glassWrites: [ObjectIdentifier: GlassWrite] = [:]
     private var batchID = 0
     private var rawExposed: [String: M10DockFrame] = [:]
+    private var pendingSplit: SplitSurfaceOwner.DockFlight?
+    private var splitFlight: SplitSurfaceOwner.DockFlight?
+    private let splitPaintLeases = SplitPaintLease()
+    private var splitReply: PeekReplyHost?
+
+    private static func installSplitOpacity(on glass: NSGlassEffectView) {
+        SplitOpaqueMaterialPresenter(glass: glass)?.alphaValue = 0
+    }
+
+    func captureSplitSources(_ members: [String], window: UUID) {
+        guard let group = SplitMaterialGroup(id: "dock", retaining: container, in: view) else { return }
+        let flight = SplitSurfaceOwner.DockFlight(group, leases: splitPaintLeases)
+        for id in Set(members) {
+            guard let item = items[id] else { continue }
+            let identity = item.identity
+            let capsule = capsuleOwnerID == id ? focusedGlass : nil
+            let candidates = [capsule, identity?.glassView, item.glass].compactMap { $0 }
+            guard let glass = candidates.first(where: { glass in
+                !glass.isHidden && (glass.layer?.presentation()?.opacity ?? Float(glass.alphaValue)) > 0
+            }) else { continue }
+            let orb = glass === identity?.glassView ? (identity ?? item.decoration) : item.decoration
+            let body = orb.glassView.contentView?.subviews.first { !($0 is SplitOpaqueMaterialPresenter) }
+            guard let body else { continue }
+            let reply = [peekReplyHost, splitReply].compactMap { $0 }.first { $0.id == id }
+            let native = item.full ? item.ownComposer : nil
+            let composer = reply.flatMap { host in
+                let borrowed = host.isColumn && host.returnComposer != nil && host.composer.superview === item.barFace
+                return host.composer.superview === host || borrowed ? host.composer : nil
+            } ?? native
+            let binding = composer.flatMap { composer in
+                let part = composerMotion.splitPart(for: composer)
+                let paint = part.map(SplitDockBinding.Paint.part) ?? .native(composer)
+                let role = SplitPresentationRole(window: window, member: id, role: "input", generation: 0)
+                return SplitDockBinding(role: role, glass: glass, paint: paint,
+                                        inkHost: item.chromeHost, orb: orb, root: view)
+            }
+            let frame = glass.layer?.presentation()?.frame ?? glass.frame
+            let endpoint = SplitSurfaceOwner.DockFlight.Endpoint(glass: glass, frame: frame, orb: orb,
+                                                                  body: body, composer: composer, ink: binding)
+            if composer == nil || binding != nil { _ = flight.retain(endpoint, member: id) }
+        }
+        pendingSplit = flight
+    }
+
+    func discardSplitSources() { pendingSplit = nil }
+
+    func admitSplitSources(certified: Bool) {
+        let next = certified ? pendingSplit : nil
+        finishSplitPresentation(keepingReply: true)
+        next?.arm()
+        splitFlight = next
+    }
+
+    func holdSplitReply(_ host: PeekReplyHost, segments: [String], layout: AutoLayout) -> Bool {
+        guard host === peekReplyHost, host.isCurrent, let token = host.token,
+              segments.contains(host.id), layout.bars.count == segments.count,
+              splitFlight?.endpoints[host.id]?.composer === host.composer else { return false }
+        let restoreBorrowFocus = borrowsColumn(host.id) && host.composer.editorFocused
+        splitReply = host
+        peekReplyHost = nil
+        host.setAccessibilityChildren([])
+        for (index, id) in segments.enumerated() {
+            guard let composer = splitFlight?.endpoints[id]?.composer else { continue }
+            let isReply = composer === host.composer
+            let bar = layout.bars[index]
+            composerMotion.endSplitReplyChrome(composer, dropsPlaceholder: isReply) {
+                composer.configurePresentation {
+                    if isReply { composer.revokeHostInteraction(token) }
+                    composer.targetWidth = bar.width - leading((.bar, bar, index), focused: layout.focused)
+                    composer.segment = .init(index: index, isLast: index == segments.count - 1)
+                }
+                composer.splitModelWidth = composer.modelButton.preferredWidth
+                composer.fitSplitModelLabel()
+                let controls = [composer.accessButton, composer.stopButton] as [NSView]
+                composer.segmentTransition?.before.removeAll { controls.contains($0.view) }
+                composer.segmentTransition?.after.removeAll { controls.contains($0.view) }
+                for control in controls { control.isHidden = true }
+            }
+        }
+        // Split normally focuses its current segment. Retain the borrowed reply only during this handoff.
+        if restoreBorrowFocus {
+            let id = host.id
+            DispatchQueue.main.async { [weak self, weak composer = host.composer] in
+                guard let self, let composer, self.base.focused, self.items[id]?.ownComposer === composer,
+                      let responder = composer.window?.firstResponder as? NSView,
+                      self.items.values.contains(where: { $0.conversation.id != id &&
+                          $0.ownComposer?.textView === responder }) else { return }
+                composer.focus()
+            }
+        }
+        return true
+    }
+
+    private func holdsSplitInk(_ composer: NativeComposer, member: String) -> Bool {
+        splitFlight?.owns(member) == true && splitFlight?.endpoints[member]?.composer === composer
+    }
+
+    private func splitComposer(for item: Item) -> NativeComposer? {
+        splitReply?.id == item.conversation.id ? splitReply?.composer : item.ownComposer
+    }
+
+    private func finishSplitPresentation(keepingReply: Bool = false) {
+        guard splitFlight != nil || (!keepingReply && splitReply != nil) else { return }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if let flight = splitFlight {
+            for (id, endpoint) in flight.endpoints {
+                items[id]?.splitEditorEndpoint = nil
+                endpoint.composer?.splitModelWidth = nil
+                items[id]?.ownComposer?.releaseSplitPresentation(settled: !keepingReply)
+                endpoint.composer?.releaseSplitPresentation(settled: !keepingReply)
+            }
+            flight.release()
+        }
+        splitFlight = nil
+        if !keepingReply, let reply = splitReply {
+            splitReply = nil
+            reply.retire()
+            items[reply.id]?.peekFace.alphaValue = 0
+        }
+        CATransaction.commit()
+    }
+
+    private func synchronizeSplitOpacity(for glass: NSGlassEffectView) {
+        guard glass === focusedGlass else { return }
+        let presenter = glass.contentView?.subviews.first { $0 is SplitOpaqueMaterialPresenter }
+        guard let presenter = presenter as? SplitOpaqueMaterialPresenter else { return }
+        let alpha: CGFloat = base.separateInputs ? 1 : 0
+        if presenter.alphaValue != alpha { presenter.alphaValue = alpha }
+        if alpha > 0, NativeDisplayOptions.shared.state.reducesEffects { presenter.synchronize() }
+    }
+    private func synchronizeSplitChrome() {
+        guard splitFlight?.displaying == true else { return }
+        for id in segmentIDs {
+            guard let item = items[id], let composer = splitComposer(for: item), composer.splitOwnsPresentation
+                else { continue }
+            let host = item.chromeHost
+            let frame = host.frame
+            let localVisible = !glassHidden(item.glass) && item.glass.alphaValue > 0
+            let material = localVisible || glassHidden(focusedGlass) ? item.glass : focusedGlass
+            let viewport = material.convert(material.bounds, to: chromePlane)
+            let clip = frame.intersection(viewport)
+            guard !clip.isEmpty else { continue }
+            if clip != frame {
+                host.frame = clip
+                host.setBoundsOrigin(CGPoint(x: clip.minX - frame.minX, y: clip.minY - frame.minY))
+                host.layer?.cornerRadius = min(clip.width, clip.height) / 2
+            }
+            composer.fitSplitActionRail(in: chromePlane.convert(clip, to: view), root: view)
+        }
+    }
     private var epochSourceBatchID = 0
     private var capturesWriteLog = false
     private var writeTrace: [[String: Any]] = []
     private func glassFrame(_ glass: NSGlassEffectView) -> CGRect { glassWrites[ObjectIdentifier(glass)]?.frame ?? glass.frame }
     private func glassHidden(_ glass: NSGlassEffectView) -> Bool { glassWrites[ObjectIdentifier(glass)]?.hidden ?? glass.isHidden }
-    private func writeGlass(_ glass: NSGlassEffectView, frame: CGRect? = nil, alpha: CGFloat? = nil, hidden: Bool? = nil, reason: String = "raw") {
+    private func writeGlass(_ glass: NSGlassEffectView, frame: CGRect? = nil, alpha: CGFloat? = nil,
+                            hidden: Bool? = nil, reason: String = "raw", splitPaint: Bool = false) {
+        if let flight = splitFlight, !flight.displaying || !splitPaint,
+           flight.endpoints.contains(where: { $0.value.glass === glass && flight.owns($0.key) }) { return }
+        let key = ObjectIdentifier(glass)
+        var hidden = ModeDepartureSurfaces.retains(glass) || trashHiddenGlass.contains(key)
+            || refuseHiddenGlass.contains(key) ? true : hidden
+        if let browserDockPort, browserDockPort.hidesGlass(glass) { hidden = true }
 #if M10_DOCK_SELFTEST
         if reason == "raw", let frame {reviewRawGlass[ObjectIdentifier(glass)]=frame}
         if !collectingGlass,frame != nil {reviewWrites[ObjectIdentifier(glass),default:0] += 1}
@@ -387,8 +693,17 @@ import QuartzCore
             if let frame { write.frame = frame }; if let alpha { write.alpha = alpha }; if let hidden { write.hidden = hidden }
             glassWrites[key] = write
         } else {
-            if let frame { glass.frame = frame; glass.cornerRadius = min(frame.width,frame.height)/2 }
+            let deduplicate=tideTimeline?.active == true || !tideMaterialShapes.isEmpty || tideSideLive || !tideAddTails.isEmpty
+            let changed=(frame.map{glass.frame != $0 || glass.cornerRadius != (tideGlassCorners[ObjectIdentifier(glass)] ?? min($0.width,$0.height)/2)} ?? false)
+                || (alpha.map{glass.alphaValue != $0} ?? false) || (hidden.map{glass.isHidden != $0} ?? false)
+            guard !deduplicate || changed else {
+                if frame != nil {observeGlass(glass,at:motionNow())}
+                return
+            }
+            if let frame { glass.frame = frame; glass.cornerRadius = tideGlassCorners[ObjectIdentifier(glass)] ?? min(frame.width,frame.height)/2 }
             if let alpha { glass.alphaValue = alpha }; if let hidden { glass.isHidden = hidden }
+            synchronizeSplitOpacity(for: glass)
+            countTideWrite()
             if capturesWriteLog { traceWrite(glass, reason: reason) }
             if frame != nil { observeGlass(glass,at:motionNow()) }
         }
@@ -414,13 +729,24 @@ import QuartzCore
 #if M10_DOCK_SELFTEST
             reviewWrites[ObjectIdentifier(glass),default:0] += 1
 #endif
-            glass.frame = write.frame; glass.cornerRadius = min(write.frame.width,write.frame.height)/2
-            glass.alphaValue = write.alpha; glass.isHidden = write.hidden
+            let deduplicate=tideTimeline?.active == true || !tideMaterialShapes.isEmpty || tideSideLive || !tideAddTails.isEmpty
+            let changed=glass.frame != write.frame || glass.cornerRadius != (tideGlassCorners[ObjectIdentifier(glass)] ?? min(write.frame.width,write.frame.height)/2) || glass.alphaValue != write.alpha || glass.isHidden != write.hidden
+            if !deduplicate || changed {
+                glass.frame = write.frame; glass.cornerRadius = tideGlassCorners[ObjectIdentifier(glass)] ?? min(write.frame.width,write.frame.height)/2
+                glass.alphaValue = write.alpha; glass.isHidden = ModeDepartureSurfaces.retains(glass) || write.hidden
+                countTideWrite()
+            }
             if capturesWriteLog { traceWrite(glass,reason:"finalBatch") }
+            synchronizeSplitOpacity(for: glass)
         }
+        for side in tideSides.values where side.pose.shown {side.finishMaterialFrame()}
         CATransaction.commit()
         if held != nil || releasedGlassID != nil || !glassReleases.isEmpty { observeAllGlass(at:motionNow()) }
         collectingGlass = false; glassWrites.removeAll(keepingCapacity:true)
+        if settledSamplePending {
+            settledSamplePending = false
+            onSettledSample?()
+        }
     }
     private let container = NSGlassEffectContainerView()
     private let content = Passage()
@@ -444,6 +770,1007 @@ import QuartzCore
     private var glassRetargetTime: Double?
     private var glassRetargetPaint: [ObjectIdentifier: CGRect] = [:]
     private var topologyPeekExclusions: Set<String> = []
+    // M11.34: notification ownership on the scene's existing display callback.
+    private var tideTimeline:TideMotion?
+    private var tideLeaseMemory=DockSlotLeases()
+    private let tideWatchedEditors=NSHashTable<NativeComposer>.weakObjects()
+    private var tideCursors:[String:Int]=[:]
+    let questionDiagnostics=TideQuestionDiagnostics()
+    private var tideMediaLast:Double?
+    private var tidePointer:CGPoint?
+    private var tideNodePoses:[String:CGRect]=[:]
+    private var tideWords:DockTidePresentation?
+    private var tideInkFilters:[String:NSObject]=[:]
+    private var tideMinimumGap=Double.infinity
+    private var tideWorstPair=""
+    private var tideDegraded=false
+    private var tideDynamic=false
+    private var tidePool:[String:DockTideShape]=[:]
+    private var tideFaces:[String:DockTideFace]=[:]
+    private var tideBorrowHits:[String:DockTideHitView]=[:]
+    var tideWarmAllowed:(()->Bool)?
+    var onTideMotion:(()->Void)?
+    private var tideWarmJob:DispatchWorkItem?,tideWakeJob:DispatchWorkItem?
+    private var tideWakeAt:Double?,tideWarmGeneration=0
+    private var tideMovingCallbacks=0,tideStillCallbacks=0,tideMovingWrites=0,tideStillWrites=0
+    private var tideFrameMoving:Bool?
+    private var tideLastAppliedRise:CGFloat?
+    private var tideWarmMaxSliceMS=0.0,tideWarmContentMS=0.0
+    private var tideLastWakeDriftMS=0.0
+    private var tideArrivalAllocations=0,tideArrivalContentAllocations=0
+    private var tideDelivering=false
+    private var tidePresentedOwner:String?
+    private var tideSides:[String:DockTideSide]=[:]
+    private var tideGlassCorners:[ObjectIdentifier:CGFloat]=[:]
+    private var tideSideLive=false
+    private var tideSideFitCache:[String:(input:[CGRect],result:[String:CGRect]?)]=[:]
+    private var tideSideHiddenSources:Set<String>=[]
+    private var tideSideQueued:[String:[ConversationNotice]]=[:]
+    private var tideFrozenAt:Double?
+    private var tideFrozenSources:[String:CGRect]=[:]
+    private var tideFrozen=false
+    private let tideModeExit=TideModeExit()
+    private var tideAddLayout:(began:Double,duration:Double)?
+    private var tideAddReservation:DockSlotLeases.Lease?
+    private var tideAddTails:[String:TideAddHandoff]=[:]
+    /// The caller has already applied Add's capacity policy. Rejection never changes membership.
+    func reserveTideSlotsForAdd(owner:String,count:Int,capacityAllows:Bool)->DockSlotLeases.Decision {
+        advanceTideClock(to:tideNow());refreshTideProtection()
+        var leases=tideTimeline?.leases ?? tideLeaseMemory
+        let protection=tideProtection()
+        let candidates=items.values.filter{$0.role == .bar}.sorted{$0.target.minX>$1.target.minX}.map {
+            DockSlotLeases.Candidate(id:$0.conversation.id,role:$0.full ? .full:.brief,protection:protection[$0.conversation.id] ?? [])
+        }
+        let decision=leases.request(owner:owner,purpose:.add,count:count,candidates:candidates,capacityAllows:capacityAllows,at:tideNow())
+        tideTimeline?.leases=leases;tideLeaseMemory=leases
+        if let lease=decision.lease,decision.status == .granted {
+            tideAddReservation=lease
+            if decision.revoked != nil {freezeTideForMode()}
+        }
+        return decision
+    }
+    func cancelTideAdd(_ token:DockSlotLeases.Token) {
+        guard tideAddReservation?.token==token else{return}
+        _=tideLeaseMemory.release(token);tideTimeline?.leases=tideLeaseMemory;tideAddReservation=nil
+        finishTideModeHandoff()
+    }
+    var tideAddProbe:[String:Any] {
+        ["committed":tideLeaseMemory.add?.committed ?? false,"briefs":tideLeaseMemory.add?.briefs ?? [],
+         "generation":tideLeaseMemory.generation,"reservation":tideAddReservation != nil,
+         "tails":tideAddTails.mapValues{["tail":$0.tail(at:motionNow()),"bodyDelay":0.07,"began":$0.began]}]
+    }
+    /// Explicit native sampling for the Add driver and the physical gate, outside measurement probes.
+    var tideAddPhysicalProbe:[String:[[CGFloat]]] {
+        Dictionary(uniqueKeysWithValues:tideAddTails.keys.compactMap {id -> (String,[[CGFloat]])? in
+            guard let item=items[id] else{return nil}
+            return (id,[DockTideShape.rect(item.glass.frame)]+(tidePool[id]?.views ?? []).filter{!$0.isHidden}.map{DockTideShape.rect($0.frame)})
+        })
+    }
+    private func applyTideAddTails() {
+        guard !tideFrozen else{return}
+        let now=motionNow()
+        for (id,handoff) in tideAddTails {
+            guard let item=items[id] else{tideAddTails[id]=nil;tidePool[id]?.park();continue}
+            let amount=handoff.tail(at:now)
+            if amount>0 {
+                let pose=TideMaterialPose(owner:id,body:glassFrame(item.glass),tailAmount:amount,lean:handoff.lean,retracting:true)
+                tidePool[id]?.apply(pose.contour){[weak self] glass,rect,hidden in
+                    self?.writeGlass(glass,frame:rect,alpha:1,hidden:hidden,reason:"tideAddTail")
+                    if !hidden {glass.cornerRadius=min(rect.width,rect.height)/2}
+                }
+                tidePool[id]?.style(identity:Look.identity[item.conversation.identityIndex % Look.identity.count],amount:amount)
+            } else {tidePool[id]?.park()}
+            let face=item.role == .orb ? max(0,1-Double(item.faceOpacity(at:now))):max(0,1-(now-handoff.began)/0.07)
+            tideFaces[id]?.render(rect:glassFrame(item.glass),opacity:face)
+            if now>=handoff.began+handoff.duration {tideAddTails[id]=nil;tideFaces[id]?.park()}
+        }
+        if let layout=tideAddLayout,now>=layout.began+layout.duration {tideAddLayout=nil}
+        if !tideAddTails.isEmpty || tideAddLayout != nil {onNeedsFramesUntil?(now)}
+    }
+    private var tideReclaim:(id:String,due:Double)?
+    private var tideAnimationTrial:DockTideAnimationTrial?
+    private var tideLifecycle:DockTideLifecycle?
+    var onTideAction:((String,ConversationNoticeAction)->Void)?
+    var onTideReclaim:((String)->Void)?
+    var onTidePointer:((CGPoint?)->Void)?
+    var tideContentObstacles:(()->[CGRect])?
+    var onTideReadingRoom:(([CGRect])->Void)?
+    var tideCanDismiss:(()->Bool)?
+    func attachTideWindow(_ window:NSWindow?) {
+        if tideLifecycle == nil {
+            let lifecycle=DockTideLifecycle()
+            lifecycle.retire={ [weak self] in self?.retireTide() }
+            lifecycle.deactivate={ [weak self] in self?.endTideInteraction() }
+            lifecycle.close={ [weak self] in self?.closeTidePresentation() }
+            lifecycle.input={ [weak self] event in self?.handleTideInput(event) ?? false }
+            tideLifecycle=lifecycle
+        }
+        tideLifecycle?.attach(window)
+    }
+    private func handleTideInput(_ event:NSEvent)->Bool {
+        if event.type == .mouseMoved {
+            // Keep future lease protection current without waking an inactive or retired scene.
+            guard !tideFrozen,!view.isHiddenOrHasHiddenAncestor else{return false}
+            if tideTimeline?.active == true || tideSides.values.contains(where:{$0.active}) {
+                tidePointerEvent(event)
+            } else {tidePointer=view.convert(event.locationInWindow,from:nil)}
+            return false
+        }
+        // A planet down must reach pickup before Tide's outside-click dismissal can consume it.
+        if event.type == .leftMouseDown,
+           (view as? Passage)?.orbInputContains?(view.convert(event.locationInWindow,from:nil)) == true {return false}
+        if event.type == .leftMouseDown, let host = peekReplyHost, host.isCurrent, borrowsColumn(host.id),
+           host.composer.bounds.contains(host.composer.convert(event.locationInWindow, from: nil)) { return false }
+        if event.type == .keyDown, event.keyCode == 53, let host = peekReplyHost, host.isCurrent,
+           borrowsColumn(host.id), let responder = event.window?.firstResponder as? NSView,
+           responder === host.composer || responder.isDescendant(of: host.composer) { return false }
+        guard event.window?.attachedSheet == nil else{return false}
+        if event.type == .keyDown,let editor=event.window?.firstResponder as? NSTextView,editor.hasMarkedText() {return false}
+        let side=tideSides.values.filter{$0.active && !$0.motion.returning}.max{($0.pose.shown ? 2:0)+($0.motion.event?.urgent == true ? 1:0)<($1.pose.shown ? 2:0)+($1.motion.event?.urgent == true ? 1:0)}
+        if let side,!tideFrozen,!hasPeek,tideCanDismiss?() != false {
+            let point=view.convert(event.locationInWindow,from:nil)
+            if event.type == .keyDown,event.keyCode==53 {return dismissTide()}
+            if event.type == .leftMouseDown,!tideSides.values.contains(where:{$0.pose.shown && ($0.glass.frame.contains(point) || $0.pose.orb.contains(point))}) {return dismissTide()}
+        }
+        guard !tideFrozen,tideTimeline?.active == true,!hasPeek,held == nil,tideCanDismiss?() != false,event.window?.attachedSheet == nil else{return false}
+        if event.type == .keyDown {
+            if let editor=event.window?.firstResponder as? NSTextView,editor.hasMarkedText() {return false}
+            return event.keyCode==53 && dismissTide()
+        }
+        let point=view.convert(event.locationInWindow,from:nil)
+        if let id=tideTimeline?.owner,tideNodePoses[id]?.contains(point) == true {return false}
+        // A requisitioned editor belongs to the user; its press is allowed to focus it.
+        if tideMaterialPoses.values.contains(where:{$0.body.rect.contains(point)}) {return false}
+        return dismissTide()
+    }
+    private func sideEligible(_ item:Item)->Bool {item.role == .orb && (base.focused || item.slot<base.leading)}
+    var tideSideProbe:[[String:Any]] {tideSides.keys.sorted().compactMap{tideSides[$0]?.probe(at:tideFrozenAt ?? tideNow())}}
+    var tideSidePhysicalProbe:[[String:Any]] {tideSides.keys.sorted().compactMap{tideSides[$0]?.physicalProbe}}
+    private func packTideSides() {
+        // Every existing surface reaches arrival time on its old target before another owner changes packing.
+        let at=tideNow()
+        for side in tideSides.values {
+            let source=items[side.id]?.regular
+            side.followDock(centerX:source.flatMap{$0.width>0 ? $0.midX:nil} ?? side.restingAnchor.midX,rise:Double(rise))
+        }
+        for side in tideSides.values where side.active {side.advance(to:at)}
+        tideSideLive=tideSides.values.contains{$0.active}
+        let union=base.bars.reduce(base.bars.first ?? .zero){$0.union($1)}
+        let visible=tideSides.values.filter{$0.candidate != nil}
+        for right in [false,true] {
+            let entries=visible.filter{($0.pose.anchor.midX>union.midX)==right}
+            // Side B uses the reading margin, not the wider composer capsule's edge.
+            let region=TideSidePacking.region(width:view.bounds.width,focused:base.focused,split:base.bars.count>1,right:right)
+            var chosen:[DockTideSide]=[],targets:[String:CGRect]=[:]
+            let ranked=entries.sorted{a,b in
+                let x=a.candidate!.rank,y=b.candidate!.rank
+                return x==y ? a.arrivalAt<b.arrivalAt:x>y
+            }
+            for entry in ranked {
+                let trial=chosen+[entry]
+                guard let region else{continue}
+                let proposed=TideSidePacking.solve(trial.compactMap(\.candidate),region:region,bottom:union.minY-14-rise,right:right)
+                guard proposed.count==trial.count else{continue}
+                let ids=Set(trial.map(\.id))
+                let fixed=items.values.filter{!ids.contains($0.conversation.id)}.flatMap{item in
+                    [item.glass,item.identity?.glassView].compactMap{$0}.filter{!$0.isHidden}.map(\.frame)
+                }+base.bars+(tideContentObstacles?() ?? [])
+                // Try a bounded set of independent vertical lanes. Neither neighbours nor tails shrink.
+                let orderedIDs=trial.map(\.id),key=orderedIDs.joined(separator:"\u{1f}")
+                let sorted=fixed.sorted {a,b in a.minX != b.minX ? a.minX<b.minX:a.minY != b.minY ? a.minY<b.minY:a.width != b.width ? a.width<b.width:a.height<b.height}
+                let signature=trial.flatMap {side in [proposed[side.id]!,side.pose.anchor,CGRect(x:side.pose.composerTop,y:0,width:side.ready ? 1:0,height:Double(TideTailBudget.pieces))]}+sorted
+                let fitted:[String:CGRect]?
+                if let cached=tideSideFitCache[key],cached.input==signature {fitted=cached.result}
+                else {
+                    fitted=TideSidePacking.fit(proposed,order:orderedIDs,obstacles:fixed,staggered:!base.focused && base.leading>0,contour:{id,rect in tideSides[id]?.projectedPhysical(rect) ?? []})
+                    tideSideFitCache[key]=(signature,fitted)
+                }
+                if let fitted {chosen=trial;targets=fitted}
+            }
+            for entry in tideSides.values where (entry.pose.anchor.midX>union.midX)==right {
+                let raised=targets[entry.id].map{$0.maxY<union.minY-14-rise-1} ?? false
+                entry.target(targets[entry.id],staged:raised || (!base.focused && base.leading>0 && targets.count==2))
+            }
+        }
+    }
+    /// Native decision controls can change while the notice sleeps; re-admit only this finite notification.
+    func tideReadingRoomChanged() {
+        guard !tideFrozen,tideSides.values.contains(where:{$0.active}) else{return}
+        packTideSides()
+        if tideSides.values.contains(where:{$0.busy}) {onTideMotion?();onNeedsFrames?(0);scheduleTideWake()}
+    }
+    private func advanceTideSides(at time:Double) {
+        for side in tideSides.values where side.active {side.advance(to:time)}
+        packTideSides()
+    }
+    private func renderTideSides() {
+        guard !tideFrozen else{return}
+        let at=tideNow();advanceTideSides(at:at)
+        let ordered=tideSides.values.filter{$0.pose.shown}.sorted{$0.arrivalAt<$1.arrivalAt}
+        var placed:[String:[CGRect]]=[:]
+        for side in ordered {
+            let id=side.id
+            guard let item=items[id] else{continue}
+            let others=tideSides.values.filter{$0.id != id && $0.pose.shown}
+            let otherIDs=Set(others.map(\.id))
+            let obstacles=items.values.filter{$0.conversation.id != id && !otherIDs.contains($0.conversation.id)}.flatMap{item in
+                [item.glass,item.identity?.glassView].compactMap{$0}.filter{!$0.isHidden}.map(\.frame)
+            }+base.bars+others.flatMap{placed[$0.id] ?? $0.physical}+(tideContentObstacles?() ?? [])
+            let orb=side.render(title:item.conversation.title,color:Look.identity[item.conversation.identityIndex % Look.identity.count],obstacles:obstacles){[weak self] glass,rect,hidden in
+                if glass === side.glass {self?.tideGlassCorners[ObjectIdentifier(glass)]=min(side.pose.radius.x,min(rect.width,rect.height)/2)}
+                self?.writeGlass(glass,frame:rect,alpha:1,hidden:hidden,reason:"tideSide")
+            }
+            _=orb;placed[id]=side.physical
+            guard side.pose.shown else{continue}
+            tideSideHiddenSources.insert(id)
+            do {
+                writeGlass(item.glass,alpha:0,hidden:true,reason:"tideSideSource")
+                item.decoration.setOpacity(0);item.decoration.setPresentationActive(false)
+                if let identity=item.identity {writeGlass(identity.glassView,alpha:0,hidden:true,reason:"tideSideSource");identity.setOpacity(0);identity.setPresentationActive(false)}
+            }
+            if side.busy {onTideMotion?();onNeedsFramesUntil?(displayTime ?? latestDisplayTime)}
+        }
+        for (id,side) in tideSides where !side.pose.shown {
+            let source=side.orbGlass.frame
+            let wasShown=side.park(keepHalo:side.active)
+            guard wasShown || tideSideHiddenSources.contains(id) else{continue}
+            tideSideHiddenSources.remove(id)
+            if let item=items[id] {
+                let identity=item.identityOpacity.value(at:at)
+                writeGlass(item.glass,frame:item.regular,alpha:CGFloat(1-identity),hidden:false,reason:"tideSideRestore");item.decoration.setOpacity(1-identity);item.decoration.setPresentationActive(ambientRunning && identity<1)
+                if let orb=item.identity {writeGlass(orb.glassView,alpha:CGFloat(identity),hidden:false,reason:"tideSideRestore");orb.setOpacity(identity);orb.setPresentationActive(ambientRunning && identity>0)}
+                let material=identity>=0.999 ? item.identity?.glassView:item.glass
+                if let material,!Motion.reduce {
+                    let tuning=RectSpring(dockFrom:source,to:glassFrame(material),response:0.50,damping:0.86)
+                    queueContours([(material,source,nil)],tuning:tuning,stableRaw:false)
+                }
+            }
+        }
+        for (id,side) in tideSides where side.active && !side.pose.shown {
+            guard let item=items[id] else{continue}
+            side.renderWaitingHalo(title:item.conversation.title,color:Look.identity[item.conversation.identityIndex % Look.identity.count])
+            if side.busy {onTideMotion?();onNeedsFramesUntil?(displayTime ?? latestDisplayTime)}
+        }
+    }
+    private func requestTideReclaim(_ id:String) {
+        guard !tideFrozen,tideTimeline?.active == true,tideMaterialShapes[id] != nil else{return}
+        let delay=tideTimeline?.bubbles[id]?.busy == true ? 0.26:0
+        tideReclaim=(id,tideNow()+delay)
+        refreshTideProtection();onTideMotion?();onNeedsFrames?(0);scheduleTideWake()
+        if delay==0 {serviceTideDeadline()}
+    }
+    private func tidePointerEvent(_ event:NSEvent) {
+        guard !tideFrozen else{return}
+        let point=view.convert(event.locationInWindow,from:nil)
+        if let onTidePointer {onTidePointer(point)}
+        else {let duration=pointer(point,now:tideNow());onNeedsFrames?(duration)}
+    }
+    /// Physical source poses belong to the next layout writer, including the retained brief being reclaimed.
+    private var tideLayoutSources:[String:(rect:CGRect,velocity:CGRect)] {
+        var result:[String:(CGRect,CGRect)]=[:]
+        for id in tideAddTails.keys {if let item=items[id] {result[id]=(item.glass.frame,.zero)}}
+        for (id,side) in tideSides where side.pose.shown {result[id]=(side.orbGlass.frame,.zero)}
+        guard let motion=tideTimeline,motion.active else{return result}
+        for (id,rect) in tideNodePoses {
+            guard let node=motion.nodes[id] else{continue}
+            let velocity=CGRect(x:node.right.v-node.width.v,y:-node.height.v/2-node.lift.v,width:node.width.v,height:node.height.v)
+            result[id]=(rect,tideFrozen ? .zero:velocity)
+        }
+        for (id,contour) in tideMaterialPoses {
+            guard let b=motion.bubbles[id] else{continue}
+            result[id]=(contour.body.rect,tideFrozen ? .zero:CGRect(x:b.left.v,y:-b.height.v/2,width:b.width.v,height:b.height.v))
+        }
+        return result
+    }
+    /// Freeze the actual source pose before mode capture; retirement follows the host's suspend entry.
+    func freezeTideForMode(fading:Bool=false,excluding:Set<String> = []) {
+        guard !tideFrozen else{return}
+        guard tideTimeline?.active == true || tideSides.values.contains(where:{$0.active}) || !tideAddTails.isEmpty else{return}
+        tideFrozenSources=Dictionary(uniqueKeysWithValues:tideLayoutSources.keys.compactMap {id in
+            guard let item=items[id] else{return nil}
+            return (id,tideSides[id]?.pose.shown == true ? tideSides[id]!.orbGlass.frame:item.glass.frame)
+        });tideFrozenAt=tideNow()
+        tideFrozen=true;tideReclaim=nil;tideWords?.freezeInput()
+        for side in tideSides.values {side.words.freezeInput();side.orbHit.interactive=false;side.orbHit.cancelPress()}
+        for hit in tideBorrowHits.values {hit.interactive=false;hit.cancelPress()}
+        tideWakeJob?.cancel();tideWakeJob=nil;tideWakeAt=nil
+        tideWarmJob?.cancel();tideWarmJob=nil;tideWarmGeneration+=1
+        if fading {
+            tideModeExit.clear()
+            for id in tideFrozenSources.keys {
+                guard let item=items[id] else{continue}
+                if !excluding.contains(id) {
+                    tideModeExit.include([item.glass,item.chromeHost,
+                                          item.decoration.backView,item.decoration.frontView])
+                    if let identity=item.identity {
+                        tideModeExit.include([identity.glassView,identity.backView,identity.frontView])
+                    }
+                    if let face=tideFaces[id] {
+                        tideModeExit.include([face.orb.backView,face.orb.frontView])
+                    }
+                }
+                tidePool[id]?.fadeModeExit(tideModeExit)
+            }
+            tideWords?.fadeModeExit(tideModeExit)
+            for side in tideSides.values where side.active {
+                tideModeExit.includeSide(side,excludingOrb:excluding.contains(side.id))
+            }
+        }
+    }
+    /// Lifecycle starts at the accepted mode key, before cold body-photo work or native admission.
+    func beginTideDeparture(using pictures:ModeDepartureSurfaces,in host:NSView,at time:Double,
+                            excluding:Set<String> = []) {
+        freezeTideForMode(fading:true,excluding:excluding)
+        tideModeExit.start(using:pictures,in:host,at:time)
+    }
+    var tideDepartureScreenState:[String:Any] {tideModeExit.probe}
+    var tideDeparturePhoto:NSView? {tideModeExit.photo}
+    /// Resigning key closes finite notification channels; it does not reset any displayed glass.
+    func endTideInteraction() {
+        guard !tideFrozen else{return}
+        advanceTideClock(to:tideNow())
+        for side in tideSides.values where side.active {side.dismiss(at:tideNow());side.words.freezeInput()}
+        tideTimeline?.dismiss();tideWords?.freezeInput()
+        scheduleTideWake();onTideMotion?();onNeedsFrames?(0)
+    }
+    /// The closing window owns its last compositor frame. Park only after its removal is submitted.
+    private func closeTidePresentation() {
+        freezeTideForMode()
+        tideTimeline=nil
+        DispatchQueue.main.async { [weak self] in self?.retireTide() }
+    }
+    func finishTideModeHandoff() {
+        guard tideFrozen else{return}
+        if tideModeExit.isExiting {retireTide();return}
+        if let at=tideFrozenAt {
+            let delta=max(0,tideNow()-at)
+            for id in tideAddTails.keys {tideAddTails[id]?.began+=delta}
+            if tideAddLayout != nil {tideAddLayout!.began+=delta}
+        }
+        tideFrozen=false;tideFrozenAt=nil;tideFrozenSources=[:]
+        for side in tideSides.values where side.active {side.dismiss(at:tideNow())}
+        tideMediaLast=tideNow();tideTimeline?.resumeClock(at:tideNow());tideTimeline?.dismiss()
+        onTideMotion?();onNeedsFrames?(0);scheduleTideWake()
+    }
+    @discardableResult func dismissTide()->Bool {
+        if !tideFrozen,tideSides.values.contains(where:{$0.active && !$0.motion.returning}) {
+            for side in tideSides.values where side.active {side.dismiss(at:tideNow())}
+            scheduleTideWake();onTideMotion?();onNeedsFrames?(0);return true
+        }
+        guard !tideFrozen,tideTimeline?.active == true,tideTimeline?.returning != true else{return false}
+        advanceTideClock(to:tideNow());tideTimeline?.dismiss();scheduleTideWake();onTideMotion?();onNeedsFrames?(0)
+        return true
+    }
+    func pinTide() {
+        guard !tideFrozen else{return}
+        advanceTideClock(to:tideNow());tideTimeline?.togglePin(at:tideNow(),protection:tideProtection())
+        scheduleTideWake();onTideMotion?();onNeedsFrames?(0)
+    }
+    func refreshTideReduction() {tideTimeline?.reduced=Motion.reduce;if !tideFrozen,(tideTimeline?.active == true || tideSides.values.contains(where:{$0.active})) {onNeedsFrames?(0)}}
+    private func prepareTideWords() {
+        guard !(TideCompositePolicy.control && store?.usesLiveCore == false),tideWords == nil else{return}
+        if tideDelivering || tideFrameMoving != nil {tideArrivalContentAllocations+=1}
+        let began=CACurrentMediaTime()
+        let words=DockTidePresentation(parent:view,below:container)
+        words.onPin={ [weak self] in self?.pinTide() }
+        words.onPointer={ [weak self] event in self?.tidePointerEvent(event) }
+        words.onAction={ [weak self] action in
+            guard let self,!self.tideFrozen,let owner=self.tideTimeline?.owner,self.tideTimeline?.action?.submitting == false else{return}
+            self.onTideAction?(owner,action)
+        }
+        tideWords=words;tideWarmContentMS=max(tideWarmContentMS,(CACurrentMediaTime()-began)*1000)
+    }
+    /// Explicit mock diagnostic; the real Tide lifecycle never calls this ordinary-orb experiment.
+    @discardableResult func beginTideAnimationTrial(owner:String)->Bool {
+        guard store?.usesLiveCore == false,let item=items[owner],!item.conversation.isLiveConversation,item.role == .orb,tideTimeline?.active != true else{return false}
+        endTideAnimationTrial()
+        tideAnimationTrial=DockTideAnimationTrial(owner:owner,orb:item.decoration,parent:view,container:container)
+        return true
+    }
+    func endTideAnimationTrial() {tideAnimationTrial?.finish(ambient:ambientRunning);tideAnimationTrial=nil}
+    var tideClockOwners:[(String,Any)] {
+        var result:[(String,Any)]=tideFaces.map{("tide.face."+$0.key,$0.value)}
+        if let meDecoration {result.append(("dock.me",meDecoration))}
+        for (id,item) in items {
+            result += [("dock."+id+".orb",item.decoration),("dock."+id+".words",item.wordGaussian)]
+            if let identity=item.identity {result.append(("dock."+id+".identity",identity))}
+        }
+        for (id,side) in tideSides {result += [("tide.side."+id+".orb",side.face.orb),("tide.side."+id+".content",side.words)]}
+        return result
+    }
+    var tideAnimationDiagnostics:[String:Any] {
+        ["mode":TideAnimationMode.selected.rawValue,"ambientLoops":"product-policy","filterPolicy":TideCompositePolicy.legacy ? "legacy":"detached","control":TideCompositePolicy.control && store?.usesLiveCore == false,"trial":tideAnimationTrial?.probe as Any? ?? NSNull(),
+         "timers":["warmupPending":tideWarmJob != nil,"deadlinePending":tideWakeJob != nil,"deadlineAt":tideWakeAt as Any? ?? NSNull(),"repeatingTimers":0,"reclaimPending":tideReclaim != nil],
+         "tideRequestsDisplayFrames":(tideTimeline?.busy == true || tideSides.values.contains{$0.busy} || !tideAddTails.isEmpty) && !tideFrozen]
+    }
+    private func tideAllowsAmbient(_ id:String)->Bool {
+        if tideSides[id]?.pose.shown == true {return false}
+        if tideFrozen,tidePresentedOwner==id {return false}
+        return tidePresentedOwner != id || (tideTimeline?.ownerInk.opacity ?? 1)>0
+    }
+    private func countTideWrite() {
+        guard tideTimeline?.active == true else{return}
+        if tideFrameMoving ?? (tideTimeline?.busy == true) {tideMovingWrites+=1}else{tideStillWrites+=1}
+    }
+    /// Called in small idle slices; never drains material construction from store.apply or a display callback.
+    func prepareTideMaterialNow() {
+        prepareTideWords()
+        for item in tideWarmCandidates() {warmTideItem(item,complete:true)}
+    }
+    private func tideWarmCandidates()->[Item] {
+        if TideCompositePolicy.control,store?.usesLiveCore == false {return []}
+        let bars=items.values.filter{$0.role == .bar && !$0.full}.sorted{$0.target.minX>$1.target.minX}.prefix(2)
+        return Array(bars)+items.values.filter{$0.role == .orb}.sorted{$0.slot<$1.slot}
+    }
+    private func warmTideItem(_ item:Item,complete:Bool) {
+        let began=CACurrentMediaTime();defer{tideWarmMaxSliceMS=max(tideWarmMaxSliceMS,(CACurrentMediaTime()-began)*1000)}
+        let id=item.conversation.id
+        if item.role == .bar {
+            if tideBorrowHits[id] == nil {
+                let hit=DockTideHitView();hit.orbID=id;hit.isHidden=true;hit.onPress={ [weak self] in self?.requestTideReclaim(id) }
+                hit.onPointer={ [weak self] event in self?.tidePointerEvent(event) }
+                view.addSubview(hit);tideBorrowHits[id]=hit
+            }
+            if tidePool[id]?.matches(item.glass) != true {
+                tidePool[id]?.dispose()
+                tidePool[id]=DockTideShape(owner:id,parent:content,material:item.glass,shadowParent:view,allocate:false)
+                tidePool[id]?.onTintWrite={ [weak self] in self?.countTideWrite() }
+                tidePool[id]?.onAllocation={ [weak self] in
+                    guard let self else{return}
+                    if self.tideDelivering || self.tideFrameMoving != nil {self.tideArrivalAllocations+=1}
+                    self.countTideWrite()
+                }
+            }
+            if complete {while tidePool[id]?.ready == false {tidePool[id]?.prepareOne()}}
+            else if tidePool[id]?.ready == false {tidePool[id]?.prepareOne();return}
+        }
+        if sideEligible(item) {
+            if tideSides[id] == nil || tideSides[id]?.restingAnchor != item.target {
+                tideSides.removeValue(forKey:id)?.dispose()
+                let top=base.bars.map(\.minY).min() ?? item.target.minY
+                let side=DockTideSide(id:id,anchor:item.target,composerTop:top,parent:content,inkParent:view,container:container,style:item.glass.style,configuration:makeOrbConfiguration(item.conversation,drawingSize:48,backingScale:view.window?.backingScaleFactor ?? 2,reduceMotion:Motion.reduce,ambient:false,isKeyWindow:true))
+                side.orbHit.orbID=id
+                side.onWake={ [weak self] in self?.onTideMotion?();self?.onNeedsFrames?(0);self?.scheduleTideWake() }
+                side.words.onPin={ [weak self,weak side] in guard let self,!self.tideFrozen else{return};side?.pin(at:self.tideNow()) }
+                side.words.onAction={ [weak self,weak side] action in
+                    guard let self,!self.tideFrozen,side?.motion.action?.submitting == false else{return}
+                    self.onTideAction?(id,action)
+                }
+                side.words.onPointer={ [weak self] event in self?.tidePointerEvent(event) }
+                tideSides[id]=side
+            }
+            if complete {while tideSides[id]?.ready == false {tideSides[id]?.prepareOne()}}
+            else if tideSides[id]?.ready == false {tideSides[id]?.prepareOne();return}
+            if let queued=tideSideQueued.removeValue(forKey:id) {
+                sunHoverTideBacklog.forgetSide(queued, owner: id)
+#if M1139_CHECK
+                traceSunHoverTide(queued, owner: id)
+#endif
+                tideSides[id]?.receive(item.conversation.notices.snapshot(in:item.conversation),incoming:queued,at:tideNow());packTideSides();onNeedsFrames?(0);scheduleTideWake()
+            }
+        }
+        if tideFaces[id] == nil {
+            let c=makeOrbConfiguration(item.conversation,drawingSize:48,backingScale:view.window?.backingScaleFactor ?? 2,reduceMotion:false,ambient:false,isKeyWindow:true)
+            let face=DockTideFace(id:id,glass:item.glass,configuration:c)
+            mount(face.orb);tideFaces[id]=face
+        }
+    }
+    private func scheduleTideWarmup(after delay:Double=0.6) {
+        guard tideWarmJob == nil else{return}
+        let generation=tideWarmGeneration
+        let job=DispatchWorkItem { [weak self] in
+            guard let self,self.tideWarmGeneration==generation else{return}
+            self.tideWarmJob=nil
+            guard self.tideWarmAllowed?() != false else{return}
+            if self.tideTimeline?.active != true,let event=NSApp.currentEvent,CACurrentMediaTime()-event.timestamp<0.25 {
+                self.scheduleTideWarmup(after:0.25);return
+            }
+            self.prepareTideWords()
+            if let item=self.tideWarmCandidates().first(where:{i in self.tideFaces[i.conversation.id] == nil || (self.sideEligible(i) && self.tideSides[i.conversation.id]?.ready != true) || (i.role == .bar && self.tidePool[i.conversation.id]?.ready != true)}) {
+                self.warmTideItem(item,complete:false);self.scheduleTideWarmup(after:0.003)
+            }
+        }
+        tideWarmJob=job;DispatchQueue.main.asyncAfter(deadline:.now()+delay,execute:job)
+    }
+    private func advanceTideClock(to time:Double) {
+        guard tideTimeline?.active == true,!tideFrozen else{return}
+        tideTimeline?.reduced=Motion.reduce
+        tideTimeline?.step(max(0,time-(tideMediaLast ?? time)),settleFromRest:true);tideMediaLast=time
+        if tideTimeline?.active == false,!Motion.reduce {
+            for (id,source) in tideNodePoses {
+                guard let item=items[id],item.role == .orb,MotionStep.edge(source,item.regular)>0.001 else{continue}
+                let tuning=RectSpring(dockFrom:source,to:item.regular,response:0.50,damping:0.86)
+                queueContours([(item.glass,source,nil)],tuning:tuning,stableRaw:false)
+            }
+        }
+    }
+    private func scheduleTideWake() {
+        guard !tideFrozen else {tideWakeJob?.cancel();tideWakeJob=nil;tideWakeAt=nil;return}
+        let now=tideNow()
+        advanceTideSides(at:now)
+        if tideSides.values.contains(where:{$0.busy}) {onTideMotion?();onNeedsFrames?(0)}
+        var delays=[tideTimeline?.nextWake]
+        delays += tideSides.values.filter{ $0.motion.active }.map{ $0.nextWake }
+        if let reclaim=tideReclaim {delays.append(max(0,reclaim.due-now))}
+        if tideTimeline?.active == true,let release=tideTimeline?.leases.nextProtectionRelease(after:now) {delays.append(release-now)}
+        guard let delay=delays.compactMap({$0}).min() else {tideWakeJob?.cancel();tideWakeJob=nil;tideWakeAt=nil;return}
+        let due=now+max(0.001,delay)
+        if let old=tideWakeAt,abs(old-due)<0.005 {return}
+        tideWakeJob?.cancel();tideWakeAt=due
+        let job=DispatchWorkItem { [weak self] in self?.serviceTideDeadline() }
+        tideWakeJob=job;DispatchQueue.main.asyncAfter(deadline:.now()+max(0.001,delay),execute:job)
+    }
+    /// The timer also has a deterministic entry for detached verification with an injected clock.
+    func serviceTideDeadline() {
+        let due=tideWakeAt,at=tideNow()
+        tideWakeJob?.cancel();tideWakeJob=nil;tideWakeAt=nil
+        guard !tideFrozen else{return}
+        if let due {
+            tideLastWakeDriftMS=(at-due)*1000
+        }
+        advanceTideSides(at:tideNow())
+        let previousHover=tideTimeline?.hovering
+        advanceTideClock(to:tideNow());refreshTideProtection()
+        if let reclaim=tideReclaim,reclaim.due<=tideNow()+1e-8 {
+            tideReclaim=nil;onTideReclaim?(reclaim.id)
+        }
+        if tideTimeline?.busy == true || tideSides.values.contains(where:{$0.busy}) || previousHover != tideTimeline?.hovering {onTideMotion?();onNeedsFrames?(0)}
+        scheduleTideWake()
+    }
+    private func tideNow()->Double {motionTime?() ?? CACurrentMediaTime()}
+    private func configureTide() {
+        if trashReflowPending { reflowTrashTide();trashReflowPending=false;return }
+        retireTide();tideMinimumGap = .infinity;tideWorstPair=""
+        for id in Array(tideSides.keys) where items[id].map({!sideEligible($0)}) ?? true {tideSides.removeValue(forKey:id)?.dispose()}
+        for id in Array(tidePool.keys) where items[id] == nil {tidePool.removeValue(forKey:id)?.dispose()}
+        for id in Array(tideFaces.keys) where items[id] == nil || tideFaces[id]?.orb.glassView !== items[id]?.glass {tideFaces.removeValue(forKey:id)?.dispose()}
+        for id in Array(tideBorrowHits.keys) where items[id] == nil {tideBorrowHits.removeValue(forKey:id)?.removeFromSuperview()}
+        let bars=items.values.filter{$0.role == .bar}.sorted{$0.target.minX>$1.target.minX}
+        let briefs=bars.prefix(while:{!$0.full}).map{($0.conversation.id,$0.target)}
+        let orbs=items.values.filter{$0.role == .orb && $0.slot >= base.leading}.sorted{$0.target.minX<$1.target.minX}.map{($0.conversation.id,$0.target)}
+        if let add=tideLeaseMemory.add,add.committed {
+            let needed=add.briefs.prefix{items[$0]?.role == .orb}.count
+            _=tideLeaseMemory.updateAddCapacity(requiredBriefs:needed)
+        }
+        tideTimeline=TideMotion(briefs:briefs,orbs:orbs)
+        tideTimeline?.leases=tideLeaseMemory
+        refreshTideProtection()
+        scheduleTideWarmup()
+        tideCursors=Dictionary(uniqueKeysWithValues:items.values.map{($0.conversation.id,$0.conversation.notices.journal.last?.id ?? 0)})
+    }
+    func retireTide() {
+        tideModeExit.clear()
+        let retiredNodes=Array(tideNodePoses.keys)
+        tideFrozen=false;tideFrozenAt=nil;tideFrozenSources=[:];tideReclaim=nil
+        for id in tideAddTails.keys {tidePool[id]?.park();tideFaces[id]?.park()}
+        tideAddTails.removeAll();tideAddLayout=nil
+        for (id,side) in tideSides {side.retire();tideFaces[id]?.park();items[id]?.decoration.setOpacity(1)}
+        for id in tideSideHiddenSources {
+            guard let item=items[id] else{continue}
+            let alpha=item.identityOpacity.value(at:motionNow())
+            writeGlass(item.glass,frame:item.regular,alpha:CGFloat(1-alpha),hidden:false,reason:"tideSideRetire")
+            item.decoration.setOpacity(1-alpha)
+            if let identity=item.identity {writeGlass(identity.glassView,alpha:CGFloat(alpha),hidden:false,reason:"tideSideRetire");identity.setOpacity(alpha)}
+        }
+        onTideReadingRoom?([])
+        tideSideQueued.removeAll();sunHoverTideBacklog.discardSide();tideSideHiddenSources.removeAll();tideSideFitCache.removeAll();tideSideLive=false
+        endTideAnimationTrial()
+        tideWakeJob?.cancel();tideWakeJob=nil;tideWakeAt=nil
+        tideWarmJob?.cancel();tideWarmJob=nil;tideWarmGeneration+=1
+        tideLeaseMemory=tideTimeline?.leases ?? tideLeaseMemory;tideLeaseMemory.retire()
+        if let id=tidePresentedOwner {tideFaces[id]?.park();items[id]?.decoration.setOpacity(items[id]?.role == .orb ? 1:0);items[id]?.decoration.setPresentationActive(ambientRunning && items[id]?.role == .orb)}
+        tidePresentedOwner=nil
+        for hit in tideBorrowHits.values {hit.isHidden=true;hit.cancelPress()}
+        tideTimeline=nil;tideMediaLast=nil;tideDynamic=false;tideNodePoses=[:]
+        tideWords?.park();clearTideMaterialProbe()
+        for id in retiredNodes {if let item=items[id] {place(item,item.motion.rect ?? item.target)}}
+    }
+    /// Mock capacity input, not a presentation override. The next Core event still applies for the lease.
+    func setTideCapacityFixture(_ width:Double?) {
+        guard store?.usesLiveCore == false else{return}
+        tideTimeline?.capacityDemand=width
+    }
+    func tideOwns(_ id:String)->Bool {
+        if tideSides[id]?.pose.shown == true {return true}
+        guard tideTimeline?.owner==id else{return false}
+        if tideTimeline?.action?.requestID != nil {return true}
+        return (tideTimeline?.nodes[id]?.width.value.target ?? 32)>32 || (tideNodePoses[id]?.width ?? 32)>32
+    }
+    func tideHasNotice(_ id:String)->Bool {tideTimeline?.owner==id || tideSides[id]?.pose.shown == true}
+    private func tideProtection()->[String:Set<DockSlotLeases.Reason>] {
+        var result:[String:Set<DockSlotLeases.Reason>]=[:]
+        for id in items.keys where items[id]?.role == .bar {
+            guard let item=items[id] else{continue};let c=item.conversation,editor=item.composer
+            var reasons:Set<DockSlotLeases.Reason>=[]
+            if item.full {reasons.insert(.fullColumn)}
+            if !c.draft.isEmpty || editor?.text.isEmpty == false {reasons.insert(.draft)}
+            if !c.attachments.isEmpty || editor?.attachments.isEmpty == false || editor?.hasAttachments == true {reasons.insert(.attachment)}
+            if editor?.editorFocused == true || focusTarget == id {reasons.insert(.focus)}
+            if editor?.isComposing == true {reasons.insert(.markedText)}
+            if editor?.isChoosingAttachments == true {reasons.insert(.choosingAttachment)}
+            if c.sending || editor?.hasPendingSubmission == true || editor?.state.sending == true || editor?.state.outcomeUnknown == true {reasons.insert(.submitting)}
+            if carries(id) || tideReclaim?.id==id {reasons.insert(.reclaimed)}
+            if let p=tidePointer,(tideMaterialPoses[id]?.body.rect ?? glassFrame(item.glass)).contains(p) {reasons.insert(.hover)}
+            result[id]=reasons
+        }
+        return result
+    }
+    private func refreshTideProtection() {
+        guard !tideFrozen else{return}
+        let wasBusy=tideTimeline?.busy == true
+        let facts=tideProtection()
+        tideTimeline?.protect(facts,at:tideNow())
+        if let leases=tideTimeline?.leases {tideLeaseMemory=leases}
+        if !wasBusy,tideTimeline?.busy == true {onTideMotion?();onNeedsFrames?(0)}
+        if tideTimeline?.active == true {scheduleTideWake()}
+    }
+    func watchTideEditor(_ editor:NativeComposer) {
+        guard !tideWatchedEditors.contains(editor) else{return}
+        tideWatchedEditors.add(editor)
+        let contents=editor.onMotionContentsChange,focus=editor.onFocusChange
+        editor.onMotionContentsChange={ [weak self] in contents?();self?.refreshTideProtection() }
+        editor.onFocusChange={ [weak self] value in focus?(value);self?.refreshTideProtection() }
+    }
+    /// Called by AutoScene's existing observer before transcript coalescing. UI IDs stay unchanged.
+    func receiveTide(_ c:Conversation,enabled:Bool=true) {
+        tideDelivering=true;defer{tideDelivering=false}
+        let snapshot=c.notices.snapshot(in:c)
+        questionDiagnostics.observe(snapshot,owner:c.id)
+        let previous=tideCursors[c.id] ?? snapshot.journal.last?.id ?? 0
+        tideCursors[c.id]=max(previous,snapshot.journal.last?.id ?? 0)
+        refreshTideProtection()
+        if (sunHoverTideBacklog.isDeferring || !sunHoverTideBacklog.isEmpty), items[c.id] != nil, !(TideCompositePolicy.control && store?.usesLiveCore == false) {
+            sunHoverTideBacklog.append(snapshot.journal.filter { $0.id > previous }, owner: c.id)
+            if enabled { resumeSunHoverTide(source: "arrival") }
+            return
+        }
+        deliverTide(c, snapshot: snapshot, after: previous, enabled: enabled)
+    }
+    /// Ordinary arrivals and hover replay share all admission, expiry, text and wake rules.
+    private func deliverTide(_ c: Conversation, snapshot: ConversationNoticeSnapshot, incoming values: [ConversationNotice]? = nil, after previous: Int = 0, enabled: Bool) {
+        tideDelivering=true;defer{tideDelivering=false}
+        func pendingNotices() -> [ConversationNotice] {
+            (values ?? snapshot.journal).filter { notice in (values != nil || notice.id > previous) && (notice.requestID == nil || snapshot.pending.contains(where: { $0.requestID == notice.requestID })) }
+        }
+        if enabled,!tideFrozen,let item=items[c.id],sideEligible(item),!(TideCompositePolicy.control && store?.usesLiveCore == false) {
+            let incoming = pendingNotices()
+            if let side=tideSides[c.id],side.ready {
+                side.configure(makeOrbConfiguration(c,drawingSize:48,backingScale:view.window?.backingScaleFactor ?? 2,reduceMotion:Motion.reduce,ambient:false,isKeyWindow:true))
+#if M1139_CHECK
+                traceSunHoverTide(incoming, owner: c.id)
+#endif
+                side.receive(snapshot,incoming:incoming,at:tideNow());packTideSides()
+                if side.busy {onTideMotion?();onNeedsFrames?(0)}
+                scheduleTideWake()
+            } else if !incoming.isEmpty {sunHoverTideBacklog.recordSide(incoming, owner: c.id);tideSideQueued[c.id,default:[]]+=incoming;scheduleTideWarmup(after:0)}
+            return
+        }
+        guard !(TideCompositePolicy.control && store?.usesLiveCore == false),enabled,!tideFrozen,tideAddTails.isEmpty,!base.focused,items[c.id]?.role == .orb,(items[c.id]?.slot ?? -1)>=base.leading,buds[c.id]?.open != true else{return}
+        if tideTimeline == nil {configureTide()}
+        let at=tideNow()
+        advanceTideClock(to:at)
+        let previousEvent=tideTimeline?.event,previousBusy=tideTimeline?.busy
+        tideTimeline?.syncPending(snapshot,owner:c.id)
+        if tideTimeline?.active == true,(previousEvent != tideTimeline?.event || previousBusy != tideTimeline?.busy) {
+            onTideMotion?();onNeedsFrames?(0)
+        }
+        let incoming = pendingNotices()
+        // Advance old clocks up to arrival before installing a new event's deadline.
+        if !incoming.isEmpty {advanceTideClock(to:at)}
+        for notice in incoming {
+            // Expiring an already dismissed request is silent cleanup, not a fresh space requisition.
+            if notice.kind == .reply,notice.text == "Request expired",
+               tideTimeline?.owner != c.id || tideTimeline?.returning == true {continue}
+            if tideTimeline?.active != true {
+                tideMediaLast=at;tideMovingCallbacks=0;tideStillCallbacks=0;tideMovingWrites=0;tideStillWrites=0;tideArrivalAllocations=0;tideArrivalContentAllocations=0
+            }
+            let protection=tideProtection()
+#if M1139_CHECK
+            traceSunHoverTide([notice], owner: c.id)
+#endif
+            tideTimeline?.receive(notice,owner:c.id,at:at,protection:protection)
+            if tideTimeline?.busy == true {onTideMotion?()}
+            onNeedsFrames?(0);scheduleTideWarmup(after:0);scheduleTideWake()
+        }
+        if tideTimeline?.owner == c.id,let notice=snapshot.journal.first(where:{$0.id == tideTimeline?.event?.id}) {tideTimeline?.updateText(notice.text);scheduleTideWake()}
+    }
+    private var tidePresentationProbe:[String:Any] {
+        var probe=tideWords?.probe ?? [:]
+        probe["interactive"]=tideTimeline?.active == true && !tideFrozen
+        if tideFrozen,let rows=probe["buttons"] as? [[String:Any]] {
+            probe["buttons"]=rows.map{row in var value=row;value["enabled"]=false;return value}
+        }
+        return probe
+    }
+    /// Small retained sample. Before the first physical batch only, gap falls back to the visible row frames.
+    /// No layer inventory, mask/filter walk or full diagnostic snapshot runs here.
+    var tideLightProbe:[String:Any] {
+        guard let m=tideTimeline else{return ["phase":"idle","physicalSampled":false,"side":tideSideProbe,"add":tideAddProbe]}
+        let age=m.paused || tideFrozen ? 0:max(0,tideNow()-(tideMediaLast ?? tideNow()))
+        return ["side":tideSideProbe,"add":tideAddProbe,"modeExit":tideModeExit.probe,"frozenSources":tideFrozenSources.mapValues(DockTideShape.rect),"phase":m.active ? (tideFrozen ? "frozen":m.returning ? "returning":"holding"):"idle","owner":m.owner ?? "",
+            "event":m.event?.kind.rawValue ?? "","eventRemaining":max(0,m.eventRemaining-age),"occupancyRemaining":max(0,m.occupancyRemaining-age),
+            "wakeDriftMS":tideLastWakeDriftMS,"questionWarningCount":questionDiagnostics.warnings.count,"poseAt":tideMediaLast ?? 0,"frameTarget":displayTime ?? latestDisplayTime,"level":m.level,"generation":m.leases.generation,"progress":m.progress as Any? ?? NSNull(),"motionBusy":m.busy && !tideFrozen,"nextWakeAt":tideWakeAt as Any? ?? NSNull(),
+            "rect":m.owner.flatMap{tideNodePoses[$0]}.map{DockTideShape.rect($0)} ?? [],"physicalSampled":false,
+            "minimumGap":tideReportedGap as Any? ?? NSNull(),"tailBudget":TideTailBudget.pieces,
+            "displayCallbacks":["moving":tideMovingCallbacks,"still":tideStillCallbacks],"glassWrites":["moving":tideMovingWrites,"still":tideStillWrites],
+            "arrivalGlassAllocations":tideArrivalAllocations,"arrivalContentAllocations":tideArrivalContentAllocations,"warmMaxSliceMS":tideWarmMaxSliceMS,"warmContentMS":tideWarmContentMS,"preparedTailViews":tidePool.mapValues{$0.views.count},
+            "pending":m.pending.map{["owner":$0.owner,"requestID":$0.notice.requestID ?? ""]},"presentation":tidePresentationProbe,"material":tideMaterialLightProbe]
+    }
+    var tideMaterialLightProbe:[String:Any] {
+        ["physicalSampled":false,"tailBudget":TideTailBudget.pieces,"shapes":tideMaterialShapes.keys.sorted().map {id -> [String:Any] in
+            ["owner":id,"allocatedTailViews":tideMaterialShapes[id]?.views.count ?? 0,"body":tideMaterialPoses[id].map{DockTideShape.rect($0.body.rect)} ?? []]
+        }]
+    }
+    private var tideReportedGap:Double? {
+        if tideMinimumGap.isFinite {return tideMinimumGap}
+        let bodies=items.values.filter {!$0.glass.isHidden && $0.glass.layer?.isHidden != true && $0.glass.alphaValue>0.001}.map(\.glass.frame)
+        return bodies.enumerated().flatMap {i,a in bodies.dropFirst(i+1).map {Double(TideContour.gap(a,$0))}}.min()
+    }
+    var tideProbe:[String:Any] {
+        guard let m=tideTimeline else{return ["phase":"idle"]}
+        let age=m.paused || tideFrozen ? 0:max(0,tideNow()-(tideMediaLast ?? tideNow()))
+        return ["side":tideSideProbe,"add":tideAddProbe,"modeExit":tideModeExit.probe,"frozenSources":tideFrozenSources.mapValues(DockTideShape.rect),"phase":m.active ? (tideFrozen ? "frozen":m.returning ? "returning":"holding"):"idle","owner":m.owner ?? "",
+            "event":m.event?.kind.rawValue ?? "","eventRemaining":max(0,m.eventRemaining-age),"occupancyRemaining":max(0,m.occupancyRemaining-age),
+            "questionWarnings":questionDiagnostics.warnings,"capacityDemand":m.capacityDemand as Any? ?? NSNull(),"elapsed":m.elapsed,"level":m.level,"generation":m.leases.generation,"lyric":m.lyric,
+            "contentAlpha":m.ink.opacity,"degraded":tideDegraded,"minimumGap":tideReportedGap as Any? ?? NSNull(),"worstPair":tideWorstPair,
+            "tailBudget":TideTailBudget.pieces,"motionBusy":m.busy && !tideFrozen,"nextWakeAt":tideWakeAt as Any? ?? NSNull(),
+            "displayCallbacks":["moving":tideMovingCallbacks,"still":tideStillCallbacks],"glassWrites":["moving":tideMovingWrites,"still":tideStillWrites],"arrivalGlassAllocations":tideArrivalAllocations,"arrivalContentAllocations":tideArrivalContentAllocations,"warmMaxSliceMS":tideWarmMaxSliceMS,"warmContentMS":tideWarmContentMS,"preparedTailViews":tidePool.mapValues{$0.views.count},
+            "faces":tideFaces.mapValues{$0.probe},"ownerOriginalOpacity":m.ownerInk.opacity,
+            "sampleAt":tideMediaLast ?? 0,"frameTarget":displayTime ?? latestDisplayTime,
+            "bubbles":m.briefOrder.compactMap { id -> [String:Any]? in guard let b=m.bubbles[id] else{return nil};return ["id":id,"raw":DockTideShape.rect(b.rect),"tail":b.tail.x,"lean":b.lean.x,"content":b.content.opacity,"face":b.face.opacity] },
+            "nodes":tideNodePoses.mapValues{DockTideShape.rect($0)},"pending":m.pending.map{["owner":$0.owner,"requestID":$0.notice.requestID ?? ""]},"presentation":tidePresentationProbe,"material":tideMaterialProbe]
+    }
+    private func applyDynamicTide() {
+        CATransaction.begin();CATransaction.setDisableActions(true);defer{CATransaction.commit()}
+        if tideFrozen {
+            if tideModeExit.isExiting {return}
+            for (id,rect) in tideFrozenSources {
+                guard let item=items[id],tideSides[id]?.pose.shown != true else{continue}
+                if tideAddTails[id] != nil {item.motion.reset(rect)}
+                writeGlass(item.glass,frame:rect,alpha:1,hidden:false,reason:"tideModeFreeze");item.shape(rect)
+                if tideTimeline?.owner==id {item.decoration.setOpacity(Float(tideTimeline?.ownerInk.opacity ?? 0));item.decoration.setPresentationActive(false)}
+            }
+            return
+        }
+        refreshTideProtection()
+        guard tideTimeline?.active == true || tideDynamic else{return}
+        let at=tideNow()
+        let protection=tideProtection()
+        tideTimeline?.protect(protection,at:at);advanceTideClock(to:at);scheduleTideWake()
+        guard let m=tideTimeline,m.active else {
+            if let id=tidePresentedOwner {tideFaces[id]?.park();items[id]?.decoration.setOpacity(items[id]?.role == .orb ? 1:0);items[id]?.decoration.setPresentationActive(ambientRunning && items[id]?.role == .orb)}
+            tidePresentedOwner=nil
+            let retired=Set(tideNodePoses.keys).union(tideMaterialShapes.keys)
+            tideDynamic=false;tideNodePoses=[:];clearTideMaterialProbe();tideWords?.park()
+            for id in retired {if let item=items[id] {place(item,item.regular)}}
+            onTideReadingRoom?([])
+            return
+        }
+        if tideFrameMoving != nil {tideFrameMoving = tideFrameMoving == true || m.busy || (tideLastAppliedRise != nil && tideLastAppliedRise != rise)}
+        tideLastAppliedRise=rise
+        tideDynamic=true;tideDegraded=false
+        let wanted=Set(m.briefOrder.prefix(m.level))
+        for id in wanted where tideMaterialShapes[id] == nil {
+            guard let item=items[id] else{continue}
+            tideMaterialSavedPaint[id]=(item.chromeHost.isHidden,item.grip.isHidden)
+            if tidePool[id] == nil {
+                tidePool[id]=DockTideShape(owner:id,parent:content,material:item.glass,shadowParent:view,allocate:false)
+                tidePool[id]?.onTintWrite={ [weak self] in self?.countTideWrite() }
+                tidePool[id]?.onAllocation={ [weak self] in
+                    guard let self else{return}
+                    if self.tideDelivering || self.tideFrameMoving != nil {self.tideArrivalAllocations+=1}
+                    self.countTideWrite()
+                }
+            }
+            tideMaterialShapes[id]=tidePool[id]
+            scheduleTideWarmup(after:0)
+        }
+        let previousPoses=tideMaterialPoses
+        tideMaterialPoses=[:]
+        for id in m.briefOrder.reversed() where tideMaterialShapes[id] != nil {
+            guard let b=m.bubbles[id] else{continue};var r=b.rect.offsetBy(dx:0,dy:-rise)
+            for other in items.values where other.role == .bar && other.conversation.id != id && other.target.minX<b.original.minX {
+                let o=tideMaterialPoses[other.conversation.id]?.body.rect ?? glassFrame(other.glass)
+                r.origin.x=max(r.minX,o.maxX+12)
+            }
+            let input=TideMaterialPose(owner:id,body:r,tailAmount:b.tail.x,lean:b.lean.x,horizontalVelocity:b.left.v,retracting:b.tail.value.target==0 && b.tail.v<0)
+            if tideContourInputs[id] == input,let old=previousPoses[id] {tideMaterialPoses[id]=old}
+            else {tideContourInputs[id]=input;tideMaterialPoses[id]=input.contour}
+        }
+        let displayedNodes=tideNodePoses
+        tideNodePoses=[:]
+        // The refusal spring can rebound past the resting width. Admit against that same-frame
+        // glass, not the ordinary placement that will be overwritten later in this batch.
+        for id in m.briefOrder where !Set(m.briefOrder.prefix(m.level)).contains(id) && tideMaterialShapes[id] == nil {
+            guard let bubble=m.bubbles[id],abs(bubble.width.x-bubble.original.width)>0.001,let item=items[id] else{continue}
+            let r=bubble.rect.offsetBy(dx:0,dy:-rise)
+            tideNodePoses[id]=r;writeGlass(item.glass,frame:r,alpha:1,hidden:false,reason:"tideRefusal")
+        }
+        let excluded=Set(m.orbOrder).union(tideMaterialPoses.keys)
+        let obstacles=materialObstacles(excluding:excluded)+tideMaterialPoses.values.flatMap{$0.parts.map(\.rect)}
+        // Round both sides of a reserved slot outwards. Subtracting an epsilon only from its
+        // right edge made the last 32 pt neighbour miss the left-hand 12 pt test by one ulp.
+        let rowClearance=12.0+0.000_000_1
+        var nextEdge=Double.infinity
+        for (index,id) in m.orbOrder.enumerated().reversed() {
+            guard let node=m.nodes[id] else{continue}
+            var raw=node.rect.offsetBy(dx:0,dy:-rise)
+            let raised=id==m.owner && node.lift.x>1
+            var rowCapacity=node.widthDemand
+            if raised {
+                let right=min(raw.maxX,nextEdge-12-1e-9)
+                raw.origin.x=right-raw.width
+            } else {
+                // Bounded row admission, not a second spring or a joint topology solver.
+                // Only a returning notification may be wider than the ordinary 32 pt minimum.
+                let left=obstacles.filter{raw.minY<$0.maxY+rowClearance && raw.maxY>$0.minY-rowClearance}.map{$0.maxX+rowClearance}.max() ?? 0
+                let reserve=Double(index)*(32+rowClearance)
+                // Reconstructing maxX must stay on the legal side of an exact 12 pt boundary.
+                let rightLimit=nextEdge-rowClearance
+                let right=min(rightLimit,max(min(raw.maxX,rightLimit),left+reserve+32))
+                rowCapacity=max(32,right-left-reserve)
+                let width=max(32,min(raw.width,rowCapacity))
+                if width<raw.width-0.001 {tideDegraded=true}
+                raw=CGRect(x:right-width,y:raw.minY,width:width,height:max(32,raw.height))
+            }
+            let other=obstacles+Array(tideNodePoses.values)
+            var r=TideContour.admit(raw,obstacles:other)
+            if id==m.owner,let previous=displayedNodes[id],previous.width>68,
+               (r?.width ?? 0)<raw.width-0.001 {
+                let ceiling=other.filter{raw.minX<$0.maxX+12 && raw.maxX>$0.minX-12}.map{$0.minY-12}.min()
+                if let ceiling,previous.maxY<=ceiling+0.001 {
+                    // Reverse the handoff: keep the admitted card above its neighbour until it fits the row.
+                    var floating=raw;floating.origin.y=min(raw.minY,ceiling-raw.height)
+                    if let admitted=TideContour.admit(floating,obstacles:other),abs(admitted.width-raw.width)<0.001 {r=admitted}
+                }
+            }
+            if r == nil {
+                let orb=CGRect(x:raw.maxX-32,y:raw.midY-16,width:32,height:32)
+                r=TideContour.admit(orb,obstacles:other)
+            }
+            guard let fitted=r else {
+                // An owner never gets permission to cover a protected editor. Keep its last legal orb.
+                tideDegraded=true
+                continue
+            }
+            if fitted.width<raw.width-0.001 {tideDegraded=true}
+            tideNodePoses[id]=fitted
+            if id==m.owner,(node.lift.x>1 || node.lift.value.target>0) {
+                tideTimeline?.acceptRaisedPose(fitted.offsetBy(dx:0,dy:rise),for:id)
+            } else {
+                let demand=min(node.widthDemand,rowCapacity)
+                let maximum=CGRect(x:raw.maxX-demand,y:raw.minY,width:demand,height:raw.height)
+                let capacity=TideContour.admit(maximum,obstacles:other)?.width ?? 32
+                tideTimeline?.acceptRowPose(fitted.offsetBy(dx:0,dy:rise),capacity:capacity,for:id)
+            }
+            if !raised {nextEdge=fitted.minX}
+        }
+        for id in m.orbOrder {
+            if let item=items[id],let r=tideNodePoses[id] {
+                writeGlass(item.glass,frame:r,alpha:1,hidden:false,reason:id==m.owner ? "tideNotification":"tideRow");item.shape(r)
+            }
+        }
+        onTideReadingRoom?(m.owner.flatMap {id in tideNodePoses[id].flatMap {r in r.minY < (items[id]?.regular.minY ?? r.minY)-1 ? [r]:nil}} ?? [])
+        if let id=m.owner,let r=tideNodePoses[id],let item=items[id] {
+            prepareTideWords()
+            // Requisitioned brief tails belong to other conversations, never to this notice's halo.
+            tideWords?.render(m,rect:r,tailBounds:nil,title:item.conversation.title,color:Look.identity[item.conversation.identityIndex % Look.identity.count],glyph:orbIdentity(of:item.conversation).symbol)
+            if let old=tidePresentedOwner,old != id {
+                tideFaces[old]?.park();items[old]?.decoration.setOpacity(1)
+                items[old]?.decoration.setPresentationActive(ambientRunning)
+            }
+            tidePresentedOwner=id
+            item.decoration.setOpacity(Float(m.ownerInk.opacity))
+            item.decoration.setPresentationActive(m.ownerInk.opacity>0 && ambientRunning)
+            tideFaces[id]?.hide()
+        }
+    }
+
+    // M11.34 material validation is opt-in and mock-only, pending WindowServer approval of the tail.
+    private var tideMaterialShapes: [String: DockTideShape] = [:]
+    private var tideMaterialPoses: [String: TideContour] = [:]
+    private var tideContourInputs:[String:TideMaterialPose]=[:]
+    private var tideMaterialSavedPaint: [String: (chrome: Bool, grip: Bool)] = [:]
+    private var tideMaterialSuppressed: Set<String> = []
+
+    /// A static native material sample only. It deliberately does not implement Tide event playback.
+    @discardableResult func stageTideMaterialProbe(_ poses: [TideMaterialPose]) -> Bool {
+        guard store?.usesLiveCore == false, !base.focused, !poses.isEmpty,
+              Set(poses.map(\.owner)).count == poses.count,
+              poses.allSatisfy({ items[$0.owner]?.role == .bar && items[$0.owner]?.full == false
+                  && items[$0.owner]?.conversation.isLiveConversation == false
+                  && items[$0.owner]?.conversation.draft.isEmpty == true
+                  && items[$0.owner]?.conversation.attachments.isEmpty == true
+                  && items[$0.owner]?.composer?.isComposing != true
+                  && items[$0.owner]?.composer?.editorFocused != true }) else { return false }
+        let proposed = Dictionary(uniqueKeysWithValues: poses.map { ($0.owner,$0.contour) })
+        for (id, contour) in proposed {
+            let others = materialObstacles(excluding: Set(proposed.keys)) + proposed.filter { $0.key != id }.flatMap { $0.value.parts.map(\.rect) }
+            guard others.allSatisfy({ contour.envelopeGap(to:$0) >= 12-1e-8 }) else { return false }
+        }
+        retireTide()
+        tideMaterialPoses = proposed
+        for id in proposed.keys.sorted() {
+            guard let item = items[id] else { continue }
+            tideMaterialSavedPaint[id] = (item.chromeHost.isHidden,item.grip.isHidden)
+            warmTideItem(item,complete:true)
+            tideMaterialShapes[id] = tidePool[id]
+        }
+        let batch=beginGlassBatch();applyTideMaterialProbe();endGlassBatch(batch)
+        refreshOrbs()
+        return true
+    }
+
+    func clearTideMaterialProbe() {
+        guard !tideMaterialShapes.isEmpty else { return }
+        let old=tideMaterialShapes
+        tideMaterialShapes=[:];tideMaterialPoses=[:];tideContourInputs=[:];tideMaterialSuppressed=[]
+        for (id, shape) in old {
+            for glass in shape.views {writeGlass(glass,frame:.zero,hidden:true,reason:"tidePark")}
+            shape.park();tideFaces[id]?.park();tideBorrowHits[id]?.isHidden=true
+            if let item=items[id] {
+                let saved=tideMaterialSavedPaint[id]
+                item.chromeHost.isHidden=saved?.chrome ?? false;item.grip.isHidden=saved?.grip ?? false;item.grip.opacity=1
+                item.chromeHost.layer?.opacity=1;item.chromeHost.layer?.transform=CATransform3DIdentity;item.chromeHost.layer?.filters=nil
+                for layer in [item.decoration.frontView.layer,item.decoration.backView.layer] {layer?.filters=nil;layer?.transform=CATransform3DIdentity}
+                item.decoration.setOpacity(item.role == .orb ? 1:0)
+                place(item,item.motion.rect ?? item.target)
+            }
+        }
+        tideMaterialSavedPaint=[:];tideInkFilters=[:];refreshOrbs()
+    }
+
+    var tideMaterialProbe: [String:Any] {
+        ["validationOnly":true,"nativeFusionVerified":false,"containerSpacing":container.spacing,"tailBudget":TideTailBudget.pieces,"faces":tideFaces.mapValues{$0.probe},
+         "suppressed":tideMaterialSuppressed.sorted(),"shapes":tideMaterialShapes.keys.sorted().map { tideMaterialShapes[$0]!.probe }]
+    }
+
+    private func materialObstacles(excluding ids:Set<String>) -> [CGRect] {
+        var frames=items.filter { !ids.contains($0.key) && !glassHidden($0.value.glass) }.map { glassFrame($0.value.glass) }
+        if let me,!glassHidden(me) {frames.append(glassFrame(me))}
+        if let draftBar,!glassHidden(draftBar.glass) {frames.append(glassFrame(draftBar.glass))}
+        return frames.filter { $0.width>0 && $0.height>0 }
+    }
+
+    private func applyTideMaterialProbe() {
+        guard !tideFrozen else{return}
+        CATransaction.begin();CATransaction.setDisableActions(true);defer{CATransaction.commit()}
+        guard !tideMaterialShapes.isEmpty else { return }
+        if base.focused || tideMaterialShapes.keys.contains(where: {
+            items[$0]?.role != .bar || items[$0]?.full == true || carries($0)
+                || items[$0]?.conversation.draft.isEmpty != true || items[$0]?.composer?.isComposing == true
+        }) && !tideDynamic { clearTideMaterialProbe(); return }
+        tideMaterialSuppressed=[]
+        let ids=Set(tideMaterialShapes.keys)
+        for id in ids.sorted() {
+            guard let item=items[id],let shape=tideMaterialShapes[id],let proposed=tideMaterialPoses[id] else { continue }
+            let others=materialObstacles(excluding:ids) + tideMaterialPoses.filter { $0.key != id }.flatMap { $0.value.parts.map(\.rect) }
+            let contour:TideContour
+            if others.allSatisfy({proposed.envelopeGap(to:$0)>=12-1e-8}) {contour=proposed}
+            else {contour = .init(body:proposed.body.rect,tailAmount:0,lean:26);tideMaterialSuppressed.insert(id)}
+            writeGlass(item.glass,frame:contour.body.rect,alpha:1,hidden:false,reason:"tideMaterial")
+            let b=tideDynamic ? tideTimeline?.bubbles[id]:nil
+            let face=b?.face.opacity ?? 1,ink=b?.content.opacity ?? 0
+            if let hit=tideBorrowHits[id] {
+                if hit.frame != contour.body.rect {hit.frame=contour.body.rect}
+                hit.interactive = !tideFrozen
+                hit.isHidden = !tideDynamic || (ink>=1 && !hit.hasPress)
+            }
+            item.shape(contour.body.rect);item.decoration.setOpacity(0)
+            tideFaces[id]?.render(rect:contour.body.rect,opacity:face)
+            item.chromeHost.isHidden=ink<=0;item.grip.isHidden=ink<=0
+            item.grip.opacity=Float(ink)
+            var filter=tideInkFilters[id]
+            DockTidePresentation.ink(item.chromeHost.layer!,opacity:ink,blur:(1-ink)*8,scale:0.97+0.03*ink,filter:&filter)
+            tideInkFilters[id]=filter
+
+            shape.apply(contour) { [unowned self] glass,rect,hidden in self.writeGlass(glass,frame:rect,alpha:1,hidden:hidden,reason:"tideMaterial") }
+            let original=tideTimeline?.bubbles[id]?.original.width ?? 160
+            let amount=max(0,min(1,1-(contour.body.rect.width-36)/max(1,original-36)))
+            shape.style(identity:Look.identity[item.conversation.identityIndex % Look.identity.count],amount:amount)
+
+        }
+    }
 #if M10_DOCK_SELFTEST
     struct PhysicalGlass {
         let id: String, group: String
@@ -471,6 +1798,9 @@ import QuartzCore
         }
         return (alpha,hidden,presentation,chain)
     }
+    /// Read-only: whether two Dock groups' glass is fused right now. Outside M10_DOCK_SELFTEST because the app's
+    /// column-work M53 check (dock-fix) asserts the refusal leaves the fusion topology unchanged.
+    func topologyConnected(_ a: String, _ b: String) -> Bool? { glassTopology.connected(a,b) }
 #if M10_DOCK_SELFTEST
     var physicalGlassSnapshot:[PhysicalGlass] {auditedGlassSnapshot.filter{!$0.hidden}}
     var auditedGlassSnapshot: [PhysicalGlass] {
@@ -484,8 +1814,13 @@ import QuartzCore
         }
         add("me","me",me,meMotion.rect)
         for (id,item) in items {
-            add("item."+id,id,item.glass,item.motion.rect)
+            add("item."+id,id,item.glass,tideNodePoses[id] ?? tideMaterialShapes[id]?.contour?.body.rect ?? item.motion.rect)
             add("identity."+id,"identity."+id,item.identity?.glassView,item.identityMotion.rect)
+        }
+        for (id, shape) in tideMaterialShapes {
+            for (i, part) in (shape.contour?.tail ?? []).enumerated() {
+                add("tide.tail.\(id).\(i)",id,shape.views[i],part.rect)
+            }
         }
         if let owner=capsuleOwnerID { add("capsule",owner,focusedGlass,capsuleMotion.rect) }
         add("draft","draft",draftBar?.glass,draftMotion.rect)
@@ -493,7 +1828,6 @@ import QuartzCore
     }
     var reviewPhysicalReleaseCount:Int {glassReleases.values.filter{motionNow()<$0.began+$0.spring.duration}.count}
     var topologyFinalResidual: CGFloat { glassTopology.finalResidual }
-    func topologyConnected(_ a: String, _ b: String) -> Bool? { glassTopology.connected(a,b) }
     func clearHoverProjectionForVerification() { orbDeltas = [] }
     var hoverProjectionForVerification: [CGRect] { orbDeltas }
     var reviewFades: [String: Float] {
@@ -540,12 +1874,89 @@ import QuartzCore
     /// The window installs the initial value too: AutoScene only notifies subsequent changes.
     var focusTargetProvider: (() -> String?)?
     var focusTarget: String? {
-        didSet { if focusTarget != oldValue { retargetSegmentAppearance(); onNeedsFrames?(0.25) } }
+        didSet { if focusTarget != oldValue { refreshTideProtection();retargetSegmentAppearance(); onNeedsFrames?(0.25) } }
     }
     /// Over the glass: the bars' grips (a grip straddles its bar's edge, so it cannot live in the clipped glass).
     private let gripPlane = DockNode.Passage()
     private var me: NSGlassEffectView?
     private var meDecoration: OrbComponent?
+    private var sunHoverDiameter: CGFloat = 0, sunHoverBaseFrame: CGRect?
+    private var sunHoverLabel: String?, sunHoverLabelMix = 0.0
+    private var sunHoverPickupDiameter: CGFloat?
+    private var sunHoverHeldShape: (shape: RectSpring, began: Double)?
+    var sunHoverBadge: (() -> OrbBadge?)?
+    var sunHoverBlocksPointer: ((CGPoint) -> Bool)?
+    var onMeMeasurementChanged: (() -> Void)?
+    private(set) var sunHoverCornerWrites = 0
+    private var sunHoverTideBacklog = SunHoverTideBacklog()
+    var sunHoverTideCanResume: (() -> Bool)?
+    var sunHoverDeferredCount: Int { sunHoverTideBacklog.entries.count }
+    var sunHoverTideEventID: Int? { tideTimeline?.event?.id }
+    func sunHoverTideCursor(_ id: String) -> Int? { tideCursors[id] }
+    func beginSunHoverTideDeferral() {
+        guard !sunHoverTideBacklog.isDeferring else { return }
+        sunHoverTideBacklog.begin(sideQueued: tideSideQueued); tideSideQueued = [:]
+        _ = dismissTide()
+        _ = dismissTide()
+    }
+    func endSunHoverTideDeferral(resume: Bool = true) {
+        sunHoverTideBacklog.end()
+        if resume { resumeSunHoverTide(source: "finish") }
+    }
+    func resumeSunHoverTide(source: StaticString = #function) {
+#if M1139_CHECK
+        sunHoverTideResumeSources.append(String(describing: source))
+#endif
+        guard !sunHoverTideBacklog.isDeferring, !sunHoverTideBacklog.isEmpty, sunHoverTideCanResume?() != false, !tideFrozen else { return }
+        for entry in sunHoverTideBacklog.drain() {
+            guard let item = items[entry.owner], !item.conversation.archived else { continue }
+            let snapshot = item.conversation.notices.snapshot(in: item.conversation)
+            let notice = snapshot.journal.first { $0.id == entry.notice.id } ?? entry.notice
+            deliverTide(item.conversation, snapshot: snapshot, incoming: [notice], enabled: true)
+        }
+    }
+#if M1139_CHECK
+    private(set) var sunHoverTideReceipts: [String] = [], sunHoverTideResumeSources: [String] = []
+    var sunHoverTideIsDeferring: Bool { sunHoverTideBacklog.isDeferring }
+    var sunHoverSideQueuedIDs: [String: [Int]] { tideSideQueued.mapValues { $0.map(\.id) } }
+    func sunHoverTideResetReceipts() { sunHoverTideReceipts = []; sunHoverTideResumeSources = [] }
+    func sunHoverTideForgetCursor(_ id: String) { tideCursors[id] = nil }
+    private func traceSunHoverTide(_ notices: [ConversationNotice], owner: String) { sunHoverTideReceipts += notices.map { "\(owner):\($0.id)" } }
+#endif
+    func takeSunHoverDiameterForDrag() {
+        sunHoverPickupDiameter = sunHoverBaseFrame?.width ?? base.me.width
+        sunHoverDiameter = 0
+    }
+    /// The Sun surfaces share LL's native fusion container. This is semantic mounting, never a frame writer.
+    func mountSunHoverGlass(_ surfaces: [NSGlassEffectView]) {
+        for surface in surfaces { content.addSubview(surface, positioned: .above, relativeTo: me) }
+    }
+    /// Keep the usage ring behind LL's front glyphs and badge, in the same world coordinates.
+    func mountSunHoverRing(_ layers: [CALayer]) {
+        guard let parent = meDecoration?.frontView.layer else { return }
+        CATransaction.begin(); CATransaction.setDisableActions(true); defer { CATransaction.commit() }
+        for ring in layers.reversed() where ring.superlayer !== parent { parent.insertSublayer(ring, at: 0) }
+    }
+#if M1139_CHECK
+    func sunHoverRingsBelowMe(_ layers: [CALayer]) -> Bool {
+        guard let parent = meDecoration?.frontView.layer, let all = parent.sublayers, all.count > layers.count else { return false }
+        return layers.allSatisfy { $0.superlayer === parent } && Array(all.prefix(layers.count)).elementsEqual(layers, by: { $0 === $1 })
+    }
+#endif
+    struct MeMeasurement { let frame: CGRect; var center: CGPoint { CGPoint(x: frame.midX, y: frame.midY) }; var diameter: CGFloat { frame.width } }
+    var meMeasurement: MeMeasurement? { me.flatMap { $0.isHidden ? nil : MeMeasurement(frame: glassFrame($0)) } }
+    var sunHoverBadgeRect: CGRect? { meDecoration?.meBadgeRect }
+    var sunHoverBadgeIsAboveBody: Bool { meDecoration?.meBadgeIsAboveBody == true }
+    var sunHoverMeUsage: Double? { meDecoration?.meSemanticUsage }
+    var sunHoverMeCorner: CGFloat { me?.cornerRadius ?? 0 }
+    func setSunHover(diameterDelta: CGFloat, label: String?, mix: Double, at time: Double) {
+        let changedLabel = sunHoverLabel != label
+        let changedDiameter = sunHoverDiameter != diameterDelta
+        sunHoverDiameter = diameterDelta; sunHoverLabel = label; sunHoverLabelMix = mix
+        if changedLabel { refreshOrbs() }
+        meDecoration?.setMeLabelMix(mix)
+        if changedDiameter, me != nil, meHeld == nil { placeMe(sunHoverBaseFrame ?? meSpring.target.adding(meDelta), at: time) }
+    }
     /// me's own spring (it moves for Focused), and what hover adds to it.
     private var meSpring = RectSpring.rest(.zero), meBegan = 0.0, meDelta = CGRect.zero
     /// When me's spring comes to rest (media time), so the clock runs until then.
@@ -612,7 +2023,9 @@ import QuartzCore
             item.segmentMix.began += delta; item.emphasis.began += delta; item.controlsOpacity.began += delta
             item.face.start += delta; item.veil.start += delta; item.semanticZoomUntil += delta
             if item.chromeExit != nil {item.chromeExit!.began += delta}
-            for history in [item.motion,item.orbMotion,item.identityMotion,item.wordMotion,item.peekWordMotion] {history.shiftClock(by:delta)}
+            for history in [item.motion,item.orbMotion,item.identityMotion,item.wordMotion] {
+                history.shiftClock(by:delta)
+            }
             for view in [item.glass,item.barFace,item.label,item.ownComposer].compactMap({$0}) {
                 guard let layer=view.layer, let fade=layer.animation(forKey:Self.fadeKey)?.copy() as? CAAnimation else {continue}
                 fade.beginTime += delta;layer.add(fade,forKey:Self.fadeKey)
@@ -623,21 +2036,38 @@ import QuartzCore
     var contentZoomStyle=M10DockZoom.selected
     private var usesGaussian:Bool {usesExposure && contentZoomStyle == .gauss}
     func resetMotion() {
-        composerMotion?.reset(); composerMotion?.prune()
+        let protected = splitFlight?.endpoints.values.compactMap { $0.composer.map(ObjectIdentifier.init) } ?? []
+        composerMotion?.reset(excluding: Set(protected))
+        composerMotion?.prune()
         meDecoration?.resetHostExposure()
         for item in items.values {item.decoration.resetHostExposure();item.identity?.resetHostExposure()}
         meMotion.reset(); draftMotion.reset(); capsuleMotion.reset()
-        for item in items.values { item.wordGaussian.reset(); item.peekGaussian.reset(); item.label.layer?.opacity=Float(item.label.alphaValue); item.peekFace.layer?.opacity=Float(item.peekFace.alphaValue); item.decoration.resetGlyphGaussian(); item.motion.reset(); item.orbMotion.reset(); item.wordMotion.reset(); item.wordTrail.reset(); item.peekWordMotion.reset(); item.peekTrail.reset(); item.identityMotion.reset(); item.peekFace.glyphExposureActive = false; item.peekFace.motionBadgeRect = nil }
+        for item in items.values {
+            if splitFlight?.owns(item.conversation.id) == true { continue }
+            item.wordGaussian.reset()
+            item.peekFace.layer?.opacity=Float(item.peekFace.alphaValue)
+            item.label.layer?.opacity=Float(item.label.alphaValue)
+            item.decoration.resetGlyphGaussian()
+            item.motion.reset()
+            item.orbMotion.reset()
+            item.wordMotion.reset()
+            item.wordTrail.reset()
+            item.identityMotion.reset()
+        }
     }
     private func placeMe(_ r: CGRect, at now: Double) {
         guard let me else { return }
+        sunHoverBaseFrame = r
+        let r = r.insetBy(dx: -sunHoverDiameter / 2, dy: -sunHoverDiameter / 2)
         meSampleTime = now
         let f = meMotion.update(r, at: now, name: "dock.me", profile: exposureProfile, enabled: usesExposure)
         writeGlass(me, frame:f.painted)
+        if sunHoverDiameter != 0 { me.cornerRadius = f.painted.height / 2; sunHoverCornerWrites += 1 }
         meDecoration?.setFrame(f.painted)
         if let d = meDecoration { M10DockMotion.onOrbFrame?(d, f, exposureProfile) }
         if frameLog != nil { rawExposed[f.name] = f }
         onMotionFrame?(f)
+        onMeMeasurementChanged?()
     }
 
     /// Window environment for the decorations: ambient motion (off in tests), Reduce Motion, key window.
@@ -650,12 +2080,14 @@ import QuartzCore
     private var pointerX: CGFloat?
     /// Hover, 0 (away) → 1 (over the dock): drives the 12 pt rise and the orbs' magnification together.
     private var hover = Spring.rest(0), hoverBegan = 0.0
+    private(set) var sunHoverDockHeld = false
+    private var paintedHoverPose: (amount: Double, lift: Double, pointerX: CGFloat?)?
     private(set) var hovering = false
     /// The rise alone: up while the pointer is over the dock or one of its editors has the keyboard, so typing with the
     /// pointer elsewhere keeps it up while magnification goes (NativeDockScene's separate lift; organic audit B11).
     private var lift = Spring.rest(0), liftBegan = 0.0
     var editing = false {
-        didSet { guard editing != oldValue else { return }; retargetLift(hovered: hover.to > 0.5, now: motionNow()); onNeedsFrames?(0.6) }
+        didSet { guard editing != oldValue else { return }; refreshTideProtection();if sunHoverDockHeld { return };retargetLift(hovered: hover.to > 0.5, now: motionNow()); onNeedsFrames?(0.6) }
     }
     private func retargetLift(hovered: Bool, now: Double) {
         let target: Double = hovered || editing ? 1 : 0
@@ -666,6 +2098,32 @@ import QuartzCore
         liftBegan = now
     }
     private var pendingLeave: DispatchWorkItem?
+    /// Freeze the existing channels at their last painted pose before LL's input reaches pointer().
+    func beginSunHoverDockHold(at now: Double) {
+        guard !sunHoverDockHeld else { return }
+        let amount = paintedHoverPose?.amount ?? 0
+        let up = paintedHoverPose?.lift ?? 0
+        if let pose = paintedHoverPose { pointerX = pose.pointerX }
+        sunHoverDockHeld = true
+        pendingLeave?.cancel(); pendingLeave = nil
+        hover = .rest(amount); hoverBegan = now
+        lift = .rest(up); liftBegan = now
+    }
+    /// Re-admit the latest pointer, including an exit that occurred while the pose was held.
+    func endSunHoverDockHold(at now: Double, pointer point: CGPoint?) -> Double {
+        guard sunHoverDockHeld else { return 0 }
+        sunHoverDockHeld = false
+        let duration = pointer(point, now: now)
+        if pendingLeave == nil { retargetHover(to: hovering ? 1 : 0, now: now) }
+        return max(duration, hover.duration, lift.duration)
+    }
+#if M1139_CHECK
+    var sunHoverLogicalMeFrame: CGRect { meMotion.rect ?? .zero }
+    var sunHoverDockPose: (amount: Double, lift: Double, pointerX: CGFloat?) {
+        let t = motionNow()
+        return (hover.sample(t - hoverBegan).value, lift.sample(t - liftBegan).value, pointerX)
+    }
+#endif
     /// What hover adds to each resting orb slot's frame, and how far the dock has risen.
     private var orbDeltas: [CGRect] = []
     private(set) var rise: CGFloat = 0
@@ -690,6 +2148,9 @@ import QuartzCore
     var composerFor: ((Conversation) -> NativeComposer)?
 
     init(view: NSView, scale: CGFloat) {
+        #if M1138_CAPTURE
+        if SplitRealwinCapture.enabled { SplitRealwinCapture.created(focusedGlass) }
+        #endif
         self.view = view
         (view as? Passage)?.dockOwner=self
         layer.anchorPoint = .zero
@@ -698,6 +2159,8 @@ import QuartzCore
         view.addSubview(container)
         focusedGlass.alphaValue = 0
         focusedGlass.isHidden = true
+        focusedGlass.contentView = NSView()
+        Self.installSplitOpacity(on: focusedGlass)
         content.addSubview(focusedGlass)
         chromePlane.wantsLayer = true
         view.addSubview(chromePlane, positioned: .above, relativeTo: container)
@@ -712,6 +2175,12 @@ import QuartzCore
 
     /// Every working-set conversation's node at rest for `layout`, with `order` its display order (bars first).
     func install(_ layout: AutoLayout, metrics m: AutoLayout.Metrics, order: [Conversation], full: Set<String>, store: ConversationStore) {
+        finishSplitPresentation()
+        retirePeekReply()
+        retireTide()
+        tidePool.values.forEach{$0.dispose()};tidePool=[:]
+        tideSides.values.forEach{$0.dispose()};tideSides=[:];tideGlassCorners=[:];tideSideLive=false
+        tideFaces.values.forEach{$0.dispose()};tideFaces=[:]
         buds.removeAll(keepingCapacity:true);peekShown=nil
         glassTopology.reset(); glassTransitionUntil = 0
         contourHandoffs.removeAll(keepingCapacity:true);tearingGlassID=nil
@@ -735,8 +2204,10 @@ import QuartzCore
         content.addSubview(me); self.me = me
         dressGlass(me)
         meSpring = .rest(layout.me)
-        let meDecoration = OrbComponent(id: "organic.me", glassView: me)
+        sunHoverBaseFrame = layout.me
+        let meDecoration = OrbComponent(id: "organic.me", glassView: me, sceneBody: true)
         mount(meDecoration); self.meDecoration = meDecoration
+        meDecoration.setFrame(layout.me)
         for item in items.values { item.glass.removeFromSuperview(); item.chromeHost.removeFromSuperview(); item.decoration.dispose(); item.identity?.glassView.removeFromSuperview(); item.identity?.dispose() }
         items = [:]
         for c in order {
@@ -757,10 +2228,13 @@ import QuartzCore
         }
         settleContent(full: full)
         refreshOrbs()
+        configureTide()
     }
 
     /// The window changed size: the same nodes, at rest in the new layout.
     func relayout(_ layout: AutoLayout, metrics m: AutoLayout.Metrics, order: [Conversation], full: Set<String>) {
+        finishSplitPresentation()
+        retireTide()
         endAnchoredPeeks(at:motionNow(),force:true)
         if Self.preservesModeLift {CATransaction.begin();CATransaction.setDisableActions(true)}
         let ownsBatch=Self.preservesModeLift ? beginGlassBatch():false
@@ -799,6 +2273,7 @@ import QuartzCore
         if Self.preservesModeLift {hoverFrame(at:motionNow());sample(.infinity)} else {orbDeltas=[]}
         settleContent(full: full)
         refreshOrbs()
+        configureTide()
     }
 
     /// A decoration's back plane goes under the dock's one glass container and its front plane over it (ORB-PORT).
@@ -806,6 +2281,9 @@ import QuartzCore
         d.setCanvasSize(view.bounds.size)
         view.addSubview(d.backView, positioned: .below, relativeTo: container)
         view.addSubview(d.frontView, positioned: .above, relativeTo: container)
+        if let body = d.sceneBodyView {
+            view.addSubview(body, positioned: .above, relativeTo: container)
+        }
     }
 
     /// Ambient motion held or let go (f202): each orb's liquid, satellites and hops keep their phase while held.
@@ -813,7 +2291,7 @@ import QuartzCore
     func setAmbientRunning(_ on: Bool) {
         if ambientRunning != on { resetMotion() }
         ambientRunning = on
-        for item in items.values { item.decoration.setPresentationActive(on && item.role == .orb); item.identity?.setPresentationActive(on && item.identityOpacity.to > 0) }
+        for item in items.values { item.decoration.setPresentationActive(on && item.role == .orb && tideAllowsAmbient(item.conversation.id)); item.identity?.setPresentationActive(on && item.identityOpacity.to > 0 && tideAllowsAmbient(item.conversation.id)) }
         meDecoration?.setPresentationActive(on)
     }
 
@@ -825,12 +2303,14 @@ import QuartzCore
         for item in items.values {
             var c = makeOrbConfiguration(item.conversation, drawingSize: size, backingScale: scale,
                                          reduceMotion: reduce, ambient: ambient && !still, isKeyWindow: key)
-            // Open in a peek: no badge (the capsule shows it), satellites in the row under the capsule.
+            c.bodyOuter=metrics.orb
+            // Peek identity and satellites belong to its ordinary top header.
             if let bud = buds[item.conversation.id], bud.open {
                 c.badge = nil
-                if let follow = bud.follow { c.satelliteMode = .follow(follow) }
+                c.satellites = []
             }
             item.decoration.configure(c)
+            tideFaces[item.conversation.id]?.configure(c)
             if let identity = item.identity {
                 var identityConfig = c
                 identityConfig.drawingSize = size
@@ -838,8 +2318,12 @@ import QuartzCore
             }
         }
         if let store, let meDecoration {
-            meDecoration.configure(makeMeConfiguration(store: store, initials: NormieAccount.prototype.initials, drawingSize: max(metrics.me, 1), backingScale: scale,
-                                                       reduceMotion: reduce, ambient: ambient && !still, isKeyWindow: key))
+            var configuration = makeMeConfiguration(store: store, initials: NormieAccount.prototype.initials, drawingSize: max(metrics.me, 1), backingScale: scale,
+                                                       reduceMotion: reduce, ambient: ambient && !still, isKeyWindow: key, badgeProjection: sunHoverBadge)
+            configuration.meBadgeAtCorner = sunHoverBadge != nil
+            configuration.meLabel = sunHoverLabel
+            meDecoration.configure(configuration)
+            meDecoration.setMeLabelMix(sunHoverLabelMix)
         }
     }
 
@@ -870,6 +2354,7 @@ import QuartzCore
 
     /// Nodes whose conversation is no longer in the working set: gone once the transition settles.
     func dropItems(keeping ids: Set<String>) {
+        if let host = peekReplyHost, !ids.contains(host.id) { retirePeekReply() }
         for (id, item) in items where !ids.contains(id) {
             buds[id]=nil;if peekShown == id {peekShown=nil}
             item.glass.removeFromSuperview(); item.chromeHost.removeFromSuperview(); item.decoration.dispose(); item.identity?.glassView.removeFromSuperview(); item.identity?.dispose(); item.grip.removeFromSuperlayer()
@@ -909,6 +2394,7 @@ import QuartzCore
         for (id, item) in items {
             // A held node starts from where the pointer has it, still; a dropped one springs from there to its slot.
             var now = carries(id) ? (rect: item.motion.rect ?? item.glass.frame, velocity: CGRect.zero) : item.spring.sample(sourceTime)
+            if let source=tideLayoutSources[id] {now=(localFrame(source.rect,role:item.role,slot:item.slot,at:motionNow()),source.velocity)}
             if let releasedIdentity, releasedIdentity.id == id, targets[id]?.role == .orb {
                 now = (localFrame(releasedIdentity.planet,role:item.role,slot:item.slot,at:motionNow()),.zero)
             }
@@ -938,11 +2424,32 @@ import QuartzCore
     /// fades; new content is laid out once for the target (f056: controls never re-lay out while the glass springs), and
     /// an outgoing editor stays in the window until it is out of sight, so a composition is never cut.
     func transition(to layout: AutoLayout, order: [String], full fullIDs: Set<String>, springs: [String: RectSpring], duration: Double) {
+        if let host = peekReplyHost, host.isColumn, let item = items[host.id] {
+            let next = targets(layout, order: order)[host.id]
+            if next?.role != item.role || next?.slot != item.slot || fullIDs.contains(host.id) != item.full ||
+                layout.focused != base.focused || (layout.focused && layout.bars.count != base.bars.count) {
+                retirePeekReply()
+            }
+        }
         synchronizeInjectedClock(at:motionNow())
+        let tideSources=tideLayoutSources
+        let addReservation=tideAddReservation
+        let addPoses=tideContourInputs
+        tideAddTails.removeAll();tideAddLayout=nil
+        let tideBatch=tideSources.isEmpty ? false:beginGlassBatch()
+        defer {
+            if !tideSources.isEmpty {
+                for (id,source) in tideSources {
+                    if let item=items[id] {item.motion.reset(source.rect);writeGlass(item.glass,frame:source.rect,alpha:1,hidden:false,reason:"tideLayoutHandoff");item.shape(source.rect)}
+                }
+                endGlassBatch(tideBatch)
+            }
+        }
         if frameLog != nil { epochSourceBatchID = batchID }
         let meChanges = layout.me != base.me
         let epoch = Self.sharedEpochEnabled ? (transitionEpoch ?? makeTransitionEpoch(at:motionNow())) : nil
         transitionEpoch = nil
+        if !tideSources.isEmpty,!trashReflowPending {retireTide()}
         commitClock = epoch?.began
         transitionIdentitySources = epoch?.identities
         defer { commitClock = nil; transitionIdentitySources = nil }
@@ -960,6 +2467,23 @@ import QuartzCore
                         response:spring.x.response,damping:spring.x.damping)
                 }
             }
+        }
+        if let lease=addReservation {
+            let next=targets(layout,order:order)
+            if lease.briefs.allSatisfy({next[$0]?.role == .orb}),tideLeaseMemory.commitAdd(lease.token) {
+                tideTimeline?.leases=tideLeaseMemory
+                let addBegan=motionTime?() ?? CACurrentMediaTime()
+                let addDuration=(committedSprings.values.map(\.duration).max() ?? 0)+0.07
+                if !lease.briefs.isEmpty || !addPoses.isEmpty {tideAddLayout=(addBegan,addDuration)}
+                for id in Set(lease.briefs).union(addPoses.keys) {
+                    guard let target=next[id],let source=tideSources[id] ?? items[id].map({($0.glass.frame,CGRect.zero)}) else{continue}
+                    let spring=committedSprings[id] ?? RectSpring(dockFrom:source.0,to:target.rect,velocity:.zero,response:Tuning.shared.autoSpring.response,damping:Tuning.shared.autoSpring.damping)
+                    committedSprings[id]=spring
+                    tideAddTails[id]=TideAddHandoff(began:addBegan,duration:addDuration,
+                        initialTail:addPoses[id]?.tailAmount ?? 0,lean:addPoses[id]?.lean ?? 26,reduced:Motion.reduce)
+                }
+            } else {_=tideLeaseMemory.release(lease.token)}
+            tideAddReservation=nil
         }
         sceneBegan = epoch?.began
         // Preparation does not create a new motion observation or consume the incoming exposure.
@@ -1049,7 +2573,9 @@ import QuartzCore
                 if let releasedNode,releasedNode.id == id {world=releasedNode.rect}
                 else if let releasedIdentity,releasedIdentity.id == id {
                     world=releasedIdentity.planet
-                } else {world=sampledWorld}
+                } else if let source = splitFlight?.endpoints[id], source.glass === items[id]?.glass {
+                    world = source.frame
+                } else { world = sampledWorld }
                 let bob = buds[id] == nil ? heldBob(role:target.role,slot:target.slot,at:capsuleNow):(position:CGFloat(0),velocity:CGFloat(0))
                 var velocity=(releasedNode?.id == id || releasedIdentity?.id == id || buds[id]?.physicalTakeover == true) ? spring.sample(0).velocity:source.velocity
                 if let item=items[id],buds[id] == nil {
@@ -1068,6 +2594,11 @@ import QuartzCore
                     to:meHome,velocity:epoch.me.velocity,response:0.40,damping:0.82)
                 meBegan=capsuleNow
             }
+        }
+        for id in tideAddTails.keys {
+            guard let spring=committedSprings[id] else{continue}
+            let recipe=nextTargets[id]?.role == .orb ? (0.42,0.84):(spring.x.response,spring.x.damping)
+            tideAddTails[id]?.size=RectSpring(dockFrom:spring.sample(0).rect,to:spring.target,response:recipe.0,damping:recipe.1)
         }
         for id in dockLandings.keys {dockLandings[id]?.until=motionNow()+duration}
         let capsuleTuning = committedSprings.values.first
@@ -1112,12 +2643,16 @@ import QuartzCore
                     if !full && !item.full {item.wordGaussian.show(t.role == .bar, content: label, at: motionNow(), initiallyVisible: item.role == .bar, fadesContent:false)}
                     else {item.wordGaussian.reset()}
                     if M10DockMotion.orbExposureEnabled {item.decoration.setGlyphGaussianVisible(t.role == .orb, at: motionNow(), initiallyVisible: item.role == .orb, fadesContent:false)}
-                    if let composer=item.ownComposer {composerMotion.setGaussianVisible(composer,t.role == .bar,at:motionNow(),initiallyVisible:item.role == .bar)}
+                    if let composer = item.ownComposer, !holdsSplitInk(composer, member: id) {
+                        composerMotion.setGaussianVisible(composer, t.role == .bar, at: motionNow(),
+                                                          initiallyVisible: item.role == .bar)
+                    }
                 }
                 item.role = t.role
                 let now = motionNow(), from = item.faceOpacity(at: now)
                 item.decoration.setPresentationActive(true)
                 if t.role == .bar {
+                    item.label.alphaValue = full || item.full ? item.label.alphaValue : 1
                     item.face = (from, 0, now, 0.12)
                     fade(item.barFace, to: 1, delay: usesGaussian ? 0:0.10, duration: usesGaussian ? 0.1:0.16)
                 } else {
@@ -1131,7 +2666,13 @@ import QuartzCore
             if full {
                 fade(item.label, to: 0, delay: 0, duration: 0.10)
                 // In as the words leave: an empty capsule for a quarter second read as lag (recording, 2026-10-28).
-                if let composer = item.ownComposer { composer.isHidden = false; fade(composer, to: 1, delay: 0.06, duration: 0.20) }
+                if let composer = item.ownComposer {
+                    let visible = !composer.isHidden && (composer.layer?.presentation()?.opacity ?? 0) > 0
+                    composer.isHidden = false
+                    if !holdsSplitInk(composer, member: id) || !visible {
+                        fade(composer, to: 1, delay: 0.06, duration: 0.20)
+                    }
+                }
             } else {
                 if let composer = item.ownComposer { fade(composer, to: 0, delay: 0, duration: 0.12) }
                 fade(item.label, to: 1, delay: 0.10, duration: 0.16)
@@ -1149,9 +2690,18 @@ import QuartzCore
     /// At rest: the final content, without animation. A composer that is not full leaves the screen and the AX tree,
     /// unless it is mid-composition (hiding it would end the input method's session); then it waits for the next rest.
     func settleContent(full fullIDs: Set<String>) {
+        let takesSplitPaint = splitFlight != nil || splitReply != nil
+        if takesSplitPaint {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+        }
+        defer { if takesSplitPaint { CATransaction.commit() } }
+        let ownsBatch = beginGlassBatch()
+        defer { endGlassBatch(ownsBatch) }
+        startSplitDisplay()
+        finishSplitPresentation()
         endAnchoredPeeks(at:motionNow(),force:true)
         glassReleases.removeAll(keepingCapacity:true)
-        let ownsBatch=beginGlassBatch();defer {endGlassBatch(ownsBatch)}
         let visibleFrames = items.mapValues { $0.motion.rect ?? $0.glass.frame }
         resetMotion()
         refreshWords()
@@ -1182,8 +2732,8 @@ import QuartzCore
             item.decoration.setOpacity((orb ? 1 : 0) * (1-item.identityOpacity.value(at:motionNow())))
             // A bar's decoration stops its clocks (liquid, satellites) until it is an orb again.
             item.decoration.setPresentationActive(orb && item.identityOpacity.to < 1)
-            item.label.alphaValue = full ? 0 : 1
-            if let composer = item.ownComposer {
+            if !borrowsColumn(id) { item.label.alphaValue = full ? 0 : 1 }
+            if let composer = item.ownComposer, !borrowsColumn(id) {
                 composer.alphaValue = full ? 1 : 0
                 composer.isHidden = !full && !composer.isComposing
             }
@@ -1192,6 +2742,7 @@ import QuartzCore
         retargetDividers(animated:false)
         updateFocusedGlass()
         reconcileGlassTopology()
+        configureTide()
     }
 
     // MARK: New Chat's draft bar (f047, f048)
@@ -1320,13 +2871,19 @@ import QuartzCore
     func setMeHidden(_ hidden: Bool) {
         me?.isHidden = hidden
         meDecoration?.backView.isHidden = hidden; meDecoration?.frontView.isHidden = hidden
+        meDecoration?.sceneBodyView?.isHidden = hidden
     }
     func setHidden(_ id: String, _ hidden: Bool) {
         guard let item = items[id] else { return }
+        if hidden,!tideFrozen,tideMaterialShapes[id] != nil {clearTideMaterialProbe()}
         if hidden { composerMotion.reset() }
         setHiddenPaint(item,hidden)
     }
     private func setHiddenPaint(_ item:Item,_ hidden:Bool) {
+        if ModeDepartureSurfaces.retains(item.glass) {return}
+        var hidden = hidden || trashHiddenMember == item.conversation.id
+            || refuseHiddenMember == item.conversation.id
+        if let browserDockPort, browserDockPort.coversMember(item.conversation.id) { hidden = true }
         // Layers hidden, not views: a bar holds its conversation's editor, and hiding the view would take the keyboard
         // from it (Hide Sidebar's composer flight; f030, f101). Glass ignores alphaValue, and the bar's face (the
         // editor) does not draw under the glass's layer, so both go (product: the arriving bar at opacity 0).
@@ -1340,10 +2897,16 @@ import QuartzCore
         if item.role != .bar || !hidden { item.glass.isHidden = hidden }
         item.decoration.backView.isHidden = hidden; item.decoration.frontView.isHidden = hidden
         item.grip.isHidden = hidden || item.role != .bar
+        if tideFrozen,tideFrozenSources[item.conversation.id] != nil {
+            // Native mode admission may repaint its ordinary planet; the frozen notification owns this ink.
+            item.decoration.setOpacity(Float(tideTimeline?.owner==item.conversation.id ? tideTimeline?.ownerInk.opacity ?? 0:0))
+            item.chromeHost.layer?.opacity=0;item.grip.opacity=0
+        }
     }
 
     /// Back from Normie: every composer it took returns to its bar, laid out and shown as the bar is.
     func remountComposers() {
+        retirePeekReply()
         if let target = focusTargetProvider?() { focusTarget = target }
         for item in items.values {
             guard let composer = item.composer, composer.superview !== item.barFace else { continue }
@@ -1355,10 +2918,19 @@ import QuartzCore
         }
     }
 
+    func restorePeekComposer(_ composer: NativeComposer, to item: Item) {
+        composer.removeFromSuperview(); item.barFace.addSubview(composer)
+        arrange(item, for: item.target, full: item.full,
+                leading: leading((item.role, item.target, item.slot)),
+                segment: segment((item.role, item.target, item.slot)))
+        composer.alphaValue = item.full ? 1 : 0
+        composer.isHidden = !item.full && !composer.isComposing
+    }
+
     /// Lays a node's bar content out for `target`, its resting frame: the words, and the composer when full.
     /// Room kept at a bar's leading end: Focused's first segment holds me there (DockItems FullBar `leading`).
-    private func leading(_ t: (role: Role, rect: CGRect, slot: Int)) -> CGFloat {
-        base.focused && t.role == .bar && t.slot == 0 ? t.rect.height : 0
+    private func leading(_ t: (role: Role, rect: CGRect, slot: Int), focused: Bool? = nil) -> CGFloat {
+        (focused ?? base.focused) && t.role == .bar && t.slot == 0 ? t.rect.height : 0
     }
 
     /// A Focused / Split bar's place in the capsule, for its composer's ends (FocusedSegmentControls).
@@ -1366,20 +2938,40 @@ import QuartzCore
         base.focused && t.role == .bar ? NativeComposerSegment(index: t.slot, isLast: t.slot == base.bars.count - 1) : nil
     }
 
+    func columnReplyFacts(_ item: Item) -> (PeekReplyBarTarget.Role, CGFloat, NativeComposerSegment?) {
+        let t = (role: item.role, rect: item.target, slot: item.slot)
+        let role: PeekReplyBarTarget.Role = base.focused ? (base.bars.count == 1 ? .focused :
+            (item.slot == 0 ? .splitLeft : .splitRight)) : (item.full ? .full : .brief)
+        return (role, leading(t), segment(t))
+    }
     private func arrange(_ item: Item, for target: CGRect, full: Bool, leading: CGFloat = 0, segment: NativeComposerSegment? = nil, animated: Bool = false) {
         item.barFace.frame = CGRect(origin: .zero, size: target.size)
         let inset = max(16, target.height * 0.4)
+        let outgoingBrief = animated && item.role == .bar && !item.full && target.width <= target.height
+        let previousWidth = item.label.bounds.width
+        let previousOrigin = item.label.frame.origin
         item.label.sizeToFit()
+        // Keep the outgoing word's existing truncation until chrome's shrink/fade retires it.
+        // Rest/orb layout still has zero width; no zero-size target is baked during the exit.
+        let width = max(0, target.width - inset - 16)
+        let labelWidth = outgoingBrief ? max(width, min(previousWidth, item.label.frame.width)) : width
         item.label.frame = CGRect(x: inset, y: ((target.height - item.label.frame.height) / 2).rounded(),
-                                  width: max(0, target.width - inset - 16), height: item.label.frame.height)
+                                  width: labelWidth, height: item.label.frame.height)
+        if outgoingBrief { item.label.setFrameOrigin(previousOrigin) }
         prepareWords(item)
+        guard peekReplyHost?.id != item.conversation.id || peekReplyHost?.isColumn == true else { return }
         guard full || item.composer != nil else { return }
         if item.composer == nil, let composer = composerFor?(item.conversation) {
             composer.alphaValue = 0; composer.isHidden = true
             item.barFace.addSubview(composer); item.composer = composer
+            watchTideEditor(composer)
         }
-        guard full, let composer = item.ownComposer else { return }
+        guard full, let composer = splitComposer(for: item) else { return }
         let nextFrame = CGRect(x: leading, y: 0, width: target.width - leading, height: target.height)
+        if holdsSplitInk(composer, member: item.conversation.id) {
+            item.splitEditorEndpoint = (nextFrame, segment)
+            return
+        }
         let changes = (segment != nil || composer.segment != nil) && (composer.segment != segment || composer.frame != nextFrame)
         if animated && changes { composer.beginSegmentTransition(at: motionNow()) }
         composer.segment = segment
@@ -1427,6 +3019,7 @@ import QuartzCore
                                                        y: target.rect.midY - diameter / 2, width: diameter, height: diameter))
         if item.identity == nil {
             let identity = OrbComponent(id: "identity." + item.conversation.id)
+            Self.installSplitOpacity(on: identity.glassView)
             content.addSubview(identity.glassView); mount(identity); dressGlass(identity.glassView)
             item.identity = identity
             let start = item.role == .orb ? item.glass.frame : end
@@ -1452,6 +3045,7 @@ import QuartzCore
     }
 
     private func placeIdentity(_ item: Item, at now: Double, heldRect:CGRect? = nil) {
+        if ModeDepartureSurfaces.retains(item.glass) {return}
         if held?.identity == true, held?.id == item.conversation.id, heldRect == nil { return }
         guard let identity = item.identity else { return }
         let alpha:Float = carriesHeader(item.conversation.id) ? 0:item.identityOpacity.value(at: now)
@@ -1461,7 +3055,7 @@ import QuartzCore
                                           profile: exposureProfile, enabled: usesExposure)
         if frameLog != nil { rawExposed[f.name] = f }
         item.identityFrame = r
-        writeGlass(identity.glassView,frame:f.painted,alpha:CGFloat(alpha))
+        writeGlass(identity.glassView, frame: f.painted, alpha: CGFloat(alpha), splitPaint: true)
         identity.setFrame(f.painted)
         identity.setOpacity(alpha)
         identity.setPresentationActive(ambientRunning && alpha > 0)
@@ -1471,6 +3065,9 @@ import QuartzCore
 
     private func reconcileGlassTopology() {
         if collectingGlass && !resolvingGlass { return }
+        // Direct sample/release callers also commit glass; the display callback is not the only writer.
+        applyDynamicTide()
+        applyTideMaterialProbe()
         if !collectingGlass { applyGlassReleases() }
         struct Part { let id: String; let view: NSGlassEffectView; let logical: CGRect; let target: CGRect; let locked: Bool }
         var parts: [Part] = []
@@ -1480,8 +3077,25 @@ import QuartzCore
             parts.append(Part(id:id,view:glass,logical:releaseLogical(glass,fallback:logical) ?? logical,target:target,locked:locked))
         }
         // A carried destination follows the pointer; its home only becomes the target after release.
-        add("me", me, meMotion.rect, meHeld != nil ? (meMotion.rect ?? meSpring.target.adding(meDelta)) : meSpring.target.adding(meDelta), locked:meHeld != nil)
+        add("me", me, meMotion.rect, meHeld != nil ? (meMotion.rect ?? meSpring.target.adding(meDelta)) : meSpring.target.adding(meDelta), locked:meHeld != nil || sunHoverDockHeld)
         for (id, item) in items {
+            if tideSides[id]?.pose.shown == true {continue}
+            if tideAddTails[id] != nil {
+                let body=glassFrame(item.glass)
+                var destination=item.target
+                if item.role == .bar {destination=destination.offsetBy(dx:0,dy:-rise)}
+                else if orbDeltas.indices.contains(item.slot) {destination=destination.adding(orbDeltas[item.slot])}
+                // The contour is physical now; its topology destination is the canonical Add layout.
+                add(id,item.glass,body,destination,locked:true)
+                if let shape=tidePool[id],let contour=shape.contour {for (v,p) in zip(shape.views,contour.tail) {add(id,v,p.rect,destination,locked:true)}}
+                continue
+            }
+            if let r=tideNodePoses[id] {add(id,item.glass,r,r,locked:true);continue}
+            if let shape = tideMaterialShapes[id], let contour = shape.contour {
+                add(id,item.glass,contour.body.rect,contour.body.rect,locked:true)
+                for (glass,part) in zip(shape.views,contour.tail) {add(id,glass,part.rect,part.rect,locked:true)}
+                continue
+            }
             var target = item.target
             if carries(id) { target = item.motion.rect ?? target }
             else if item.role == .bar { target = target.offsetBy(dx: 0, dy: -rise) }
@@ -1536,16 +3150,25 @@ import QuartzCore
             guard !clipped.isNull else { continue }
             guard clipped != old else { continue }
             let ink = part.view.contentView?.frame
-            writeGlass(part.view,frame:clipped,reason:"projection")
+            writeGlass(part.view, frame: clipped, reason: "projection", splitPaint: true)
             // Glass clipping must not move or scale the existing content/exposure in world coordinates.
             if let ink { part.view.contentView?.frame = ink.offsetBy(dx: old.minX-clipped.minX, dy: old.minY-clipped.minY) }
+        }
+        if tideDynamic {
+            // A focused identity is another surface of the same conversation, not a different owner.
+            // Zero-alpha retired identities are not physical neighbours in the Auto row.
+            let physical=parts.filter {(glassWrites[ObjectIdentifier($0.view)]?.alpha ?? $0.view.alphaValue)>0.001}.map {
+                ($0.id.hasPrefix("identity.") ? String($0.id.dropFirst(9)):$0.id,glassFrame($0.view))
+            }
+            tideMinimumGap = .infinity
+            for a in physical {for b in physical where a.0 != b.0 {let gap=TideContour.gap(a.1,b.1);if gap<tideMinimumGap {tideMinimumGap=gap;tideWorstPair=a.0+"|"+b.0}}}
         }
         if !collectingGlass {applyContourHandoffs()}
     }
 
     private func withdrawFocusedGlass() {
         glassReleases[ObjectIdentifier(focusedGlass)]=nil
-        writeGlass(focusedGlass,frame:.zero,alpha:0,hidden:true)
+        writeGlass(focusedGlass, frame: .zero, alpha: 0, hidden: true, splitPaint: true)
         focusedMix = DockFade(0)
         capsuleOwnerID = nil; capsuleSharesOwnerPose = false
         capsuleSpring = .rest(.zero); capsuleBegan = motionNow()
@@ -1573,11 +3196,11 @@ import QuartzCore
         let rect = f.painted
         if frameLog != nil { rawExposed[f.name] = f }
         onMotionFrame?(f)
-        writeGlass(focusedGlass,frame:rect,alpha:CGFloat(alpha))
+        writeGlass(focusedGlass, frame: rect, alpha: CGFloat(alpha), splitPaint: true)
         // Alpha-zero glass still fuses in NSGlassEffectContainerView. Keep the outgoing shape
         // through its complete spring (and exposure tail), then withdraw it inside its Auto node.
         let returning = capsuleOwnerID != nil && (now - capsuleBegan < capsuleSpring.duration || alpha > 0 || f.exposure.length > 0)
-        writeGlass(focusedGlass,hidden:!base.focused && !returning)
+        writeGlass(focusedGlass, hidden: !base.focused && !returning, splitPaint: true)
         if glassHidden(focusedGlass) { capsuleOwnerID = nil }
         for (id, divider) in segmentDividers {
             guard let item = items[id] else { continue }
@@ -1628,13 +3251,25 @@ import QuartzCore
     }
 
     /// The pointer moved (nil: it left the window). Returns how long frames are needed from `now`.
-    func pointer(_ p: CGPoint?, now: Double) -> Double {
+    func pointer(_ point: CGPoint?, now: Double, overlayBlocked: Bool = false) -> Double {
+        let p = overlayBlocked ? nil : point
+        advanceTideClock(to:tideNow())
+        tidePointer=p
+        for side in tideSides.values where side.active {side.hover(side.pose.shown && (p.map{side.glass.frame.contains($0) || side.pose.orb.contains($0)} ?? false),at:tideNow())}
+        let tideInside=tideTimeline?.owner.flatMap{tideNodePoses[$0]}.map{r in p.map(r.contains) ?? false} ?? false
+        tideTimeline?.hover(tideInside)
+        scheduleTideWake()
+        refreshTideProtection()
         synchronizeInjectedClock(at:now)
         // While a peek shows, the dock holds its magnification and rise (NativeDockScene: `if !peeking`).
+        if sunHoverDockHeld { return 0 }
         guard peekShown == nil else { return 0.05 }
         let restTop = base.bars.first?.minY ?? base.me.minY
         // Enter 24 pt above the dock's resting top; leave 12 pt further up (hysteresis).
-        let inside = p.map { $0.y > restTop - (hovering ? 36 : 24) } ?? false
+        // The notification owns its 36 pt orb; its hover must not magnify the ordinary row underneath it.
+        let sideOwnsPointer=tideSides.values.contains {side in side.pose.shown && (p.map{side.glass.frame.contains($0) || side.pose.orb.contains($0)} ?? false)}
+        let autoOwnsPointer=tideTimeline?.active == true && (tideInside || (p.map {point in tideMaterialPoses.values.contains{$0.body.rect.contains(point)}} ?? false))
+        let inside = !sideOwnsPointer && !autoOwnsPointer && (p.map { $0.y > restTop - (hovering ? 36 : 24) } ?? false)
         pointerX = inside ? p?.x : pointerX
         if inside != hovering {
             hovering = inside
@@ -1673,7 +3308,7 @@ import QuartzCore
         let amount = held == nil ? q : 0
         let laidOrbs: [CGRect], laidMe: CGRect
         if base.focused {
-            // Focused / Split: each side re-packs outward from the capsule, which never moves (FocusLayout.magnified).
+            // Focused / Split: magnify within each bank's resting bounds.
             var f = FocusLayout()
             f.segments = base.bars; f.capsule = base.bars.reduce(base.bars.first ?? .zero) { $0.union($1) }; f.me = base.me
             f.leftOrbs = base.orbs.filter { $0.midX < f.capsule.minX }; f.rightOrbs = base.orbs.filter { $0.midX >= f.capsule.minX }
@@ -1689,10 +3324,18 @@ import QuartzCore
         if shouldPlaceMe && meHeld == nil { placeMe(meRect, at: now) }
         orbDeltas = zip(laidOrbs, base.orbs).map { CGRect(x: $0.minX - $1.minX, y: $0.minY - $1.minY, width: $0.width - $1.width, height: $0.height - $1.height) }
         rise = metrics.hoverRise * up
+        paintedHoverPose = (Double(amount), Double(up), pointerX)
     }
 
     /// me's and the orbs' current frames, for receipts.
     var nodeFrames: [CGRect] { ([me?.frame].compactMap { $0 }) + items.values.filter { $0.role == .orb }.sorted { $0.slot < $1.slot }.map(\.glass.frame) }
+    /// The independent slot consumes the already painted hover/LL hold, without writing another Dock channel.
+    func browserSlotFrame(_ slot: CGRect) -> CGRect {
+        guard let pose=paintedHoverPose else {return slot}
+        var projection=AutoLayout();projection.orbs=[slot]
+        return projection.magnified(pointerX:pose.pointerX,amount:CGFloat(pose.amount),metrics:metrics)
+            .raised(CGFloat(pose.lift),metrics:metrics).orbs[0]
+    }
 
     /// The conversation whose orb is under `p` (at least 44 × 44 pt to hit, §E), if any.
     func orb(at p: CGPoint) -> Conversation? {
@@ -1704,20 +3347,47 @@ import QuartzCore
         }?.conversation
     }
 
+    @discardableResult private func startSplitDisplay() -> [NativeComposer] {
+        var handoff: [NativeComposer] = []
+        splitFlight?.beginDisplay { composer in
+            guard composer !== splitReply?.composer else { return }
+            composer.takeSplitPresentation()
+            handoff.append(composer)
+        }
+        return handoff
+    }
+
     /// Use one display timestamp for hover, spring sampling, exposure and topology.
     func frame(at now: Double, elapsed: Double) {
+        CATransaction.begin();CATransaction.setDisableActions(true);defer { CATransaction.commit() }
         synchronizeInjectedClock(at:motionTime?() ?? now)
+        let hadTide=tideTimeline?.active == true
+        if hadTide {tideFrameMoving=tideTimeline?.busy == true && !tideFrozen}
+        defer {
+            if hadTide {if tideFrameMoving == true {tideMovingCallbacks+=1}else{tideStillCallbacks+=1}}
+            if tideTimeline?.busy == true,!tideFrozen {onTideMotion?();onNeedsFramesUntil?(now)}
+            tideFrameMoving=nil
+        }
         batchID += 1
         if frameLog != nil { capturesWriteLog = true; glassTopology.beginFrameLog(); writeTrace.removeAll(keepingCapacity:true); rawExposed.removeAll(keepingCapacity:true) }
         let ownsBatch = beginGlassBatch()
         latestDisplayTime = max(latestDisplayTime, now)
         displayTime = now
         defer { displayTime = nil; capturesWriteLog = false }
+        let handoff = startSplitDisplay()
         hoverFrame(at: now)
         sample(elapsed)
         heldFrame(at: now)
         headerLandingFrame(at:now)
+        applyTideMaterialProbe()
+        applyTideAddTails()
+        renderTideSides()
+        onTrashFrame?(now)
+        browserDockPort?.frame(at: now)
         endGlassBatch(ownsBatch)
+        synchronizeSplitChrome()
+        for composer in handoff { composerMotion.yieldSplitPaint(to: composer) }
+        onTrashApplied?()
         recordLift(at:now,writer:"frame")
         if let frameLog {
             recordFrameLog(frameLog, target: now, elapsed: elapsed)
@@ -1796,8 +3466,15 @@ import QuartzCore
     func sample(_ elapsed: Double) {
         synchronizeInjectedClock(at:motionNow())
         let ownsBatch = beginGlassBatch()
-        defer { endGlassBatch(ownsBatch) }
-        let t = Self.sharedEpochEnabled && elapsed.isFinite ? sceneBegan.map { motionNow()-$0 } ?? elapsed : elapsed
+        defer {
+            endGlassBatch(ownsBatch)
+            if !elapsed.isFinite {
+                if collectingGlass { settledSamplePending = true }
+                else { onSettledSample?() }
+            }
+        }
+        let sceneTime = Self.sharedEpochEnabled && elapsed.isFinite ? sceneBegan.map { motionNow()-$0 } ?? elapsed : elapsed
+        let t=tideAddLayout.map{Motion.reduce ? Double.infinity:max(0,motionNow()-$0.began)} ?? sceneTime
         sampledElapsed = t
         let now = motionNow()
         if let d = draftBar { placeDraft(d.rect.offsetBy(dx: 0, dy: -rise)) }
@@ -1806,6 +3483,11 @@ import QuartzCore
             // While one is held the others bob a little, each on its own period (NativeDockScene.swift:1230-1241).
             let bob = heldBob(role:item.role,slot:item.slot,at:now).position
             var r = item.spring.sample(t).rect
+            if let handoff=tideAddTails[item.conversation.id],let size=handoff.size {
+                let delayed=Motion.reduce ? Double.infinity:max(0,now-handoff.began-0.07)
+                let shape=size.sample(delayed).rect,centerY=r.midY
+                r.size=shape.size;r.origin.y=centerY-shape.height/2
+            }
             if item.role == .orb, item.slot < orbDeltas.count {
                 let d = orbDeltas[item.slot]
                 r = CGRect(x: r.minX + d.minX, y: r.minY + d.minY, width: r.width + d.width, height: r.height + d.height)
@@ -1823,6 +3505,7 @@ import QuartzCore
             }
             if item.role == .bar { r = r.offsetBy(dx: refusal(at: now), dy: 0) }
             item.regular = r
+            if tideSides[item.conversation.id]?.pose.shown == true {continue}
             updateBudBasis(item,regular:r,at:now)
             if item.veil.duration > 0 { item.decoration.setVeil(item.veilAmount(at: now)) }
             if let bud = buds[item.conversation.id] {
@@ -1838,19 +3521,54 @@ import QuartzCore
         if held == nil && meHeld == nil { reconcileGlassTopology() }
     }
 
+    private func advanceSplitEditor(_ item: Item, logical: CGRect, shift: CGPoint,
+                                    motion: M10DockFrame) {
+        let reply = splitReply?.id == item.conversation.id ? splitReply : nil
+        if let reply {
+            let x = shift.x + leading((item.role, logical, item.slot))
+            let origin = CGPoint(x: x, y: shift.y)
+            if reply.frame.origin != origin { reply.setFrameOrigin(origin) }
+        }
+        guard let composer = splitComposer(for: item) else { return }
+        guard displayTime != nil, let endpoint = item.splitEditorEndpoint,
+              holdsSplitInk(composer, member: item.conversation.id) else {
+            composer.sampleSegmentTransition(at: motion.time)
+            composer.fitSplitModelLabel()
+            return
+        }
+        if let reply {
+            guard composer.superview === reply else { return }
+            // Continue the prepared Reply Part for as long as it actually paints this motion.
+            composer.sampleSegmentTransition(at: motion.time)
+            composer.fitSplitModelLabel()
+            onComposerMotion?(composer, motion, exposureProfile)
+            if composerMotion.splitPart(for: composer) != nil { return }
+            reply.setFrameSize(endpoint.0.size)
+            composer.applySplitEndpoint(reply.bounds, segment: endpoint.1, at: motion.time)
+        } else {
+            composer.applySplitEndpoint(endpoint.0, segment: endpoint.1, at: motion.time)
+        }
+        composer.fitSplitModelLabel()
+        item.splitEditorEndpoint = nil
+    }
+
     private func place(_ item: Item, _ r: CGRect, orb: CGRect? = nil) {
+        if let flight = splitFlight, flight.owns(item.conversation.id), !flight.displaying { return }
+        if ModeDepartureSurfaces.retains(item.glass) {return}
         let now = motionNow(), profile = exposureProfile
-        item.wordGaussian.settle(at: now); item.peekGaussian.settle(at: now)
+        item.wordGaussian.settle(at: now)
         item.decoration.settleGlyphGaussian(at: now)
         let semanticGaussian = usesGaussian && !carries(item.conversation.id) && now < item.semanticZoomUntil
         let f = item.motion.update(r, at: now, name: "dock." + (item.role == .bar ? "bar." : "orb.") + item.conversation.id,
                                    profile: profile, enabled: usesExposure)
-        let painted = f.painted
+        // Add keeps Tide's real contour until its finite handoff completes. Host exposure remains content-only.
+        let painted = tideAddTails[item.conversation.id] != nil ? r:f.painted
         if frameLog != nil { rawExposed[f.name] = f }
         let diameter = min(r.width, r.height)
         let body = (orb ?? CGRect(x: 0, y: 0, width: diameter, height: diameter)).offsetBy(dx: r.minX, dy: r.minY)
         let bodyFrame = item.orbMotion.update(body, at: now, name: "dock.planet." + item.conversation.id, profile: profile, enabled: usesExposure)
-        writeGlass(item.glass,frame:painted)
+        let id = item.conversation.id
+        writeGlass(item.glass, frame: painted, splitPaint: true)
         item.shape(painted, orb: bodyFrame.painted.offsetBy(dx: -painted.minX, dy: -painted.minY))
         // Native controls retain their original world frame and target layout; glass alone reaches backwards.
         let shift = CGPoint(x: r.minX-painted.minX, y: r.minY-painted.minY)
@@ -1858,15 +3576,19 @@ import QuartzCore
         let chrome = item.chromeExit?.rect ?? painted
         let chromeShift = item.chromeExit == nil ? shift : CGPoint.zero
         item.chromeHost.frame = chrome
+        if item.chromeHost.bounds.origin != .zero { item.chromeHost.setBoundsOrigin(.zero) }
+        item.peekFace.frame = CGRect(origin: .zero, size: chrome.size)
         item.chromeHost.layer?.cornerRadius = min(chrome.width, chrome.height) / 2
-        item.barFace.setFrameOrigin(chromeShift); item.peekFace.setFrameOrigin(shift)
-        item.ownComposer?.sampleSegmentTransition(at: now)
+        item.barFace.setFrameOrigin(chromeShift)
+        if let composer = splitComposer(for: item), !composer.splitActionPoses.isEmpty {
+            composer.restoreSplitActionRail()
+        }
         item.chromeHost.alphaValue = CGFloat(item.controlsOpacity.value(at: now))
         // A header pickup carries this item's glass, even while its resting segment shares the capsule.
         let headerPaint=carriesHeader(item.conversation.id)
         let mix:Float = headerPaint ? 0:item.segmentMix.value(at: now)
         let identityAlpha:Float = headerPaint ? 0:item.identityOpacity.value(at:now)
-        writeGlass(item.glass,alpha:CGFloat((1-mix)*(1-identityAlpha)))
+        writeGlass(item.glass, alpha: CGFloat((1-mix)*(1-identityAlpha)), splitPaint: true)
         item.decoration.setOpacity(item.faceOpacity(at:now)*(1-identityAlpha))
         if identityAlpha >= 1 { item.decoration.setPresentationActive(false) }
         item.selection.fillColor = NativePalette.accent.withAlphaComponent(0.08).cgColor
@@ -1877,24 +3599,12 @@ import QuartzCore
         let words = item.label.convert(item.label.bounds, to: view)
         let wf = item.wordMotion.update(words, at: now, name: "dock.words." + item.conversation.id, profile: profile, enabled: usesExposure)
         item.wordTrail.update(item.label, in: item.chromeHost, world: words, earlier: wf.earlier, profile: profile,
-                              enabled: usesExposure && !semanticGaussian, opacity: item.barFace.layer?.presentation()?.opacity ?? Float(item.barFace.alphaValue))
-        let pendingShift = collectingGlass ? CGPoint(x:painted.minX-item.glass.frame.minX,y:painted.minY-item.glass.frame.minY) : .zero
-        let peekWorld = item.peekFace.convert(item.peekFace.bounds, to: view).offsetBy(dx:pendingShift.x,dy:pendingShift.y)
-        let pf = item.peekWordMotion.update(peekWorld, at: now, name: "dock.peek.words."+item.conversation.id, profile: profile, enabled: usesExposure)
-        item.peekTrail.update(item.peekFace, in: item.content, world: peekWorld, earlier: pf.earlier, profile: profile,
-                              enabled: usesExposure && !semanticGaussian, hideSource: false)
-        item.peekFace.glyphExposureActive = item.peekTrail.isActive
-        if let badge = item.peekFace.badgeRect {
-            let world = item.peekFace.convert(badge, to: view).offsetBy(dx:pendingShift.x,dy:pendingShift.y)
-            let previous = world.offsetBy(dx: pf.earlier.minX-peekWorld.minX, dy: pf.earlier.minY-peekWorld.minY)
-            let bf = M10DockMotion.frame(name: "dock.peek.badge", now: world, earlier: previous, time: now, profile: profile, enabled: usesExposure)
-            item.peekFace.motionBadgeRect = bf.exposure.gate > 0 ? bf.painted.offsetBy(dx: -peekWorld.minX, dy: -peekWorld.minY):nil
-            onMotionFrame?(bf)
-        }
-        onMotionFrame?(pf)
+                              enabled: usesExposure && !semanticGaussian, opacity: borrowsColumn(id) ? 0 :
+                                item.barFace.layer?.presentation()?.opacity ?? Float(item.barFace.alphaValue))
         if semanticGaussian { item.decoration.exposeGlyphs(now: bodyFrame.rect, earlier: bodyFrame.rect, profile: profile, enabled: false) }
         else { M10DockMotion.onOrbFrame?(item.decoration, bodyFrame, profile) }
-        if let composer = item.ownComposer {
+        advanceSplitEditor(item, logical: r, shift: chromeShift, motion: f)
+        if let composer = placePeekReply(item, logical: r, chrome: chrome) ?? item.ownComposer {
             onComposerMotion?(composer, f, profile)
         }
         onMotionFrame?(f); onMotionFrame?(wf)
@@ -1962,6 +3672,7 @@ import QuartzCore
         var capsuleGoal: CGRect? = nil
     }
     private var buds: [String: Bud] = [:]
+    weak var peekReplyHost: PeekReplyHost?
     /// The conversation a peek shows (product shownPeek), while it does.
     private(set) var peekShown: String?
     var hasPeek: Bool { !buds.isEmpty || peekShown != nil }
@@ -1974,6 +3685,7 @@ import QuartzCore
         let now = motionNow()
         endAnchoredPeeks(at:now)
         let spring = open ? (response: 0.38, damping: 0.78) : (response: 0.30, damping: 0.90)
+        if peekReplyHost?.isColumn != true && (peekReplyHost?.id != shown || !open) { retirePeekReply() }
         let opening=open && shown != nil && (shown != peekShown || shown.flatMap{buds[$0]?.open} != true)
         let contours=opening ? captureContours():[]
         peekShown = shown
@@ -2025,15 +3737,9 @@ import QuartzCore
                     return (s.id, CGPoint(x: (x - r.midX) * k, y: (rows[s.id] == nil ? 0 : rowY - r.midY) * k))
                 })
                 item.glass.tintColor = Look.peekTint
-                item.peekFace.configure(item.conversation, badge: makeOrbConfiguration(item.conversation, drawingSize: 1, backingScale: 1,
-                                        reduceMotion: false, ambient: false, isKeyWindow: true).badge, size: capsule.size)
-                item.peekTrail.prepare(item.peekFace, key: "\(item.conversation.title)|\(item.peekFace.bounds)|\(String(describing: item.conversation.state))", scale: view.window?.backingScaleFactor ?? 2) {
-                    item.peekFace.glyphBitmap(scale: self.view.window?.backingScaleFactor ?? 2)
-                }
-                item.peekWordMotion.reset()
             } else {
                 buds[id]!.follow = nil
-                fadeFace(item, visible: false, duration: 0.07)
+                if splitReply?.id != id { fadePeekReply(item, visible: false, duration: 0.07) }
             }
         }
         if reconfigure { refreshOrbs() }
@@ -2042,29 +3748,7 @@ import QuartzCore
 
     /// The shown peek's titled face in (0.12 s, 100 ms after it opens) or out (0.07 s); 3 pt out of focus while hidden.
     func peekContent(visible: Bool, duration: Double) {
-        guard let id = peekShown, let item = items[id] else { return }
-        fadeFace(item, visible: visible, duration: duration)
-    }
-
-    private func fadeFace(_ item: Item, visible: Bool, duration: Double) {
-        guard let layer = item.peekFace.layer else { return }
-        if usesGaussian {
-            item.peekTrail.reset()
-            layer.removeAnimation(forKey: "overlay.opacity")
-            item.peekFace.alphaValue = 1
-            item.peekGaussian.show(visible, content: layer, at: motionNow(), initiallyVisible: !visible)
-            item.peekFace.alphaValue=visible ? 1:0
-            return
-        }
-        let curve = OverlayCurve(0, 0, 0.58, 1, duration)
-        item.peekFace.alphaValue = visible ? 1 : 0
-        OverlayMotion.animate(layer, "opacity", from: layer.opacity, to: Float(visible ? 1 : 0), curve: curve)
-        PeekNode.installBlur(on: layer)
-        if layer.filters?.isEmpty == false {
-            OverlayMotion.animate(layer, "filters.peekBlur.inputRadius", from: visible ? 3 : 0, to: visible ? 0 : 3, curve: curve)
-            PeekNode.installBlur(on: item.peekTrail.trail.layer)
-            OverlayMotion.animate(item.peekTrail.trail.layer, "filters.peekBlur.inputRadius", from: visible ? 3 : 0, to: visible ? 0 : 3, curve: curve)
-        }
+        fadePeekReply(visible: visible, duration: duration)
     }
 
     private func veil(_ item: Item, to v: Float, now: Double) {
@@ -2073,11 +3757,12 @@ import QuartzCore
 
     /// A bud is over: back in its slot, or taken over by a transition or a drag.
     private func endBud(_ id: String) {
+        if peekReplyHost?.id == id && peekReplyHost?.isColumn != true { retirePeekReply() }
         buds[id] = nil
         guard let item = items[id] else { return }
         let now = motionNow()
         if item.veilAmount(at: now) > 0 || item.veil.to > 0 { veil(item, to: 0, now: now) }
-        if (item.peekFace.layer?.opacity ?? 0) > 0 { fadeFace(item, visible: false, duration: 0.07) }
+        if splitReply?.id != id { fadePeekReply(item, visible: false, duration: 0.07) }
         item.glass.tintColor = glassTint
         refreshOrbs()
     }
@@ -2088,6 +3773,7 @@ import QuartzCore
     /// The node whose hover region is under `p` (NativeDockScene hit frames): an orb, 44 × 44 at least, or an open peek's
     /// whole capsule, as an orb; a bar by its grip.
     func hoverNode(at p: CGPoint) -> (id: String, orb: Bool)? {
+        if sunHoverBlocksPointer?(p) == true { return nil }
         for item in items.values where !carries(item.conversation.id) {
             if item.identityOpacity.to > 0, item.identityFrame.insetBy(dx:-4,dy:-4).contains(p) { return (item.conversation.id, true) }
             let f = item.glass.frame
@@ -2108,7 +3794,16 @@ import QuartzCore
     /// across (board 10-31).
     func frame(of id: String) -> CGRect? {
         guard let item = items[id] else { return nil }
+        if tidePresentedOwner==id,let rect=tideNodePoses[id] {
+            let d=min(rect.width,rect.height)
+            return CGRect(x:rect.minX,y:rect.midY-d/2,width:d,height:d)
+        }
         return buds[id] != nil && item.regular != .zero ? item.regular : item.glass.frame
+    }
+
+    func tideCapsuleFrame(of id: String) -> CGRect? {
+        guard tidePresentedOwner == id else { return nil }
+        return tideNodePoses[id]
     }
 
     // MARK: Glass (Settings ▸ Appearance ▸ Glass; NativeAppearance.Change)
@@ -2158,7 +3853,7 @@ import QuartzCore
 
     /// What a press at `p` can pick up: me, an orb (at least 44 × 44 to hit), or a bar by its grip (64 × 16 on its top).
     func draggable(at p: CGPoint) -> String? {
-        if let me, me.frame.insetBy(dx: min(0, (me.frame.width - 44) / 2), dy: min(0, (me.frame.height - 44) / 2)).contains(p) { return Self.meID }
+        if let me, me.frame.insetBy(dx: min(0, (me.frame.width - 48) / 2), dy: min(0, (me.frame.height - 48) / 2)).contains(p) { return Self.meID }
         for item in items.values {
             if item.identityOpacity.to > 0, item.identityFrame.insetBy(dx:-4,dy:-4).contains(p) { return item.conversation.id }
             let f = item.glass.frame
@@ -2177,8 +3872,8 @@ import QuartzCore
         reconcileGlassTopology()
     }
 
-    func hold(_ id: String, at p: CGPoint, now: Double, spring: (response: Double, damping: Double), header:HeaderIsland? = nil, originRow:CGFloat? = nil) {
-        releasedGlassID=nil
+    func hold(_ id: String, at p: CGPoint, now: Double, spring: (response: Double, damping: Double), header:HeaderIsland? = nil, originRow:CGFloat? = nil,pickupOverride:CGRect? = nil,conversationOrb:Bool=false) {
+        releasedGlassID=nil;freeCarry=nil
         let pickupContours=captureContours()
         // Ownership changes inherit the contour already submitted to AppKit, including neighbours.
         observingPickup=true;observeAllGlass(at:now);observingPickup=false
@@ -2191,8 +3886,8 @@ import QuartzCore
         let pickup=regrabbing == nil ? header.map{view.convert($0.draggableOrbRect,from:$0)}:(item.motion.rect ?? item.glass.frame)
         header?.setOrbCarried(true)
         if header != nil {
-            item.motion.reset();item.orbMotion.reset();item.wordMotion.reset();item.peekWordMotion.reset()
-            item.wordTrail.reset();item.peekTrail.reset()
+            item.motion.reset();item.orbMotion.reset();item.wordMotion.reset()
+            item.wordTrail.reset()
             // The outgoing bar controls finish their existing fade on the Dock row, not at the header.
             item.chromeExit=(item.chromeHost.frame,now)
         }
@@ -2204,7 +3899,7 @@ import QuartzCore
         if buds[id] != nil { endBud(id) }
         let identity = header == nil && base.focused && item.role == .bar && item.slot > 0 && item.identityOpacity.to > 0
         let carriedGlass=identity ? item.identity?.glassView:item.glass
-        let nativePickup=carriedGlass?.frame
+        let nativePickup=pickupOverride ?? carriedGlass?.frame
         if header == nil,let nativePickup {
             // The new zero-velocity pickup shape already contains the last shutter contour.
             // Reusing the old raw history would expose the topology correction a second time.
@@ -2217,7 +3912,8 @@ import QuartzCore
         let d = max(metrics.orb, metrics.orbMagnified), r = pickup ?? nativePickup ?? (identity ? item.identityFrame : item.motion.rect ?? item.glass.frame)
         let shape = RectSpring(from: CGRect(origin: .zero, size: r.size), to: CGRect(x: 0, y: 0, width: d, height: d), velocity: .zero,
                                response: spring.response, damping: spring.damping)
-        held = (id, follow(p,row:header == nil ? nil:originRow ?? p.y), shape, now, identity, header == nil ? nil:originRow ?? p.y)
+        let heldRow = header == nil && pickupOverride == nil ? nil:originRow ?? p.y
+        held = (id, conversationOrb ? CGPoint(x:r.midX,y:r.midY):follow(p,row:heldRow), shape, now, identity, heldRow)
         // Rebase the local contour bridge when pickup changes locking, including an unfinished Peek bridge.
         // Pointer motion after this ownership handoff remains free to join and separate again.
         queueContours(pickupContours.filter{$0.0 !== carriedGlass},tuning:shape,stableRaw:true)
@@ -2232,15 +3928,19 @@ import QuartzCore
         fade(item.barFace, to: 0, delay: 0, duration: 0.10)
         if let composer = item.ownComposer, item.full { fade(composer, to: 0, delay: 0, duration: 0.10) }
         item.role = .orb; item.full = false
-        if header != nil {heldFrame(at:now)}
+        if header != nil || pickupOverride != nil {heldFrame(at:now)}
     }
 
     func moveHeld(to p: CGPoint) {
-        if held != nil { held!.center = follow(p,row:held!.row) }
+        if freeCarry != nil {
+            let t=motionNow(),q=CGPoint(x:p.x-freeCarry!.grab.x,y:p.y-freeCarry!.grab.y)
+            freeCarry!.x.aim(q.x,at:t,tuning:OrbTrashParameters.follow);freeCarry!.y.aim(q.y,at:t,tuning:OrbTrashParameters.follow)
+        } else if held != nil { held!.center = follow(p,row:held!.row) }
     }
 
     /// Lets go: the next transition springs the node from where the pointer left it to its slot.
     func release(toHeader:Bool = false, forTear:Bool = false) {
+        if freeCarry != nil { heldFrame(at:motionNow());freeCarry=nil }
         if !toHeader,!forTear,let held {
             // The physical release inherits native geometry; changing locks must not project it twice.
             queueContours(captureContours(),tuning:held.shape,stableRaw:false)
@@ -2300,6 +4000,137 @@ import QuartzCore
     private var releasedNode: (id: String, rect: CGRect)?
     var isHolding: Bool { held != nil }
 
+    /// Trash shares the current native write batch and its outer transaction.
+    func withTrashGlassBatch(_ body:()->Void) {
+        CATransaction.begin();CATransaction.setDisableActions(true)
+        let owns=beginGlassBatch();body();endGlassBatch(owns);if owns { onTrashApplied?() };CATransaction.commit()
+    }
+    func trashCarrier(_ id:String)->(glass:NSGlassEffectView,rect:CGRect,velocity:CGRect)? {
+        guard let item=items[id] else { return nil }
+        let glass=held?.id == id && held?.identity == true ? item.identity?.glassView:item.glass
+        guard let glass else { return nil }
+        let rect=glassFrame(glass),observation=glassObservations[ObjectIdentifier(glass)]
+        var velocity=observation?.velocity ?? .zero
+        if collectingGlass,let observation,motionNow()>observation.time {
+            let dt=motionNow()-observation.time,r=observation.rect
+            velocity=CGRect(x:(rect.minX-r.minX)/dt,y:(rect.minY-r.minY)/dt,width:(rect.width-r.width)/dt,height:(rect.height-r.height)/dt)
+        }
+        return (glass,rect,velocity)
+    }
+
+    func setRefuseOwner(_ id: String, hidden: Bool) {
+        if !hidden {
+            refuseHiddenGlass.removeAll()
+            if refuseHiddenMember == id { refuseHiddenMember = nil }
+        }
+        guard let item = items[id], let carrier = trashCarrier(id)?.glass else { return }
+        if hidden {
+            refuseHiddenMember = id
+            refuseHiddenGlass.insert(ObjectIdentifier(carrier))
+        }
+        writeGlass(carrier, hidden: hidden, reason: "refuseOwner")
+        setHiddenPaint(item, hidden)
+    }
+    func beginFreeCarry(pointer:CGPoint,grab:CGPoint) {
+        guard let h=held,let p=trashCarrier(h.id) else { return }
+        let t=motionNow()
+        freeCarry=(OrbTrashMotion(p.rect.midX,velocity:p.velocity.minX+p.velocity.width/2,at:t),
+                   OrbTrashMotion(p.rect.midY,velocity:p.velocity.minY+p.velocity.height/2,at:t),grab)
+        moveHeld(to:pointer)
+    }
+    func setTrashOwner(_ id:String,hidden:Bool,frame:CGRect?) {
+        if !hidden { trashHiddenGlass.removeAll();trashHiddenMember=nil }
+        guard let item=items[id] else { return }
+        if held?.id != id,item.role == .bar {
+            // A restored column's structural bar is not its flying planet. Only planet ink changes owner.
+            trashHiddenGlass.remove(ObjectIdentifier(item.glass));trashHiddenMember=nil
+            writeGlass(item.glass,hidden:false,reason:"trashStructuralReturn")
+            item.glass.layer?.isHidden=false;item.content.layer?.isHidden=false;item.barFace.layer?.isHidden=false;item.chromeHost.isHidden=false
+            item.decoration.setOpacity(0);item.decoration.backView.isHidden=hidden;item.decoration.frontView.isHidden=hidden
+            if let identity=item.identity {
+                if hidden { trashHiddenGlass.insert(ObjectIdentifier(identity.glassView)) }
+                else { trashHiddenGlass.remove(ObjectIdentifier(identity.glassView)) }
+                writeGlass(identity.glassView,hidden:hidden,reason:"trashIdentityReturn")
+                identity.backView.isHidden=hidden;identity.frontView.isHidden=hidden
+            }
+            return
+        }
+        let carrier=trashCarrier(id)?.glass ?? item.glass
+        if hidden { trashHiddenMember=id;trashHiddenGlass.insert(ObjectIdentifier(carrier)) }
+        else { trashHiddenMember=nil;trashHiddenGlass.remove(ObjectIdentifier(carrier)) }
+        if let frame,glassFrame(carrier) != frame {
+            if carrier === item.glass { item.motion.reset(frame) }
+            writeGlass(carrier,frame:frame,hidden:hidden,reason:"trashOwner")
+        } else { writeGlass(carrier,hidden:hidden,reason:"trashOwner") }
+        if held?.id == id || item.role == .orb { setHiddenPaint(item,hidden) }
+        if held?.id != id,returns[id] == nil { carriedHeader?.setOrbCarried(hidden) }
+        if hidden,let component=item.identity,carrier === component.glassView {
+            component.backView.isHidden=true;component.frontView.isHidden=true
+        }
+    }
+    func detachTrashCarrier() {
+        freeCarry=nil;held=nil;carriedHeader=nil;carriedID=nil;releasedNode=nil;releasedIdentity=nil
+    }
+    func trashClearance(_ id:String)->Double {
+        guard let carrier=trashCarrier(id) else { return .infinity }
+        let source=carrier.rect
+        // Include the complete material graph: capsules, LL, borrowed bodies and every Tide tail piece.
+        return content.subviews.compactMap { view -> Double? in
+            guard let glass=view as? NSGlassEffectView,glass !== carrier.glass,!glassHidden(glass),glass.layer?.isHidden != true else { return nil }
+            let r=glassFrame(glass);guard r.width>0,r.height>0 else { return nil }
+            let x=max(0,max(source.minX-r.maxX,r.minX-source.maxX))
+            let y=max(0,max(source.minY-r.maxY,r.minY-source.maxY))
+            return hypot(x,y)
+        }.min() ?? .infinity
+    }
+    func trashLeaseFacts()->(add:Set<String>,tide:DockSlotLeases.Token?,addToken:DockSlotLeases.Token?) {
+        let leases=tideTimeline?.leases ?? tideLeaseMemory
+        return (Set(leases.add?.briefs ?? []),leases.tide?.token,leases.add?.token)
+    }
+    func undoBriefPrefixes()->[[String]] {
+        refreshTideProtection()
+        let leases=tideTimeline?.leases ?? tideLeaseMemory,protection=tideProtection()
+        let candidates=items.values.filter { $0.role == .bar }.sorted { $0.target.minX>$1.target.minX }.map {
+            DockSlotLeases.Candidate(id:$0.conversation.id,role:$0.full ? .full:.brief,protection:protection[$0.conversation.id] ?? [])
+        }
+        return leases.undoPrefixes(candidates:candidates,at:tideNow())
+    }
+    func prepareTrashMembershipChange(_ affected:Set<String>,keeping:Set<String>) {
+        trashReflowPending=true;trashLiveMembers=keeping
+        // Rejoining does not replay the conversation's old notice journal or restart an old Tide hold.
+        for id in keeping where tideCursors[id]==nil { tideCursors[id]=store?.conversation(id)?.notices.journal.last?.id ?? 0 }
+        var leases=tideTimeline?.leases ?? tideLeaseMemory
+        if let tide=leases.tide,affected.contains(tide.token.owner) || !affected.isDisjoint(with:tide.briefs) { _=leases.release(tide.token) }
+        tideTimeline?.leases=leases;tideLeaseMemory=leases
+        for id in affected where !keeping.contains(id) {
+            tideSides.removeValue(forKey:id)?.dispose();tideSideQueued[id]=nil;tideCursors[id]=nil
+            tidePool.removeValue(forKey:id)?.dispose();tideFaces.removeValue(forKey:id)?.dispose()
+            tideBorrowHits.removeValue(forKey:id)?.removeFromSuperview();tideNodePoses[id]=nil
+        }
+    }
+    func trashDidCommitMembers(_ ids:Set<String>) { if trashReflowPending { trashLiveMembers=ids } }
+    private func reflowTrashTide() {
+        let bars=items.values.filter { trashLiveMembers.contains($0.conversation.id) && $0.role == .bar }.sorted { $0.target.minX>$1.target.minX }
+        let briefs=bars.prefix(while:{!$0.full}).map { ($0.conversation.id,$0.target) }
+        let orbs=items.values.filter { trashLiveMembers.contains($0.conversation.id) && $0.role == .orb && $0.slot>=base.leading }.sorted { $0.target.minX<$1.target.minX }.map { ($0.conversation.id,$0.target) }
+        if tideTimeline == nil { tideTimeline=TideMotion(briefs:briefs,orbs:orbs);tideTimeline?.leases=tideLeaseMemory }
+        else {
+            let previous=tideTimeline?.owner
+            tideTimeline?.reflow(briefs:briefs,orbs:orbs)
+            if let previous,tideTimeline?.owner==nil {
+                tideFaces[previous]?.park();tideWords?.park();tidePresentedOwner=nil
+                for hit in tideBorrowHits.values { hit.isHidden=true;hit.cancelPress() }
+                onTideReadingRoom?([])
+            }
+        }
+        tideLeaseMemory=tideTimeline?.leases ?? tideLeaseMemory
+        if let add=tideLeaseMemory.add,add.committed {
+            let needed=add.briefs.prefix { trashLiveMembers.contains($0) && items[$0]?.role == .orb }.count
+            _=tideLeaseMemory.updateAddCapacity(requiredBriefs:needed);tideTimeline?.leases=tideLeaseMemory
+        }
+        refreshTideProtection();scheduleTideWake()
+    }
+
     // MARK: Dragging me (f038: into Focused; f042: out of it)
 
     /// me under the pointer: its centre follows the pointer from where it was picked up, at 1.1 × its size.
@@ -2309,12 +4140,18 @@ import QuartzCore
         let channel=glassReleases.removeValue(forKey:ObjectIdentifier(me))
         let contour=contourHandoffs.removeValue(forKey:ObjectIdentifier(me))
         meHeld=(p,channel == nil && contour == nil ? (meMotion.rect ?? me.frame):me.frame,p)
+        if let diameter = sunHoverPickupDiameter, let origin = meHeld?.origin {
+            let target = CGSize(width: diameter * 1.1, height: diameter * 1.1)
+            sunHoverHeldShape = (RectSpring(from: CGRect(origin: .zero, size: origin.size), to: CGRect(origin: .zero, size: target), velocity: .zero,
+                                           response: AutoScene.queueSpring.response, damping: AutoScene.queueSpring.damping), motionNow())
+        } else { sunHoverHeldShape = nil }
+        sunHoverPickupDiameter = nil
     }
     func moveMe(to p: CGPoint) { meHeld?.pointer = p }
     /// Lets me go: it springs from where it is to `home` (its place in the layout the drop leads to).
     func releaseMe() {
         guard let me, meHeld != nil else { return }
-        meHeld = nil
+        meHeld = nil; sunHoverHeldShape = nil; sunHoverPickupDiameter = nil
         meSpring = RectSpring(from: (meMotion.rect ?? me.frame).offsetBy(dx: -meDelta.minX, dy: -meDelta.minY), to: meHome, velocity: .zero, response: 0.28, damping: 0.84)
         meBegan = motionNow()
     }
@@ -2370,13 +4207,14 @@ import QuartzCore
         defer { reconcileGlassTopology() }
         if let m = meHeld, me != nil {
             let c = CGPoint(x: m.origin.midX + m.pointer.x - m.start.x, y: m.origin.midY + m.pointer.y - m.start.y)
-            let s = m.origin.width * 1.1
-            let r = CGRect(x: c.x - s / 2, y: c.y - s / 2, width: s, height: s)
+            let size = sunHoverHeldShape.map { $0.shape.sample(max(0, now - $0.began)).rect.size } ?? CGSize(width: m.origin.width * 1.1, height: m.origin.width * 1.1)
+            let r = CGRect(x: c.x - size.width / 2, y: c.y - size.height / 2, width: size.width, height: size.height)
             placeMe(r, at: now)
         }
         guard let h = held, let item = items[h.id] else { return }
         let size = h.shape.sample(now - h.began).rect.size
-        let r = CGRect(x: h.center.x - size.width / 2, y: h.center.y - size.height / 2, width: size.width, height: size.height)
+        let center=freeCarry.map { CGPoint(x:$0.x.sample(now).value,y:$0.y.sample(now).value) } ?? h.center
+        let r = CGRect(x: center.x - size.width / 2, y: center.y - size.height / 2, width: size.width, height: size.height)
         if h.identity { placeIdentity(item,at:now,heldRect:r); return }
         place(item,r)
         if item.face.duration > 0 { item.decoration.setOpacity(item.faceOpacity(at: motionNow())) }
@@ -2398,98 +4236,6 @@ extension CGRect {
 
 /// A peek capsule's face (product BriefBar `titled`): the conversation's name and a chevron, then its badge in the control's
 /// box at the end. Drawn by the view itself; laid out once for the capsule and clipped while the glass springs.
-@MainActor final class PeekBarFace: NSView {
-    private var title = "", badge: OrbBadge?
-    private var capturingGlyphs = false
-    var glyphExposureActive = false { didSet { if oldValue != glyphExposureActive { needsDisplay = true } } }
-    var motionBadgeRect: CGRect? { didSet { if oldValue != motionBadgeRect { needsDisplay = true } } }
-    private var cachedBadgeRect: CGRect?
-    var badgeRect: CGRect? {
-        if let cachedBadgeRect { return cachedBadgeRect }
-        guard let badge else { return nil }
-        let h=bounds.height,control=(h*0.5).clamped(26,30).rounded(),end=((h-control)/2).rounded()
-        let box=CGRect(x:bounds.width-end-control,y:((h-control)/2).rounded(),width:control,height:control)
-        let base=NSFont.systemFont(ofSize:10,weight:.bold)
-        let font=base.fontDescriptor.withDesign(.rounded).flatMap{NSFont(descriptor:$0,size:10)} ?? base
-        let size=(badge.symbol.text as NSString).size(withAttributes:[.font:font])
-        let width=max(18,(size.width+10).rounded())
-        let r=CGRect(x:(box.midX-width/2).rounded(),y:(box.midY-9).rounded(),width:width,height:18)
-        cachedBadgeRect=r;return r
-    }
-    func glyphBitmap(scale: CGFloat) -> CGImage {
-        capturingGlyphs = true
-        defer { capturingGlyphs = false; needsDisplay = true }
-        return M10DockPicture.draw(self,scale:scale,plates:false)!
-    }
-    override var isFlipped: Bool { true }
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override init(frame: NSRect) { super.init(frame: frame); wantsLayer = true }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func configure(_ c: Conversation, badge: OrbBadge?, size: CGSize) {
-        title = c.title; self.badge = badge; cachedBadgeRect = nil
-        frame = CGRect(origin: .zero, size: size)
-        needsDisplay = true
-        setAccessibilityElement(true); setAccessibilityRole(.button); setAccessibilityLabel(c.title)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance { drawFace() }
-    }
-
-    private func drawFace() {
-        if glyphExposureActive, !capturingGlyphs {
-            if let badge, let r = motionBadgeRect ?? badgeRect {
-                (badge.tone == .red ? NSColor.systemRed:badge.tone == .yellow ? NSColor.systemYellow:NSColor.systemGreen).setFill()
-                NSBezierPath(roundedRect:r,xRadius:min(r.width,r.height)/2,yRadius:min(r.width,r.height)/2).fill()
-            }
-            return
-        }
-        // DockBarMetrics: control = clamp(h × 0.5, 26, 30), end inset centres it on the end arc; leading max(16, h × 0.4).
-        let h = bounds.height, control = (h * 0.5).clamped(26, 30).rounded(), end = ((h - control) / 2).rounded()
-        let leading = max(16, h * 0.4)
-        let box = CGRect(x: bounds.width - end - control, y: ((h - control) / 2).rounded(), width: control, height: control)
-        if let badge {
-            // 10 pt bold rounded, 5 pt a side, at least 18 × 18; white on red, black 0.85 on yellow or green.
-            let base = NSFont.systemFont(ofSize: 10, weight: .bold)
-            let font = base.fontDescriptor.withDesign(.rounded).flatMap { NSFont(descriptor: $0, size: 10) } ?? base
-            let red = badge.tone == .red
-            let text = NSAttributedString(string: badge.symbol.text, attributes: [.font: font, .foregroundColor: red ? NSColor.white : NSColor(white: 0, alpha: 0.85)])
-            let size = text.size(), pill = CGSize(width: max(18, (size.width + 10).rounded()), height: 18)
-            let r = CGRect(x: (box.midX - pill.width / 2).rounded(), y: (box.midY - 9).rounded(), width: pill.width, height: 18)
-            if !capturingGlyphs {
-                (red ? NSColor.systemRed : badge.tone == .yellow ? NSColor.systemYellow : NSColor.systemGreen).setFill()
-                let plate = motionBadgeRect ?? r
-                NSBezierPath(roundedRect: plate, xRadius: min(plate.width,plate.height)/2, yRadius: min(plate.width,plate.height)/2).fill()
-            }
-            if !glyphExposureActive || capturingGlyphs {
-                text.draw(at: CGPoint(x: (r.midX - size.width / 2).rounded(), y: (r.midY - size.height / 2).rounded()))
-            }
-        }
-        guard !glyphExposureActive || capturingGlyphs else { return }
-        // HStack(spacing 8): title, chevron, Spacer(min 4), status.
-        let chevron = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
-        let chevronSize = chevron?.size ?? CGSize(width: 6, height: 10)
-        let room = max(0, box.minX - 8 - 4 - 8 - chevronSize.width - 8 - leading)
-        let style = NSMutableParagraphStyle(); style.lineBreakMode = .byTruncatingTail
-        let attributes: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: Look.ink, .paragraphStyle: style]
-        let natural = (title as NSString).size(withAttributes: attributes)
-        let width = min(room, ceil(natural.width))
-        let line = ceil(natural.height)
-        (title as NSString).draw(with: CGRect(x: leading, y: ((h - line) / 2).rounded(), width: width, height: line),
-                                 options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attributes)
-        if let chevron {
-            let x = (leading + width + 8).rounded(), y = ((h - chevronSize.height) / 2).rounded()
-            let tinted = NSImage(size: chevronSize, flipped: false) { rect in
-                chevron.draw(in: rect); Look.secondary.set(); rect.fill(using: .sourceAtop); return true
-            }
-            tinted.draw(in: CGRect(x: x, y: y, width: chevronSize.width, height: chevronSize.height))
-        }
-    }
-}
-
 /// Finite, interruptible opacity on the dock's existing frame clock (including offscreen virtual time).
 struct DockFade {
     var from: Float, to: Float, began = 0.0
@@ -2501,6 +4247,19 @@ struct DockFade {
     }
     mutating func retarget(_ target: Float, at time: Double) {
         guard target != to else { return }; from = value(at: time); to = target; began = time
+    }
+}
+
+extension NativeComposer {
+    /// Keep the live model title whole while the owned editor still follows its source pose.
+    func fitSplitModelLabel() {
+        guard let width = splitModelWidth, !isComposing else { return }
+        textView.needsDisplay = true
+        let old = modelButton.frame
+        guard width > old.width else { return }
+        modelButton.frame = CGRect(x: old.maxX - width, y: old.minY, width: width, height: old.height)
+        let clip = scrollView.frame
+        scrollView.frame.size.width = max(1, min(clip.width, modelButton.frame.minX - 4 - clip.minX))
     }
 }
 

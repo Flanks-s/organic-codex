@@ -12,7 +12,7 @@ import QuartzCore
         let store: ConversationStore
         let metrics: AutoLayout.Metrics
         let glass: NSGlassEffectView
-        var now = CACurrentMediaTime() + 3600
+        var now = VerificationClock.modelOrigin
         var began = 0.0
         var order: [String]
         var layout: AutoLayout
@@ -199,7 +199,7 @@ import QuartzCore
         let all = Array(MockSeed.make().prefix(6))
         let store = ConversationStore(conversations: all, projects: MockSeed.projects, devices: MockSeed.devices)
         let scene = AutoScene(size: CGSize(width: 1280, height: 820), store: store, profile: M10DockMotion.dell, scale: scale)
-        var clock = CACurrentMediaTime() + 3600
+        var clock = VerificationClock.modelOrigin
         scene.now = { clock }; scene.dock.motionTime = { clock }
         scene.manualSettle = true; scene.ambient = false
         scene.dock.motionProfile = M10DockMotion.dell

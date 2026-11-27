@@ -39,8 +39,11 @@ import QuartzCore
         var isVisible: Bool { maximumOpacity >= 0.01 && hiddenBy.isEmpty }
     }
 
-    static func state(layer: CALayer?, view: NSView?, ancestors: [CALayer] = []) -> State {
+    static func state(layer: CALayer?, view: NSView?, ancestors: [CALayer] = [], includesAnimations: Bool = true) -> State {
         var result = State(), seenLayers = Set<ObjectIdentifier>()
+        func animations(_ layer: CALayer, property: String) -> [CAPropertyAnimation] {
+            includesAnimations ? Self.animations(layer, property: property) : []
+        }
         func includeLayers(_ layer: CALayer?) {
             var currentLayer = layer
             while let current = currentLayer {
@@ -73,9 +76,35 @@ import QuartzCore
         result.hiddenBy = Array(Set(result.hiddenBy)).sorted()
         return result
     }
+
+    /// Only removable, finite transitions have an end to wait for. The outer group's clock owns removal.
+    static func completionDelay(layer: CALayer, at now: CFTimeInterval) -> CFTimeInterval? {
+        func affectsVisibility(_ animation: CAAnimation) -> Bool {
+            if let group = animation as? CAAnimationGroup { return (group.animations ?? []).contains(where: affectsVisibility) }
+            return ["opacity", "alphaValue", "hidden"].contains((animation as? CAPropertyAnimation)?.keyPath ?? "")
+        }
+        let localNow = layer.convertTime(now, from: nil)
+        let rate = layer.convertTime(now + 1, from: nil) - localNow
+        guard rate.isFinite && rate > 0 else { return nil } // A paused layer has no wall-clock deadline.
+        return (layer.animationKeys() ?? []).compactMap { key -> CFTimeInterval? in
+            guard let animation = layer.animation(forKey: key), affectsVisibility(animation),
+                  animation.isRemovedOnCompletion, animation.speed != 0,
+                  animation.repeatCount < .greatestFiniteMagnitude else { return nil }
+            let cycle = animation.duration * (animation.autoreverses ? 2 : 1)
+            let duration = animation.repeatDuration > 0 ? animation.repeatDuration : cycle * (animation.repeatCount > 0 ? Double(animation.repeatCount) : 1)
+            guard duration.isFinite && duration > 0 else { return nil }
+            // Until commit resolves the implicit-begin sentinel, only the attachment is trustworthy.
+            guard animation.beginTime != 0 else { return 1 / 60 }
+            let end = animation.speed > 0 ? duration : 0
+            let remaining = (animation.beginTime + (end - animation.timeOffset) / Double(animation.speed) - localNow) / rate
+            guard remaining.isFinite && remaining < Double(Int.max) / 1e9 - 1 else { return nil }
+            // A late commit/removal can outlive its nominal end. Re-arm only while it remains attached.
+            return max(0, remaining) + 1 / 60
+        }.min()
+    }
 }
 
-/// Observe retained native controls without adding a display link or a polling timer.
+/// Observe retained native controls without a display link or an idle polling timer.
 /// The owner rebinds after mounting; KVO covers view, backing-layer and window visibility changes.
 @MainActor final class OrbAnimationVisibilityObservation {
     private var observations: [NSKeyValueObservation] = []
@@ -95,10 +124,33 @@ import QuartzCore
                 guard let self else { return }; self.refreshQueued = false; self.changed()
             }
         }
+        scheduleCompletionRefresh(after: max(0, context.duration) + 1 / 60)
+    }
+    private func scheduleCompletionRefresh(after delay: CFTimeInterval) {
         completionRefresh?.cancel()
-        let refresh = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.changed() } }
+        let refresh = DispatchWorkItem { [weak self] in MainActor.assumeIsolated { self?.refreshAfterAnimation() } }
         completionRefresh = refresh
-        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, context.duration) + 1 / 60, execute: refresh)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: refresh)
+    }
+    private func refreshAfterAnimation() {
+        completionRefresh = nil
+        changed()
+        guard isObserving, let view,
+              OrbAnimationVisibility.state(layer: view.layer, view: view).isVisible,
+              !OrbAnimationVisibility.state(layer: view.layer, view: view, includesAnimations: false).isVisible else { return }
+        var layers: [CALayer] = [], seen = Set<ObjectIdentifier>(), current: NSView? = view
+        func includeLayers(_ layer: CALayer?) {
+            var next = layer
+            while let layer = next, seen.insert(ObjectIdentifier(layer)).inserted {
+                layers.append(layer); next = layer.superlayer
+            }
+        }
+        while let ancestor = current { includeLayers(ancestor.layer); current = ancestor.superview }
+        includeLayers(view.window?.contentView?.superview?.layer)
+        let now = CACurrentMediaTime()
+        if let delay = layers.compactMap({ OrbAnimationVisibility.completionDelay(layer: $0, at: now) }).min() {
+            scheduleCompletionRefresh(after: delay)
+        }
     }
     var isObserving: Bool { !observations.isEmpty }
     func stop() { observations.removeAll(); completionRefresh?.cancel(); completionRefresh = nil }

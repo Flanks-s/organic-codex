@@ -40,7 +40,9 @@ actor S4ManualClock: CoreRuntimeClock {
         check(await clock.requests.isEmpty && !replay.isPlaybackActive,"S4 seeding does not start a clock")
         var deltas: [String] = [], times: [Double] = []
         replay.onEvent = { event in
-            if event.params["threadId"] == "A",event.method == "item/reasoning/textDelta" { deltas.append(event.params["delta"]?.stringValue ?? ""); times.append(event.time ?? .nan) }
+            guard event.params["threadId"] == "A", event.method == "item/reasoning/summaryTextDelta" else { return }
+            deltas.append(event.params["delta"]?.stringValue ?? "")
+            times.append(event.time ?? .nan)
         }
         _ = replay.updatePlaybackSettings(.init(tickInterval:0.125,charactersPerTick:5))
         check(replay.step() && replay.totalTicks == 1 && deltas.last?.count == 5,"S4 paused Step writes the configured five characters in exactly one tick")

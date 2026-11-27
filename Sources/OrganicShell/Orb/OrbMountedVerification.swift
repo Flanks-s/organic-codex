@@ -32,7 +32,9 @@ import QuartzCore
                 let badgeCentre = badge.convert(CGPoint(x: badge.bounds.midX, y: badge.bounds.midY), to: host.layer)
                 let expectedBadge = CGPoint(x: frame.minX + diameter*0.86, y: frame.minY + diameter*0.14)
                 let nominalError = glyphCentre.y - frame.midY
-                let contentLayer = content.layer!
+                guard let contentLayer = content.layer else {
+                    check(false,"\(scale)x mounted orb \(diameter) content layer exists"); continue
+                }
                 let expectedLocal = CGPoint(x: diameter/2, y: content.isFlipped ? diameter/2 : contentLayer.bounds.maxY-diameter/2)
                 let expectedMounted = contentLayer.convert(expectedLocal, to: host.layer)
                 let error = glyphCentre.y - expectedMounted.y
@@ -59,27 +61,57 @@ import QuartzCore
             for (i,c) in all.enumerated() { c.satellites = [Satellite(id:"moon-\(i)",face:"S")] }
             dock.install(layout,metrics:metrics,order:all,full:[all[0].id],store:store)
             now += 1;dock.hoverFrame(at:now);dock.sample(.infinity)
-            let moonItem = dock.items.values.first{ $0.role == .orb && !$0.conversation.satellites.isEmpty }!
-            let frame = moonItem.glass.frame, moon = moonItem.conversation.satellites[0]
+            guard let moonItem = dock.items.values.first(where:{ $0.role == .orb && !$0.conversation.satellites.isEmpty }),
+                  let moon = moonItem.conversation.satellites.first else {
+                check(false,"\(scale)x Peek satellite fixture has an overflow orb and satellite"); continue
+            }
+            let frame = moonItem.glass.frame
             let target=CGPoint(x:frame.midX-70,y:frame.midY-62)
             let capsule=CGRect(x:frame.minX-120,y:frame.minY-8,width:240,height:48)
+            let peek=PeekNode(size:size,scale:scale);peek.ambient=false;peek.motionEnabled=false
+            dockHost.addSubview(peek.view);peek.header.now={now}
+            defer {peek.clear();peek.header.dispose();peek.view.removeFromSuperview()}
+            let geometry=layout.peek(over:frame,size:size,satelliteRows:0,satellite:16,metrics:metrics)
+            peek.open(moonItem.conversation,geometry:geometry)
+            peek.header.setExpanded(true,pinned:true)
             dock.projectPeek(shown:moonItem.conversation.id,open:true,capsule:capsule,rows:[moon.id:target.x],rowY:target.y)
-            now += 4;dock.sample(.infinity);dockHost.layoutSubtreeIfNeeded()
+            now += 4;dock.sample(.infinity);peek.header.sampleMotion(at:now);dockHost.layoutSubtreeIfNeeded()
             _ = VerificationRaster.capture(dockHost,scale:scale)
-            let clock=moonItem.decoration.mountedSatelliteFront.sublayers![0], pose=clock.sublayers![0]
-            let actual=pose.convert(CGPoint.zero,to:dockHost.layer)
-            rows.append(["scale":scale,"state":"peek-row","actual":[actual.x,actual.y],"expected":[target.x,target.y],"error":[actual.x-target.x,actual.y-target.y]])
-            check(abs(actual.x-target.x)<0.001 && abs(actual.y-target.y)<0.001,"\(scale)x Peek satellite world row target")
+            let dockMoons=moonItem.decoration.mountedSatelliteFront.sublayers?.count ?? 0
+            let headerMoons=peek.header.orb.mountedSatelliteFront.sublayers?.count ?? 0
+            let presentation=peek.header.hostPresentation
+            var satelliteButtons=Set<ObjectIdentifier>()
+            if let row=peek.header.geometry.satelliteRow {
+                for x in stride(from:row.minX,through:row.maxX,by:2) {
+                    let p=CGPoint(x:x,y:row.midY)
+                    if let button=peek.header.hitTest(peek.header.convert(p,to:peek.header.superview)) as? IslandButton,
+                       button.text.hasPrefix("Sub-agent \(moon.face)"),button.participates,!button.isHiddenOrHasHiddenAncestor,
+                       presentation.interactiveRegions.contains(where:{$0.contains(p)}) {
+                        satelliteButtons.insert(ObjectIdentifier(button))
+                    }
+                }
+            }
+            rows.append(["scale":scale,"state":"peek-open","dockSatelliteLayers":dockMoons,
+                         "headerSatelliteLayers":headerMoons,"headerSatelliteButtons":satelliteButtons.count])
+            check(dockMoons==0,"\(scale)x Peek open: dock satellites belong to the Peek header")
+            check(peek.headerVisible && presentation.acceptsInput && presentation.conversationID==moonItem.conversation.id &&
+                  peek.header.configuration?.signals.satellites.map(\.id)==[moon.id] && headerMoons==1 && satelliteButtons.count==1,
+                  "\(scale)x Peek open: real header mounts its satellite and exposes its native button")
             let local = frame.offsetBy(dx:-moonItem.glass.frame.minX,dy:-moonItem.glass.frame.minY)
             mounted(moonItem.decoration, local:local, host:dockHost, scale:scale, label:"Peek wide capsule", check:check)
+            peek.fadeLyrics();peek.retract()
             dock.projectPeek(shown:nil,open:false,capsule:capsule,rows:[:],rowY:target.y)
             now += 4;dock.sample(.infinity);dockHost.layoutSubtreeIfNeeded()
             _ = VerificationRaster.capture(dockHost,scale:scale)
             let closingLocal=frame.offsetBy(dx:-moonItem.glass.frame.minX,dy:-moonItem.glass.frame.minY)
             mounted(moonItem.decoration,local:closingLocal,host:dockHost,scale:scale,label:"Peek closing M10 painted host",check:check)
             for _ in 0..<3 { now += 1.0/60;dock.sample(.infinity) }
+            peek.clear()
             dockHost.layoutSubtreeIfNeeded();_ = VerificationRaster.capture(dockHost,scale:scale)
             mounted(moonItem.decoration,local:CGRect(origin:.zero,size:frame.size),host:dockHost,scale:scale,label:"Peek closed settled",check:check)
+            let restoredMoons=moonItem.decoration.mountedSatelliteFront.sublayers?.count ?? 0
+            rows.append(["scale":scale,"state":"peek-closed","dockSatelliteLayers":restoredMoons])
+            check(restoredMoons==1,"\(scale)x Peek closed settled: dock satellites return")
             for count in [0,1,2,3] {
                 let root = DockNode.Passage(frame:CGRect(origin:.zero,size:size));root.wantsLayer=true
                 let sceneDock = DockNode(view:root,scale:scale);sceneDock.ambient=false;sceneDock.still=true;sceneDock.motionTime={now};sceneDock.motionProfile=DisplayProfile(name:"mounted-check",frameInterval:1/60,mmPerPoint:0.27,persistenceFrames:0)
@@ -108,7 +140,9 @@ import QuartzCore
     /// AppKit aligns the glass's private backing content to pixels during cacheDisplay. Use that real host's
     /// top-origin point as reference, while the report above also retains the error against the nominal glass frame.
     static func mounted(_ orb:OrbComponent,local:CGRect,host:NSView,scale:CGFloat,label:String,check:(Bool,String)->Void) {
-        let content=orb.glassView.contentView!, layer=content.layer!
+        guard let content=orb.glassView.contentView,let layer=content.layer else {
+            check(false,"\(scale)x \(label) mounted content and layer exist"); return
+        }
         let point=CGPoint(x:local.midX,y:content.isFlipped ? local.midY : layer.bounds.maxY-local.midY)
         let expected=layer.convert(point,to:host.layer)
         for (name,ink) in [("glyph",orb.mountedGlyph),("liquid",orb.mountedLiquid)] {

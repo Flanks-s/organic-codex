@@ -172,4 +172,5 @@ enum FollowUp: String, Sendable { case steer, queue }
     var access: Access = .auto
     var waitingForTurnID: String? = nil
     var deliveryError: String? = nil
+    var waitForIdle: Bool? = nil
 }

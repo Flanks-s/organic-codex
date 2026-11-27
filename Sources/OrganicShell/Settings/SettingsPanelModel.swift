@@ -14,7 +14,7 @@ import AppKit
 }
 
 struct SettingsRowVisual {
-    enum Style: String { case standard, header, footer, cards, modes, segmented, slider, accent, search, toolbar, themeStrip,
+    enum Style: String { case standard, header, footer, cards, segmented, slider, accent, search, toolbar, themeStrip,
         profile, statistics, activity, pluginTiles, storage, usageChart, meter, illustration, empty, counter, rule }
     var style=Style.standard
     var group="",symbol="",tile="",buttonTitle:String?,rightText="",cardArt=""

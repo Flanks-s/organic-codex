@@ -1,0 +1,281 @@
+{
+  "version": 1,
+  "profile": "org.organic.bodies.v2",
+  "sourcePolicy": "Existing board files only. No network download.",
+  "provenanceNote": "Hashes identify the exact approved board inputs, not independently fetched upstream originals. This round uses only the existing design/orrery/project/tex/ files. manifest.json records the exact repository paths, file hashes, credits, licenses, and processing steps. Upstream-to-board resizing history has not been independently reconstructed; the manifest does not claim otherwise.",
+  "assets": [
+    {
+      "id": "ceres_fictional",
+      "repositoryPath": "design/orrery/project/tex/ceres_fictional.jpg",
+      "bytes": 1127678,
+      "sha256": "ee59b2c7aa399dfdc810078c723373670133fe8505e439601dff4ce6f3cc5ad8",
+      "canvasBlob": "e1921afc17538c42f6d0e96675a46d6e",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": false,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "earth_clouds",
+      "repositoryPath": "design/orrery/project/tex/earth_clouds.jpg",
+      "bytes": 965676,
+      "sha256": "fffd7f68d41b37274822150e54a6ef605af1d3ec35624d9f628c3b896bfa42ed",
+      "canvasBlob": "9b99b8d61de5569b11fed72bf5055c8c",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "earth_day",
+      "repositoryPath": "design/orrery/project/tex/earth_day.jpg",
+      "bytes": 463087,
+      "sha256": "767ee1dc6eb3802699bfccf6f264880f8acd0b80de3191cd24984fe279b07b7c",
+      "canvasBlob": "26e04701aa73dc563a044960789db5c3",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "eris_fictional",
+      "repositoryPath": "design/orrery/project/tex/eris_fictional.jpg",
+      "bytes": 782018,
+      "sha256": "335935671d99d271b281f2ba03777ed4f578127a89f8565ee4fcef29e2b118e2",
+      "canvasBlob": "dc13f1ab21272f26bcf101719546686a",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": false,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "haumea_fictional",
+      "repositoryPath": "design/orrery/project/tex/haumea_fictional.jpg",
+      "bytes": 900211,
+      "sha256": "6fc091868a7c5ea1b8a7d4d76ce946695e98358f4c4277a2c88f76c36fc95ca1",
+      "canvasBlob": "1e6e95bff3ce4c3775046baafc1f646f",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": false,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "jupiter",
+      "repositoryPath": "design/orrery/project/tex/jupiter.jpg",
+      "bytes": 498976,
+      "sha256": "b0f04d005350252636b0e3396fc592548cbd9e9126b269d32d5c6abd4b0e4f2b",
+      "canvasBlob": "9ffb8c510975363a2f7433f9b132c29f",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "mars",
+      "repositoryPath": "design/orrery/project/tex/mars.jpg",
+      "bytes": 750547,
+      "sha256": "2d187f3e77a98eaa8cea5f4cc722f633c122ef170b9e94ace6b5fb6cbc3f8e01",
+      "canvasBlob": "c973014e4273f9fb4e1a3f6e81225499",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "mercury",
+      "repositoryPath": "design/orrery/project/tex/mercury.jpg",
+      "bytes": 872555,
+      "sha256": "5a5c80607f643496bac9a631e71957def35ed788895f18b678ac849c2b38e48a",
+      "canvasBlob": "ecbfcd99808e500022fb935a3a8848f4",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "moon",
+      "repositoryPath": "design/orrery/project/tex/moon.jpg",
+      "bytes": 1053869,
+      "sha256": "2764ba6535ea0481a062846ee033cc7a909dae05b31a8fd13f3e98f3a7fd92bd",
+      "canvasBlob": "d8a55e45e718d4b26567f745de108ff6",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "neptune",
+      "repositoryPath": "design/orrery/project/tex/neptune.jpg",
+      "bytes": 241580,
+      "sha256": "cb42ea82709741d28b0af44d8b283cbc6dbd0c521a7f0e1e1e010ade00977df6",
+      "canvasBlob": "1585618abe960f381e8bffbfac467770",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "pluto",
+      "repositoryPath": "design/orrery/project/tex/pluto.jpg",
+      "bytes": 361951,
+      "sha256": "3d58eb4574bc3e3e1b21c2f1047caac9671b35c01375e186a8788fe6b7c505c5",
+      "canvasBlob": "a37341de38af088f6e098cb60dd1cc86",
+      "author": "NASA/Johns Hopkins University Applied Physics Laboratory/Southwest Research Institute",
+      "license": "Public domain (US); JPL Image Use Policy",
+      "source": "https://www.jpl.nasa.gov/images/pia11707-pluto-color-map/",
+      "licenseURL": "https://www.jpl.nasa.gov/jpl-image-use-policy/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Fill unobserved map gaps using the board algorithm; preserve observed heart.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "saturn",
+      "repositoryPath": "design/orrery/project/tex/saturn.jpg",
+      "bytes": 199916,
+      "sha256": "54a900ca9bf7ab62e70f862852759abdf342e6d6436a95a2fe9ebdb6bcd3bbac",
+      "canvasBlob": "4ceb9812db62875f6d3c6e6065b312af",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "saturn_ring",
+      "repositoryPath": "design/orrery/project/tex/saturn_ring.png",
+      "bytes": 12119,
+      "sha256": "4b0644b2f3ef259fd0bfaedd9dc52f9e7d9738f65f50363e8c4dd19f650d7334",
+      "canvasBlob": "49caa052e3947cb02f0df1f20056606e",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "sun",
+      "repositoryPath": "design/orrery/project/tex/sun.jpg",
+      "bytes": 822427,
+      "sha256": "ff0f076ba65e03b5ab518451bc96699325be38e3ccbdd5869ee1c00f3a0c8816",
+      "canvasBlob": "86ad0acc54c98a9e7cf5991a1b391da0",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "uranus",
+      "repositoryPath": "design/orrery/project/tex/uranus.jpg",
+      "bytes": 77751,
+      "sha256": "d15239d46f82d3ea13d2b260b5b29b2a382f42f2916dae0694d0387b1204a09d",
+      "canvasBlob": "10e1528f4303526af4e0e159238a23ab",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    },
+    {
+      "id": "venus_atmosphere",
+      "repositoryPath": "design/orrery/project/tex/venus_atmosphere.jpg",
+      "bytes": 229696,
+      "sha256": "225012ad4911730605c4e189ca2a3bf674fce50cc48aab4102b936b47d6991ac",
+      "canvasBlob": "f6dc9c30c0606ac004341a6b05e14042",
+      "author": "Solar System Scope",
+      "license": "CC BY 4.0",
+      "source": "https://www.solarsystemscope.com/textures/",
+      "licenseURL": "https://creativecommons.org/licenses/by/4.0/",
+      "observed": true,
+      "transformations": [
+        "Existing board copy; upstream-to-board conversion history not independently reconstructed.",
+        "No new download. Decode existing file to sRGB RGBA; resize to requested LOD.",
+        "Orthographic projection at fixed catalogue longitude; profile org.organic.bodies.v2; one frame per lighting direction; supersample then downsample; premultiplied RGBA PNG sprite."
+      ]
+    }
+  ]
+}

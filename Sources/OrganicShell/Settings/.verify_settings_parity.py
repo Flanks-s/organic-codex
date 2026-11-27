@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): replaced by tools/m11/component-check.py settings (with both reference sets). Kept, not deleted (#181).
 """Offscreen checks in a full HEAD export; only changed Settings files are overlaid. Retains incremental debug objects."""
 from pathlib import Path
 import argparse, hashlib, io, json, os, shutil, subprocess, tarfile

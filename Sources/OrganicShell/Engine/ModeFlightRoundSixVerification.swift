@@ -6,6 +6,8 @@ import QuartzCore
 @MainActor enum ModeFlightRoundSixVerification {
     static func run(to output:URL,reference:URL) throws -> Int32 {
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        let clock=ModeContentVerificationClock()
+        defer {clock.restore()}
         var checks=0,failures:[String]=[],facts:[String:Any]=[:],categories:[String:Int]=[:]
         func check(_ value:Bool,_ name:String) {checks+=1;if !value {categories[String(name.prefix(2)),default:0]+=1;if failures.count<200 {failures.append(name);print("FAIL: "+name)}}}
         let seed=MockSeed.make(),size=CGSize(width:1280,height:820),rows=ModeOrreryFlightVerification.rows,real=ModeOrreryFlightVerification.real
@@ -44,7 +46,7 @@ import QuartzCore
                 let root=CALayer();root.backgroundColor=NSColor.black.cgColor
                 let material=CALayer();material.frame=CGRect(x:12,y:12,width:40,height:40);material.backgroundColor=NSColor.white.cgColor
                 material.opacity=Float(actual.alphaValue);root.addSublayer(material)
-                let epoch=CACurrentMediaTime()+3600
+                let epoch=VerificationClock.renderOrigin
                 if let group=actual.layer?.animation(forKey:"mode.orrery.appearance")?.copy() as? CAAnimation {
                     group.beginTime=epoch;material.add(group,forKey:"production.material")
                 }
@@ -110,7 +112,9 @@ import QuartzCore
         _=workbench.composerForHandoff();scene.install();scene.settle()
         let shell=WindowShell(organic:root,scene:scene,workbench:workbench,mode:.organic);_=shell.view
         defer {shell.disposeModePreparation();shell.flight.shutdown();workbench.dispose();scene.disposeTranscriptPresentation();sessions.dispose();seed.stopPlayback();replay.stopPlayback()}
-        var now=CACurrentMediaTime();shell.flight.manualTime={now};shell.flight.verificationServerMotion=true
+        var now=ModeContentWorkBoundary.verificationNow!()
+        shell.flight.manualTime={now}
+        shell.flight.verificationServerMotion=true
         shell.verificationFlightSettle(asOrganic:false);shell.prepareModeSwitch(reason:"round6.early")
         shell.verificationFlightToggle(toOrganic:true);shell.verificationFlightAdmit()
         now+=0.08;shell.flight.advance(at:0.08);shell.verificationFlightToggle(toOrganic:false)
@@ -150,7 +154,7 @@ import QuartzCore
             hot.hold(image(size,color:.red),in:host,below:front,holes:[]);hot.verificationImageLayer?.opacity=0.35
             let beforeHot=viewTree(hot)
             hot.restoreSource(ModeSurfacePicture(image:image(size,color:.green)),in:host,below:front,holes:[]) {}
-            let afterHot=viewTree(hot),hotEpoch=CACurrentMediaTime()+3600
+            let afterHot=viewTree(hot),hotEpoch=VerificationClock.renderOrigin
             func rebase(_ root:CALayer,_ epoch:Double) {
                 for key in root.animationKeys() ?? [] {if let a=root.animation(forKey:key)?.copy() as? CAAnimation {a.beginTime=epoch;root.add(a,forKey:key)}}
                 for child in root.sublayers ?? [] {rebase(child,epoch)}
@@ -171,7 +175,7 @@ import QuartzCore
             host.layer?.backgroundColor=NSColor.green.cgColor
             // AppKit does not attach an unwindowed view's backing subtree automatically. Mirror its actual
             // view/layer order and opacity into CARenderer, retaining every production animation command.
-            let epoch=CACurrentMediaTime()+3600
+            let epoch=VerificationClock.renderOrigin
             let initialRoot=CALayer();initialRoot.backgroundColor=NSColor.green.cgColor;initialRoot.addSublayer(viewTree(plate))
             plate.revealDestination(duration:0.14) {}
             let layer=plate.verificationContentFadeLayer

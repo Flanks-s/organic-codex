@@ -6,6 +6,8 @@ import QuartzCore
 @MainActor enum ModeFadeCloseFourVerification {
     static func run(to output:URL) throws->Int32 {
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        let clock=ModeContentVerificationClock()
+        defer {clock.restore()}
         var checks=0,failures:[String]=[],facts:[String:Any]=[:]
         func check(_ value:Bool,_ name:String) {checks+=1;if !value {failures.append(name);print("FAIL: "+name)}}
         func wait(_ seconds:Double) {RunLoop.main.run(until:Date(timeIntervalSinceNow:max(0,seconds)))}
@@ -14,7 +16,7 @@ import QuartzCore
         var ticketFacts:[[String:Any]]=[]
         for hz in [60.0,120.0] {for delay in [0.002,0.004] {
             ModeContentWorkBoundary.verificationManualTickets=true
-            let interval=1/hz,origin=CACurrentMediaTime()+0.01
+            let interval=1/hz,origin=clock.now+0.01
             var starts:[Double]=[],budgets:[Double]=[],nearDeadline:[Double]=[]
             let trace=ModeSignposts.Trace()
             ModeSignposts.withTrace(trace) {
@@ -26,7 +28,7 @@ import QuartzCore
             }
             for index in 0..<3 {
                 let tick=origin+Double(index)*interval
-                wait(tick-CACurrentMediaTime())
+                wait(tick-clock.now)
                 ModeContentWorkBoundary.verificationDisplayTicket(timestamp:tick,target:tick+interval,interval:interval)
                 let late=CACurrentMediaTime()+delay
                 while CACurrentMediaTime()<late {} // Delayed AppKit commit, after the callback and before work begins.
@@ -49,6 +51,9 @@ import QuartzCore
         wait(0.07)
         check(timerStarts.count == 2 && timerStarts[1]-timerStarts[0]>=0.015,"a hidden-window timers retain their elapsed-time spacing")
         ModeContentWorkBoundary.cancel(in:host)
+        // Debt #63: the fixed epoch covers the manual tickets and the hidden timer only. Later sections run real
+        // flights on real time, so put the boundary back on the real clock first (director #323).
+        clock.restore()
 
         let pixel=CGContext(data:nil,width:2,height:2,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue)!
         let photo=ModeWarmPicture(mode:"normie",revision:"R0",image:pixel.makeImage()!,size:CGSize(width:2,height:2),scale:1,captureMS:0,maximumSliceMS:0)
@@ -62,7 +67,7 @@ import QuartzCore
 
         // A Pulse event is already near expiry when the body epoch starts.
         let model=Conversation(id:"close4.pulse",title:"Stable source header")
-        let header=HeaderIsland();var time=CACurrentMediaTime()+3600
+        let header=HeaderIsland();var time=VerificationClock.renderOrigin
         header.now={time};header.noticeWallTime={1000}
         var input=HeaderIslandConfiguration.conversation(model,variant:.full,columnWidth:507,band:44,ambient:false,scale:2)
         input.notices = .init();header.configure(input)
@@ -90,7 +95,8 @@ import QuartzCore
         native.verificationWindowVisible=true;native.refresh(allowHidden:true)
         native.scrollOffset=CGPoint(x:0,y:100000)
         native.verificationManualModeCatchup=true;native.verificationPacedModeCatchup=true
-        var replayNow=CACurrentMediaTime();native.verificationModeReplayNow={replayNow}
+        var replayNow=VerificationClock.renderOrigin
+        native.verificationModeReplayNow={replayNow}
         native.beginModeContentEpoch();let prefix=native.verificationModeText
         c.items[0].text += "\nNext line of streamed text.\nOne more normal source row.\n";c.revision+=1
         native.endModeContentEpoch();let releaseTime=replayNow
@@ -104,7 +110,7 @@ import QuartzCore
         check(movement>0,"v2 the first replay packet really introduces a new visible source line")
         check(animation != nil && abs((animation?.fromValue as? Double ?? -1000)-movement)<0.01 && animation!.duration>=0.05,"v2 native scroll compensation preserves the previously displayed glyph positions on the first replay frame")
         if let animation,movement>0 {
-            let t=CACurrentMediaTime()+3600
+            let t=VerificationClock.renderOrigin
             func tree(compensated:Bool)->CALayer {
                 let canvas=CALayer();canvas.frame=native.bounds;canvas.isGeometryFlipped=true
                 let glyphs=CALayer();glyphs.frame=canvas.bounds;glyphs.contents=sourceInk;glyphs.contentsScale=2;canvas.addSublayer(glyphs)

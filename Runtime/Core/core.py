@@ -9,12 +9,47 @@ from runtime_paths import paths, DEFAULT_MODULES
 from capabilities import capabilities
 from event_log import EventLog
 from authorizations import SessionAuthorizations
+from sidechat import DIAGNOSTIC_METHODS, SECONDARY_TRANSPORT, Sidechats, app_server_options
+from sidechat_quotes import QUOTE, RECEIPT, SERIAL, SidechatQuotes
 
 ROOT = pathlib.Path(__file__).resolve().parent
 NS = 'organic_cua'
+MCP_REFRESH = {
+    "config/batchWrite", "config/mcpServer/reload", "experimentalFeature/enablement/set", "plugin/install",
+    "plugin/uninstall", "mcpServer/oauth/login",
+    "account/login/start", "account/gatewayOAuth/login", "accountSession/switch", "account/logout",
+}
 def encode(v): return json.dumps(v, ensure_ascii=False, separators=(',', ':')).encode()
 
 class AppRpc(RpcClient):
+    async def request(self, method, params=None, *, timeout=30):
+        if not self.core.app_server_diagnostics:
+            if method in DIAGNOSTIC_METHODS:
+                raise RpcFailure(-32010, "App Server diagnostics are disabled (enable --app-server-diagnostics)")
+            if method in SECONDARY_TRANSPORT:
+                raise RpcFailure(-32010, "Remote control is disabled for the private App Server")
+            if method in MCP_REFRESH:
+                return await self.refresh(method, {} if params is None else params, timeout=timeout)
+        return await super().request(method, params, timeout=timeout)
+
+    async def refresh(self, method, params, confirm=None, *, timeout=30):
+        if not isinstance(method, str) or method not in MCP_REFRESH or not isinstance(params, dict):
+            raise RpcFailure(-32602, "Expected a settings refresh request")
+        sidechats = self.core.sidechats
+        sidechats.reject_public(params)
+        async with sidechats.forks:
+            targets = sidechats.refresh_targets()
+            if confirm == "inspect" or (confirm is not None and confirm != targets):
+                return {"sidechats": targets}
+            if confirm is None and any(side["hasContent"] or side["running"] for side in targets):
+                raise RpcFailure(-32011, "Confirm closing sidechats first", data={"sidechats": targets})
+            if not self.core.app_server_diagnostics:
+                reason = "Restart Core after a change to App Server tools or account"
+                await sidechats.shutdown(reason)
+                if sidechats.reason != reason:
+                    raise RpcFailure(-32010, "Could not close sidechats before changing settings")
+            return await super().request(method, params, timeout=timeout)
+
     async def send(self, value):
         context = self.core.tool_context.get(value.get('id')) if 'result' in value else None
         if context and self.core.retired(context):
@@ -25,6 +60,9 @@ class AppRpc(RpcClient):
             if 'id' in value and ('result' in value or 'error' in value):self.core.tool_context.pop(value['id'],None)
 
 class Core:
+    sidechats = None
+    sidechat_quotes = None
+
     def __init__(self, args):
         self.args=args
         paths.configure(getattr(args,'data_dir',None),getattr(args,'work_root',None),getattr(args,'resources',None)); paths.prepare()
@@ -43,6 +81,9 @@ class Core:
         self.dead=set(); self.tool_context={}; self.inflight={}; self.cua={}; self.cua_locks={}
         self.approvals={}; self.operations=set(); self.app=None; self.app_transport=None
         self._closed=False
+        self.app_server_diagnostics = getattr(args, "app_server_diagnostics", False)
+        self.sidechats = Sidechats(self)
+        self.sidechat_quotes = SidechatQuotes(self)
         self.authorizations=SessionAuthorizations(self.data/'authorizations.json')
         if not self.authorizations.exists:
             for event in self.log.since(0):
@@ -65,7 +106,11 @@ class Core:
         return entry
     def retired(self,p): return p.get('_retiredCuaCall',False) or (p.get('threadId'),p.get('turnId')) in self.dead
     async def notification(self,msg):
+        if self.sidechats and self.sidechats.intercept(msg):
+            return
         p=msg.get('params') or {}; tid=p.get('threadId'); method=msg.get('method')
+        if self.sidechat_quotes:
+            self.sidechat_quotes.notification(method, tid, p)
         if tid in self.sessions and method in ('turn/started','turn/completed'):
             s=self.sessions[tid]; turn=p['turn']; s['lastTurn']=turn
             if method=='turn/started': s['active']=turn['id']
@@ -126,6 +171,12 @@ class Core:
         return self.cua[tid][0]
     async def server_request(self,msg):
         p=msg.get('params') or {}; tid=p.get('threadId')
+        nested = p.get("thread") or {}
+        target = tid or p.get("conversationId") or nested.get("id")
+        if self.sidechats.private_ref(p):
+            return await self.sidechats.approval(target, msg)
+        if self.sidechats.opening and target and target not in self.sessions:
+            raise RpcFailure(-32003, "Thread has not been classified")
         if msg.get('method')!='item/tool/call': return await self.approval(msg,'app-server',tid,p)
         self.tool_context[msg['id']]=p
         adapter=self.adapters.get(p.get('namespace'))
@@ -174,8 +225,13 @@ class Core:
         if self.args.proxy:
             env.update({k:self.args.proxy for k in ('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy')})
             env['NO_PROXY']='localhost,127.0.0.1,::1'
-        self.app_transport=await StdioTransport.start([str(paths.resources/'codex-cli/bin/codex'),'app-server','--listen','stdio://','-c','log_dir='+json.dumps(str(self.data/'logs'))],env=env,cwd=str(self.work))
+        options, probe = app_server_options(self.data, env, self.app_server_diagnostics)
+        argv = [str(paths.cli), "app-server", "--listen", "stdio://"]
+        for key, value in options.items():
+            argv.extend(["-c", key + "=" + json.dumps(value, ensure_ascii=False)])
+        self.app_transport = await StdioTransport.start(argv, env=env, cwd=str(self.work), stderr_probe=probe)
         async def disconnected():
+            await self.sidechats.shutdown()
             self.emit('core/backendDisconnected',{'exitCode':self.app_transport.process.returncode})
             # Once RPC reading stops, keep stdout drained so normal EOF shutdown
             # cannot strand our owned CLI behind a full output pipe.
@@ -184,9 +240,13 @@ class Core:
             self.backend_drain=asyncio.create_task(discard_remaining())
             for a in list(self.approvals.values()):
                 self.expire_approval(a,'backend-disconnected')
-        self.app=AppRpc(self.app_transport,requests=self.server_request,notifications=self.notification,disconnected=disconnected); self.app.core=self
+        self.app = AppRpc(self.app_transport, requests=self.server_request, notifications=self.notification,
+                          disconnected=disconnected, private_diagnostics=not self.app_server_diagnostics)
+        self.app.core = self
         init=await self.app.request('initialize',{'clientInfo':{'name':'organic-core','version':'0.1'},'capabilities':{'experimentalApi':True}})
         await self.app.notify('initialized'); self.emit('core/initialized',init)
+        await self.sidechats.enable(init, self.app_transport)
+        self.sidechat_quotes.enable(init)
         # Discover official tool schemas once; per-thread REPLs are opened on demand.
         if paths.node.is_file() and paths.cua.is_file():
             catalog=await self.get_cua('_catalog'); tools=(await catalog.request('tools/list',{}))['tools']
@@ -196,6 +256,8 @@ class Core:
             await importlib.import_module(module).register(self)
         self.emit('core/adaptersReady',{'namespaces':list(self.adapters),'routes':[method+' '+path for method,path in self.routes]})
     async def interrupt(self,tid,turn):
+        if self.sidechat_quotes:
+            self.sidechat_quotes.interrupted(tid, turn)
         self.dead.add((tid,turn)); self.emit('core/turnRetired',{'threadId':tid,'turnId':turn})
         self.expire_approvals(tid,turn,'turn-interrupted')
         for p in list(self.inflight.values()):
@@ -206,6 +268,23 @@ class Core:
             if adapter['interrupt']:await adapter['interrupt'](tid,turn)
         return await self.app.request('turn/interrupt',{'threadId':tid,'turnId':turn})
     async def rpc(self,method,p):
+        if self.sidechats:
+            self.sidechats.reject_public(p)
+            if method in ("thread/fork", "thread/list", "thread/loaded/list"):
+                async with self.sidechats.forks:
+                    result = await self.app.request(method, p, timeout=90)
+                    if method != "thread/fork":
+                        result["data"] = [row for row in result["data"] if not self.sidechats.private_ref(row)]
+                    return result
+        if method in ("thread/attachment/add", "thread/attachment/remove"):
+            if p.get("attachmentType") in (QUOTE, RECEIPT):
+                raise RpcFailure(-32602, "Sidechat quote attachments are managed by Core")
+        if self.sidechat_quotes and self.sidechat_quotes.enabled:
+            if isinstance(p.get("threadId"), str) and (method == "turn/start" or method in SERIAL):
+                return await self.sidechat_quotes.route(method, p, self.thread_rpc)
+        return await self.thread_rpc(method, p)
+
+    async def thread_rpc(self, method, p):
         p=copy.deepcopy(p)
         if method=='thread/start':
             p.setdefault('model',self.args.model); p.setdefault('modelProvider','openai'); p.setdefault('cwd',str(self.work))
@@ -237,6 +316,19 @@ class Core:
                     await self.app.request('thread/name/set',{'threadId':tid,'name':name})
                     s.update(name=name,autoName=False);self.persist()
         result=await self.app.request(method,p,timeout=90)
+        if self.sidechats:
+            if method in ("thread/read", "thread/resume") and result["thread"].get("id") in self.sidechats.private:
+                raise RpcFailure(-32602, "Use the private sidechat endpoints")
+        if method == 'model/list':
+            cursor, seen = None, {''}
+            while cursor not in seen:
+                seen.add(cursor)
+                page = result if cursor == p.get('cursor') else await self.app.request(method, dict(p, cursor=cursor))
+                if preferred := next((row for row in page['data'] if row.get('model') == self.args.model), None):
+                    for row in result['data']:
+                        row['isDefault'] = row is preferred
+                    break
+                cursor = page.get('nextCursor') or ''
         if method in ('thread/resume','thread/read'):
             thread=result['thread']; tid=thread['id']; session=self.sessions.setdefault(tid,{'id':tid,'loaded':False})
             if thread.get('cwd'): session['cwd']=thread['cwd']
@@ -254,6 +346,8 @@ class Core:
     async def close(self):
         if self._closed:return
         self._closed=True;self.done.set()
+        await self.sidechats.shutdown()
+        await self.sidechat_quotes.close()
         for approval in list(self.approvals.values()):self.expire_approval(approval,'core-shutdown')
         for tid,s in self.sessions.items():
             if self.app is not None and s.get('active'):
@@ -301,6 +395,26 @@ class Core:
             await chunk((b',' if count else b'')+encode(event));count+=1
             if limit and count>=limit:break
         await chunk(b']}');writer.write(b'0\r\n\r\n');await writer.drain()
+    async def sidechat_http(self, path, size, reader, writer):
+        try:
+            size = int(size)
+            if not 0 <= size <= 1024 * 1024:
+                raise RpcFailure(-32602, "Invalid sidechat request size")
+            body = json.loads(await reader.readexactly(size)) if size else {}
+            result = await self.sidechats.dispatch(path.removeprefix("/sidechat/"), body, reader)
+            status, payload = b"200 OK", encode({"result": result})
+        except (ConnectionError, asyncio.IncompleteReadError):
+            return
+        except RpcFailure as exc:
+            message = "Sidechat backend request failed" if exc.sent else exc.message
+            status = b"400 Bad Request"
+            payload = encode({"error": {"code": exc.code, "message": message, "requestSent": exc.sent}})
+        except Exception:
+            status, payload = b"400 Bad Request", encode({"error": {"code": -32603, "message": "Sidechat failed"}})
+        writer.write(b"HTTP/1.1 " + status + b"\r\nCache-Control: no-store\r\nContent-Type: application/json\r\n"
+                     b"Content-Length: " + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
+        await writer.drain()
+
     async def http(self,reader,writer):
         try:
             header=await reader.readuntil(b'\r\n\r\n'); lines=header.decode('latin1').split('\r\n'); verb,path,_=lines[0].split(' ')
@@ -308,7 +422,12 @@ class Core:
             url=urlsplit(path); q=parse_qs(url.query)
             if url.path=='/events' and verb=='GET':
                 await self.sse(writer,int(q.get('since',[headers.get('last-event-id','0')])[0]),q.get('threadId',[None])[0]); return
+            if verb == "POST" and url.path.startswith("/sidechat/"):
+                await self.sidechat_http(url.path, headers.get("content-length", "0"), reader, writer)
+                return
             size=int(headers.get('content-length','0')); body=json.loads((await reader.readexactly(size)).decode()) if size else {}
+            if self.sidechats and verb == "POST":
+                self.sidechats.reject_public(body)
             if verb=='GET' and url.path=='/health': result=self.health()
             elif verb=='GET' and url.path=='/capabilities': result=capabilities(self)
             elif verb=='GET' and url.path=='/sessions': result=list(self.sessions.values())
@@ -333,8 +452,10 @@ class Core:
             payload=encode({'result':result}); writer.write(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: '+str(len(payload)).encode()+b'\r\nConnection: close\r\n\r\n'+payload); await writer.drain()
         except (ConnectionError,asyncio.IncompleteReadError): pass
         except Exception as e:
-            payload=encode({'error':{'code':getattr(e,'code',-32603),'message':str(e),'data':getattr(e,'data',None)}})
-            writer.write(b'HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: '+str(len(payload)).encode()+b'\r\nConnection: close\r\n\r\n'+payload)
+            payload=encode({'error':{'code':getattr(e,'code',-32603),'message':str(e),'data':getattr(e,'data',None),'requestSent':getattr(e,'sent',None)}})
+            cache = b'Cache-Control: no-store\r\n' if getattr(e, 'code', None) == -32011 else b''
+            writer.write(b'HTTP/1.1 400 Bad Request\r\n' + cache + b'Content-Type: application/json\r\nContent-Length: '
+                         + str(len(payload)).encode() + b'\r\nConnection: close\r\n\r\n' + payload)
             try: await writer.drain()
             except ConnectionError: pass
         finally: writer.close()
@@ -372,8 +493,9 @@ async def serve(args):
 async def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--port',type=int,default=int(os.environ.get('ORGANIC_CORE_PORT','18793')))
-    p.add_argument('--model',default='gpt-6.1-sol')
+    p.add_argument('--model',default='gpt-6.2-sol')
     p.add_argument('--proxy',default=os.environ.get('ORGANIC_CORE_PROXY'))
+    p.add_argument("--app-server-diagnostics", action="store_true")
     p.add_argument('--data-dir',default=None)
     p.add_argument('--work-root',default=None)
     p.add_argument('--resources',default=None)

@@ -58,19 +58,22 @@ import AppKit
         var answers:[String:[String]]?,heightChanges=0
         question.onHeightChange={heightChanges+=1}
         question.configureQuestion(request,width:640){answers=$0}
-        let field=question.subviews.compactMap{$0 as? NSTextField}.first{$0.identifier?.rawValue == "explanation"}!
-        let secret=question.subviews.compactMap{$0 as? NSTextField}.first{$0.identifier?.rawValue == "secret"}!
+        let field = tree(question).compactMap { $0 as? NSTextField }.first { $0.identifier?.rawValue == "explanation" }!
         let oldHeight=question.frame.height
         field.stringValue="First line\nSecond line\nThird line\nFourth line";question.controlTextDidChange(.init(name:NSControl.textDidChangeNotification,object:field))
         check(field.frame.height>50 && question.frame.height>oldHeight && heightChanges == 1,"C06 four-line answer grows field and notifies parent layout")
-        check(field.superview === question && field.stringValue.contains("Fourth line"),"C06 resizing retains the same native answer control and its contents")
+        check(field.isDescendant(of: question) && field.stringValue.contains("Fourth line"),
+              "C06 resizing retains the same native answer control and its contents")
         let cap=field.frame.height;field.stringValue+="\nFifth\nSixth";question.controlTextDidChange(.init(name:NSControl.textDidChangeNotification,object:field))
         check(field.frame.height == cap,"C06 answers stop growing after four lines without truncating stored text")
+        tree(question).compactMap { $0 as? NSButton }.first { $0.title == "Next" }!.performClick(nil)
+        let secret = tree(question).compactMap { $0 as? NativeSecureField }.first!
         secret.stringValue="hidden\nsecret";question.controlTextDidChange(.init(name:NSControl.textDidChangeNotification,object:secret))
         check(secret is NativeSecureField && secret.frame.height == 18,"C06 secret remains a one-line secure field")
-        let submit=question.subviews.compactMap{$0 as? NSButton}.first{$0.title == "Submit answer"}!
+        let submit = tree(question).compactMap { $0 as? NSButton }.first { $0.title == "Submit" }!
         submit.performClick(nil);check(answers?["explanation"] == [field.stringValue] && answers?["secret"] == [secret.stringValue],"C06 multiline answers retain exact question IDs and values")
         try capture(question,"question")
+        tree(question).compactMap { $0 as? NSButton }.first { $0.title == "‹" }!.performClick(nil)
         field.stringValue="one";question.controlTextDidChange(.init(name:NSControl.textDidChangeNotification,object:field))
         check(field.frame.height == 18,"C06 deleting lines shrinks the answer field")
 

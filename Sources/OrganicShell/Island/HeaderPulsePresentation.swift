@@ -23,10 +23,10 @@ import QuartzCore
     private var lastTime: Double?
     private var swap = PulseTextSwap()
     private let clock = IslandMotionClock()
+    private var wake: Timer?
     private var modeContentFrozen=false
     private var suspended = true
     private var interactive = false
-    private var ambientActive = true
     private var blurFilters: [ObjectIdentifier:NSObject] = [:]
     private var warmObserver: CFRunLoopObserver?
     private var warmIndex=0, warmSlices=0
@@ -48,8 +48,10 @@ import QuartzCore
     var onPose: ((Double) -> Void)?
     var onExpansion: ((Bool, Bool) -> Void)?
     var wallTime: () -> Double = { Date().timeIntervalSince1970 }
+    var now: () -> Double = { CACurrentMediaTime() }
     var isEnabled: Bool { state.enabled }
     var clockRunning: Bool { clock.isRunning }
+    var motionTitleDrawing: IslandLabel? { labels[state.mode.rawValue + "Title"] }
     var capsuleRadius: CGFloat { glass.cornerRadius }
     func setOffscreenGlassHidden(_ hidden: Bool) { glass.isHidden = hidden }
 
@@ -61,7 +63,10 @@ import QuartzCore
         addSubview(glass); addSubview(clip)
         clip.layer?.mask = clipMask
         surfaceButton.drawsText = false; surfaceButton.drawsPointerHighlight = false
-        surfaceButton.invoke = { [weak self] in self?.onToggle?() }
+        surfaceButton.invoke = { [weak self] in
+            guard let self else {return}
+            if self.state.event?.kind == .plan {self.onAction?(.review)} else {self.onToggle?()}
+        }
         surfaceButton.doubleClick = { [weak self] in self?.onRename?() }
         surfaceButton.focus = { [weak self] in self?.focus($0) }
         addSubview(surfaceButton)
@@ -102,7 +107,11 @@ import QuartzCore
         setAccessibilityElement(false)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
-    override func viewDidMoveToWindow() { super.viewDidMoveToWindow(); if window == nil {clock.stop();stopIdleWarmup()} else {schedule();requestIdleWarmup()} }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        schedule()
+        if window == nil { stopIdleWarmup() } else { requestIdleWarmup() }
+    }
     func setTitleMenu(_ menu:NSMenu?) {surfaceButton.menu=menu}
 
     private func makeLabel(_ key: String, in view: NSView, size: CGFloat, secondary: Bool = false) {
@@ -142,23 +151,48 @@ import QuartzCore
     /// An active body picture retains this exact native header pose, including its independent expiry clock.
     func setModeContentFrozen(_ frozen:Bool) {
         guard frozen != modeContentFrozen else {return}
-        modeContentFrozen=frozen;lastTime=nil
-        if frozen {clock.stop();stopIdleWarmup()} else {schedule()}
+        modeContentFrozen = frozen
+        lastTime = frozen ? nil : now()
+        if frozen { stopIdleWarmup() }
+        schedule()
     }
-    func setAmbientActive(_ active: Bool) { ambientActive=active; schedule() }
     func hover(_ inside: Bool, at time: Double) { guard !suspended else { return }; sample(at: time); state.hover(inside); schedule() }
-    func focus(_ value: Bool) { guard !suspended && interactive else { return }; state.focus(value); refresh(dt: 0); schedule() }
-    func togglePin() { guard !suspended && interactive else { return }; state.togglePin(); refresh(dt: 0); schedule() }
+    func focus(_ value: Bool) {
+        guard !suspended && interactive else { return }
+        sample(at: now())
+        state.focus(value)
+        refresh(dt: 0)
+        schedule()
+    }
+    func togglePin() {
+        guard !suspended && interactive else { return }
+        sample(at: now())
+        state.togglePin()
+        refresh(dt: 0)
+        schedule()
+    }
     func dismiss() { state.dismiss(); refresh(dt: 0); schedule() }
     func suspend() {
         stopIdleWarmup()
         state.dismiss(); suspended = true; interactive = false; isHidden = true; clock.stop(); lastTime = nil
+        wake?.invalidate()
         displayedAction=nil; displayedHalo=nil; haloPhase=PulseContentPhase()
         if let m=motion { motion = .init(columnWidth:m.columnWidth,compactWidth:m.compactWidth,compactHeight:m.compactHeight,clock:hasClock) }
         onPose?(1)
         if reportedExpanded || reportedPinned { reportedExpanded=false; reportedPinned=false; onExpansion?(false,false) }
     }
-    func dispose() { stopIdleWarmup(); clock.stop(); state.dismiss(); onPose = nil; onAction = nil; onPanel = nil; onToggle = nil;onRename=nil }
+    func dispose() {
+        stopIdleWarmup()
+        clock.stop()
+        wake?.invalidate()
+        state.dismiss()
+        onPose = nil
+        onAction = nil
+        onPanel = nil
+        onToggle = nil
+        onRename = nil
+    }
+    isolated deinit { wake?.invalidate() }
 
     func sample(at time: Double) {
         guard !modeContentFrozen else {return}
@@ -167,10 +201,19 @@ import QuartzCore
         let dt = lastTime.map { max(0, time - $0) } ?? 0
         lastTime = max(lastTime ?? time, time)
         guard !suspended, state.enabled else { return }
+        if submittedRequest != nil {
+            submittedAge += dt
+            if submittedAge >= 0.5 { submittedRequest = nil }
+        }
+        let quiet = motionBusy ? 0 : max(0, min(dt, state.nextDelay))
+        if quiet > 0 {
+            state.tick(quiet)
+            refresh(dt: 0)
+        }
         // Preserve a deterministic path after a delayed frame; hover and expiry use actual elapsed time.
-        var remaining = min(dt, 1)
-        if dt > remaining { state.tick(dt - remaining) }
-        if submittedRequest != nil { submittedAge += dt; if submittedAge > 0.5 { submittedRequest = nil } }
+        let active = dt - quiet
+        var remaining = min(active, 1)
+        if active > remaining { state.tick(active - remaining) }
         while remaining > 1e-9 {
             let step = min(1.0 / 60, remaining)
             state.tick(step); refresh(dt: step); remaining -= step
@@ -188,11 +231,40 @@ import QuartzCore
         let seconds = Int(max(0, (snapshot.endedAt ?? wallTime()) - start))
         return "\(seconds / 60):" + String(format: "%02d", seconds % 60)
     }
+    private var motionBusy: Bool {
+        motion?.busy == true || haloPhase.busy || trailSwap.busy || leadSwaps.values.contains(where: \.busy)
+            || (state.mode == .bloom && swap.busy)
+    }
+    private var nextSecond: Double {
+        guard snapshot.running, snapshot.endedAt == nil, let start = snapshot.startedAt else { return .infinity }
+        let compact = state.mode == .compact && trailSwap.text == "time"
+        let bloom = state.mode == .bloom && state.event?.progress == nil && state.event?.context == nil
+        guard compact || bloom else { return .infinity }
+        let age = wallTime() - start
+        return floor(max(0, age)) + 1 - age
+    }
     private func schedule() {
-        if !modeContentFrozen && !suspended && state.enabled && (motion?.busy == true || haloPhase.busy || state.event != nil || state.inside || state.hovering || state.pinned || (snapshot.running && ambientActive)) {
+        wake?.invalidate()
+        wake = nil
+        let visible = window != nil && !isHiddenOrHasHiddenAncestor && !modeContentFrozen && !suspended && state.enabled
+        if visible && motionBusy {
             if !clock.isRunning { lastClockWall=nil }
             clock.start(in: self)
-        } else { clock.stop(); lastClockWall=nil }
+            return
+        }
+        clock.stop()
+        lastClockWall = nil
+        guard visible else { return }
+        let current = now()
+        let submission = submittedRequest == nil ? .infinity : 0.5 - submittedAge
+        let semantic = (lastTime ?? current) + min(state.nextDelay, submission) - current
+        let delay = min(semantic, nextSecond)
+        guard delay.isFinite else { return }
+        let timer = Timer(timeInterval: max(0.001, delay), repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { if let self { self.sample(at: self.now()) } }
+        }
+        wake = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     private func refresh(dt: Double) {
@@ -283,10 +355,15 @@ import QuartzCore
             button.isEnabled = submittedRequest == nil && snapshot.pending.first(where: { $0.requestID == state.actionEvent?.requestID })?.submitting != true
             button.focus = { [weak self] in self?.focus($0) }
             button.invoke = { [weak self] in
-                guard let self, let choice, self.interactive, self.state.mode == .action, self.state.actionEvent?.buttons.contains(choice) == true, self.submittedRequest == nil else { return }
+                guard let self else { return }
+                self.sample(at: self.now())
+                guard let choice, self.interactive, self.state.mode == .action, self.submittedRequest == nil,
+                      self.state.actionEvent?.buttons.contains(choice) == true else { return }
                 self.submittedRequest = self.state.actionEvent?.requestID
                 self.submittedAge = 0
-                self.onAction?(choice.action); self.refresh(dt: 0)
+                self.onAction?(choice.action)
+                self.refresh(dt: 0)
+                self.schedule()
             }
         }
         let ew = m.layerWidths[.expanded] ?? 336, cell = (ew - 48) / 2
@@ -304,7 +381,8 @@ import QuartzCore
         let mark: PulseLeadView.Mark = input.signals.error != nil ? .error
             : !snapshot.pending.filter({$0.kind == .approval}).isEmpty ? .approval(snapshot.pending.filter{$0.kind == .approval}.count)
             : snapshot.pending.contains(where:{$0.kind == .question}) ? .question
-            : notice?.kind == .done || snapshot.terminalStatus == "completed" ? .done : input.signals.running ? .working : .idle
+            : notice?.kind == .done || snapshot.terminalStatus == "completed" ? .done
+            : notice?.kind == .plan ? .plan : input.signals.running ? .working : .idle
         for mode in [HeaderPulseState.Mode.compact, .bloom, .action] {
             leads[mode]?.frame = CGRect(x: mode == .compact ? 12 : 18, y: mode == .compact ? (m.compactHeight - 14) / 2 : mode == .bloom ? 22 : 10, width: 14, height: 14)
             var status = leadSwaps[mode] ?? PulseTextSwap()
@@ -410,13 +488,27 @@ import QuartzCore
 
 @MainActor private final class PulseLeadView: IslandPlane {
     enum Mark: Equatable {
-        case idle, working, done, approval(Int), question, error
+        case idle, working, done, plan, approval(Int), question, error
         var key: String {
-            switch self { case .idle: "idle"; case .working: "working"; case .done: "done"; case .approval(let n): "approval:\(n)"; case .question: "question"; case .error: "error" }
+            switch self {
+            case .idle: "idle"
+            case .working: "working"
+            case .done: "done"
+            case .plan: "plan"
+            case .approval(let n): "approval:\(n)"
+            case .question: "question"
+            case .error: "error"
+            }
         }
         init(key: String) {
-            switch key { case "working": self = .working; case "done": self = .done; case "question": self = .question; case "error": self = .error
-            default: self = key.hasPrefix("approval:") ? .approval(Int(key.dropFirst(9)) ?? 1) : .idle }
+            switch key {
+            case "working": self = .working
+            case "done": self = .done
+            case "plan": self = .plan
+            case "question": self = .question
+            case "error": self = .error
+            default: self = key.hasPrefix("approval:") ? .approval(Int(key.dropFirst(9)) ?? 1) : .idle
+            }
         }
     }
     // The containing Pulse supplies one finite kick/swap per notice. Working ink has no clock.
@@ -434,6 +526,18 @@ import QuartzCore
             let path=NSBezierPath();path.move(to:CGPoint(x:3,y:7.4));path.line(to:CGPoint(x:5.9,y:10.2));path.line(to:CGPoint(x:11,y:4.2))
             path.lineWidth=1.8;path.lineCapStyle = .round;path.lineJoinStyle = .round
             NSColor(srgbRed:0.29,green:0.90,blue:0.45,alpha:1).setStroke();path.stroke()
+        case .plan:
+            let color=NSColor.white.withAlphaComponent(0.75)
+            let configuration=NSImage.SymbolConfiguration(pointSize:12,weight:.medium)
+                .applying(.init(paletteColors:[color]))
+            let symbol=NSImage(systemSymbolName:"checklist",accessibilityDescription:nil)
+            if let image=symbol?.withSymbolConfiguration(configuration),image.size.width>0,image.size.height>0 {
+                let scale=min(bounds.width/image.size.width,bounds.height/image.size.height)
+                let size=CGSize(width:image.size.width*scale,height:image.size.height*scale)
+                let rect=CGRect(x:bounds.midX-size.width/2,y:bounds.midY-size.height/2,
+                                width:size.width,height:size.height)
+                image.draw(in:rect,from:.zero,operation:.sourceOver,fraction:1,respectFlipped:true,hints:nil)
+            }
         case .approval(let n): badge(String(min(9,n)), error:false)
         case .question: badge("?",error:false)
         case .error: badge("!",error:true)

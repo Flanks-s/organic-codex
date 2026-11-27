@@ -13,7 +13,7 @@ import ImageIO
         "notifications":[(72,40),(168,168),(392,111.5)],
         "import":[(98,77.5),(231.5,105)],
         "profile":[(72,179),(261,62),(379,143),(578,94)],
-        "appearance":[(72,123),(251,97),(358,223)],
+        "appearance":[(72,39),(167,97),(274,223)],
         "organic":[(98,108.5),(262.5,105),(423.5,52)],
         "archived":[(72,44),(172,52),(280,52),(388,52)],
         "storage":[(72,41.5),(173.5,100),(283.5,163)],
@@ -31,9 +31,6 @@ import ImageIO
     static func capture(_ pane:String,workbench:NativeSettingsWorkbench,image:CGImage,target:URL,check:(Bool,String)->Void){
         let root=URL(fileURLWithPath:ProcessInfo.processInfo.environment["SETTINGS_M9C_REFERENCE"] ?? FileManager.default.currentDirectoryPath+"/runs/parity-settings-m9c2-044931")
         let referenceRoot=pane == "appearance" ? URL(fileURLWithPath:ProcessInfo.processInfo.environment["SETTINGS_TEXT_APPEARANCE_REFERENCE"] ?? root.path):root
-        guard let product=load(referenceRoot.appendingPathComponent("settings-"+pane+"-product.png")) else{check(false,"M9C missing MBP 2× reference "+pane);return}
-        check(product.width == 1760 && product.height == 1320,"M9C \(pane) uses the original 2× reference, without resampling")
-        SettingsTextParityVerification.capture(pane,workbench:workbench,image:image,product:product,reference:referenceRoot,target:target,check:check)
         let measured=workbench.form.groupFrames.values.sorted{$0.minY<$1.minY}.map{workbench.view.convert($0,from:workbench.form)}
         if let expected=groups[pane] {
             check(measured.count>=expected.count,"M9C \(pane) retains its measured groups")
@@ -57,7 +54,7 @@ import ImageIO
             if let plugins=workbench.catalogRows.firstIndex(where:{$0.pane?.id == "plugins"}){let iconY=workbench.view.convert(CGPoint(x:19,y:workbench.table.rect(ofRow:plugins).minY+6),from:workbench.table).y;check(iconY == 538,"M9C the 32pt Integrations header places its first icon at the measured 538pt, not 540pt")}
         }
         if pane == "appearance"{
-            check(workbench.form.rows.first{$0.spec.id == "look.mode"}?.control?.bounds.width == 226,"M9C Appearance modes reserve 3×66pt cards plus 2×14pt gaps, without the extra 4pt at the trailing edge")
+            check(!workbench.form.rows.contains{$0.spec.id == "look.mode"} && workbench.form.rows.first?.spec.id == "look.text","#130 Appearance starts with Text size and has no ineffective mode row")
             let slider=workbench.form.rows.first{$0.spec.id == "look.text"}?.control as? SettingsTextSlider
             check(slider?.bounds.width == 194.5 && slider?.trackRect.width == 160 && SettingsTextSlider.stops.count == 5,"M9C text slider matches the 160pt product track and exactly five supported ticks")
             let color=workbench.form.rows.first{$0.spec.id == "color.background"}?.control as? SettingsButton
@@ -65,6 +62,10 @@ import ImageIO
         }
         let bodyButtons=workbench.form.rows.flatMap{([$0.control].compactMap{$0})+$0.actionControls}.compactMap{$0 as? SettingsButton}.filter{$0.formBodyButton}
         check(bodyButtons.allSatisfy{$0.bounds.height == 24},"M9C \(pane) body buttons keep the measured 24pt face, independently of small header controls")
+        // Geometry and #130's missing-row contract do not depend on archived product PNGs.
+        guard let product=load(referenceRoot.appendingPathComponent("settings-"+pane+"-product.png")) else{check(false,"M9C missing MBP 2× reference "+pane);return}
+        check(product.width == 1760 && product.height == 1320,"M9C \(pane) uses the original 2× reference, without resampling")
+        SettingsTextParityVerification.capture(pane,workbench:workbench,image:image,product:product,reference:referenceRoot,target:target,check:check)
         let actual=Pixels(image),reference=Pixels(product)
         // Probe actual drawn separators, not just their frame model. Product's Form uses 1 pt, i.e. TWO pixels here.
         var separatorCount=0

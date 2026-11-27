@@ -66,13 +66,20 @@ import QuartzCore
     }
     /// Budget CPU time from this item's actual start, independent of the callback's display phase.
     /// Keep a commit reserve inside the execution cycle; a late callback must not shrink every batch.
-    static func captureBudget(at now:Double=CACurrentMediaTime())->Double {
+    static func captureBudget(at now:Double=QuartzCore.CACurrentMediaTime())->Double {
         guard let ticket=activeTicket,let started=activeWorkStarted else {return 0.0035}
         let reserve=max(0.002,ticket.interval*0.15)
         let deadline=started+ticket.interval-reserve
         return min(0.006,ticket.interval*0.48,max(0,deadline-now))
     }
     #if M11_MODE_SELFTEST
+    static var verificationNow:(()->Double)? {
+        didSet {
+            lastSubmission = -Double.infinity
+            lastStarted = -Double.infinity
+            lastDisplayTimestamp = -Double.infinity
+        }
+    }
     static var verificationManualTickets=false
     static func verificationDisplayTicket(timestamp:Double,target:Double,interval:Double) {
         ticket(Ticket(timestamp:timestamp,target:target,interval:interval,display:true))
@@ -106,10 +113,21 @@ import QuartzCore
                 guard CACurrentMediaTime()>=lastSubmission+next.interval else {
                     jobs.insert(next,at:0);record("deferred","new-flight-submission");clock.start(for:next);return
                 }
-                let began=CACurrentMediaTime();lastStarted=began;executing=true;activeTicket=ticket;activeWorkStarted=began
+                let began=QuartzCore.CACurrentMediaTime()
+                lastStarted=began
+                #if M11_MODE_SELFTEST
+                if let verificationNow {lastStarted=verificationNow()}
+                #endif
+                executing=true
+                activeTicket=ticket
+                activeWorkStarted=began
                 ModeSignposts.withTrace(next.trace,next.body)
                 activeTicket=nil;activeWorkStarted=nil;executing=false
-                next.trace?.record("ModeContentSlice",detail:"frame=\(frame) source=\(ticket.display ? "display":"timer") displayTimestamp=\(ticket.timestamp) workStarted=\(began) workDeadline=\(began+ticket.interval-max(0.002,ticket.interval*0.15)) ms=\((CACurrentMediaTime()-began)*1000)",timestamp:ticket.timestamp,target:ticket.target)
+                next.trace?.record("ModeContentSlice",detail:"""
+                    frame=\(frame) source=\(ticket.display ? "display":"timer") displayTimestamp=\(ticket.timestamp) \
+                    workStarted=\(began) workDeadline=\(began+ticket.interval-max(0.002,ticket.interval*0.15)) \
+                    ms=\((QuartzCore.CACurrentMediaTime()-began)*1000)
+                    """,timestamp:ticket.timestamp,target:ticket.target)
                 if jobs.isEmpty {clock.stop()} else {clock.start(for:jobs[0])}
             }
         }!
@@ -117,3 +135,10 @@ import QuartzCore
         CFRunLoopWakeUp(CFRunLoopGetMain())
     }
 }
+
+#if M11_MODE_SELFTEST
+// File-local scheduling shim; CPU reads remain explicitly module-qualified.
+@MainActor private func CACurrentMediaTime()->Double {
+    ModeContentWorkBoundary.verificationNow?() ?? QuartzCore.CACurrentMediaTime()
+}
+#endif

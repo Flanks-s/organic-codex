@@ -35,6 +35,12 @@ import QuartzCore
     }
     static func run(to path: String) -> Int32 {
         let application = WindowLifetimeTestApplication.shared as! WindowLifetimeTestApplication
+        if let check = ProcessInfo.processInfo.environment["VERIFY_NORMIE_SETTINGS"] {
+            return NormieSettingsVerification.run(check, to: path)
+        }
+        if ProcessInfo.processInfo.environment["VERIFY_AMBIENT_SPINNERS"] == "1" {
+            return AmbientSpinnerVerification.run(to: path, application: application)
+        }
         guard let screen = NSScreen.main else { print("No screen for hidden fixture"); return 2 }
         let output = URL(fileURLWithPath: path)
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)

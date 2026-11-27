@@ -33,5 +33,6 @@ PLIST
 # The Live Core's Python runtime (Runtime/Core, copied from the product), where CoreLocalProcess looks for it.
 mkdir -p "$app/Contents/Resources"
 rsync -a --exclude __pycache__ --exclude '*.pyc' "$root/Runtime/Core/" "$app/Contents/Resources/OrganicCore/"
+zsh "$root/scripts/package-bodies.sh" "$root" "$app"
 codesign --force --sign - "$app" >/dev/null 2>&1
 echo "built $app ($config)"

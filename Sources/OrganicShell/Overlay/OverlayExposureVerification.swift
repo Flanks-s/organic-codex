@@ -11,7 +11,7 @@ import Metal
 
 /// Same CARenderer/Metal readback path and 16×16 spike metric as App/SelfTest; intentionally owns no window.
 @MainActor final class OverlayM101Renderer {
-    let width: Int, height: Int, origin = CACurrentMediaTime() + 3600
+    let width: Int, height: Int, origin = VerificationClock.renderOrigin
     private let texture: MTLTexture, queue: MTLCommandQueue, renderer: CARenderer
     init(size: CGSize, root: CALayer, scale: CGFloat) {
         width = max(1,Int(ceil(size.width*scale))); height = max(1,Int(ceil(size.height*scale)))

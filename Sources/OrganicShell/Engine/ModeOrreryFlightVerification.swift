@@ -141,7 +141,7 @@ import QuartzCore
                 let root=CALayer();root.backgroundColor=NSColor(white:0.09,alpha:1).cgColor
                 let renderer=OffscreenRenderer(size:CGSize(width:1280,height:820),host:root,scale:2)
                 let restore=flight.verificationPaint(into:root,scale:2,elapsed:t)
-                let pixels=renderer.render(at:CACurrentMediaTime()+3600+t)
+                let pixels=renderer.render(at:VerificationClock.renderOrigin+t)
                 Offscreen.write(renderer.image(pixels),output.appendingPathComponent("flight-\(forward ? "forward":"reverse")-\(Int(t*1000)).png"))
                 restore()
             }

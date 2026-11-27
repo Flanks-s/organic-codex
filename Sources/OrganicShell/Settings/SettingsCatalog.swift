@@ -46,9 +46,15 @@ enum NativeSettingsCatalog {
             return q.isEmpty || (pane.name+" "+words).localizedCaseInsensitiveContains(q)
         }
     }
-    static let shortcuts:[(id:String,name:String,key:String)] = [
+    @MainActor static var shortcuts: [(id: String, name: String, key: String)] {
+        allShortcuts.filter { OrganicFeatureAvailability.current.collapse || !["collapse", "restore"].contains($0.id) }
+    }
+    private static let allShortcuts:[(id:String,name:String,key:String)] = [
         ("newChat","New Chat","⌘N"),("archive","Archive Chat","⌘⌫"),("rename","Rename Chat",""),("pin","Pin Chat",""),("unread","Mark as Unread","⇧⌘U"),
-        ("send","Send Message","⌘↩"),("attach","Attach Files","⇧⌘A"),("focus","Focus Composer","⌘L"),("stop","Stop Response","⌘."),
+        ("send","Send Message","↩"),
+        ("attach","Attach Files","⇧⌘A"),
+        ("focus","Focus Composer","⌘L"),
+        ("stop","Stop Response","⌘."),
         ("search","Search Chats","⌘F"),("sidebar","Toggle Sidebar","⌃⌘S"),("collapse","Collapse to Side","⌥⌘↓"),("restore","Restore Window","⌥⌘↑"),
         ("inspector","Show Changes","⌥⌘I"),("settings","Settings","⌘,"),("undo","Undo","⌘Z")
     ]

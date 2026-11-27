@@ -6,10 +6,16 @@ import UniformTypeIdentifiers
 /// Captures only this component. Never creates a window or connects a backend.
 @MainActor enum NormieSidebarM9Verification {
     static func run(directory: URL, check: (Bool, String) -> Void) throws {
-        let now = Date(), seeds = MockSeed.library(now: now)
+        let previousNow = NormieSidebarCell.statusNow
+        defer { NormieSidebarCell.statusNow = previousNow }
+        let now = VerificationRaster.date
+        NormieSidebarCell.statusNow = { now }
+        let seeds = MockSeed.library(now: now)
         check(seeds.count == 20 && seeds.prefix(6).map(\.id) == MockSeed.windowMembers, "M9 complete product library keeps A–F as the six window members")
         check(seeds.suffix(14).map(\.id) == (1...11).map { "H\($0)" } + (1...3).map { "X\($0)" }, "M9 all product history/archived IDs in their original order")
         check(seeds.suffix(14).map(\.identityIndex) == Array(6...19), "M9 history continues the original assigned identity sequence")
+        // MockReplay seeds from the real wall clock; compare its relative ages against a same-clock library.
+        let replaySeeds = Dictionary(uniqueKeysWithValues: MockSeed.library(now: Date()).map { ($0.id, $0.updated) })
         let replayStore = ConversationStore(), replay = MockReplay(store: replayStore, includeSidebarHistory: true)
         replay.start(live: false)
         check(replayStore.conversations.count == 20 && !replay.isPlaybackActive, "M9 paused replay hydrates all twenty chats without a clock")
@@ -17,7 +23,8 @@ import UniformTypeIdentifiers
             let c = replayStore.conversation(seed.id)!
             check(c.title == seed.title && c.items.map(\.text) == seed.items.map(\.text) && c.projectID == seed.projectID && c.deviceID == seed.deviceID && c.archived == seed.archived,
                   "M9 replay preserves product text/project/device/archive: " + seed.id)
-            check(abs(c.updated.timeIntervalSince(seed.updated)) < 2, "M9 replay preserves relative update time: " + seed.id)
+            check(abs(c.updated.timeIntervalSince(replaySeeds[seed.id]!)) < 2,
+                  "M9 replay preserves relative update time: " + seed.id)
             check((c.archivedAt == nil) == (seed.archivedAt == nil), "M9 archive dates survive initial replay: " + seed.id)
         }
         check(replayStore.conversations.filter(\.archived).count == 3, "M9 archived examples stay out of the live sidebar")
@@ -47,7 +54,9 @@ import UniformTypeIdentifiers
             check(sidebar.scrollView.frame == CGRect(x: 0, y: 96, width: 240, height: 670), "M9 search/profile safeAreaBar geometry at 820 pt")
             check(sidebar.accountView.frame == CGRect(x: 10, y: 770, width: 220, height: 40), "M9 profile capsule is one 40 pt row with 10 pt bottom clearance")
             check(sidebar.accountView.plan.isHidden && sidebar.accountView.name.stringValue == "Louis L." && sidebar.accountView.avatar.initials == "LL", "M9 profile uses prototype name/initials and one visible line")
-            check(!sidebar.accountView.daybreak.isHidden && sidebar.accountView.daybreak.frame == CGRect(x: 192, y: 16, width: 16, height: 8), "M9 product prototype has a 16 × 8 Daybreak horizon")
+            check(!sidebar.accountView.daybreak.isHidden &&
+                  sidebar.accountView.daybreak.frame.insetBy(dx: 8, dy: 8) == .init(x: 192, y: 16, width: 16, height: 8),
+                  "M9 product prototype has a 16 × 8 Daybreak arc")
             check(sidebar.accountView.avatar.convert(sidebar.accountView.avatar.bounds, to: root) == CGRect(x: 17, y: 777, width: 26, height: 26), "M9 profile avatar matches the product crop")
             for (key, y, height) in expected {
                 let index = model.rows.firstIndex { $0.key == key }!, c = cell(key)
@@ -163,12 +172,13 @@ import UniformTypeIdentifiers
         let menu = sidebar.menu(for: menuIndex)!
         check(menu.items.map(\.title) == ["Pin", "Rename…", "Customize Chat…", "Symbol", "Color", "", "Archive"], "M9 sidebar context menu matches the product order")
         let symbols = menu.items.first { $0.title == "Symbol" }!.submenu!, colors = menu.items.first { $0.title == "Color" }!.submenu!
-        check(symbols.items.count == 13 && colors.items.count == 13 && symbols.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) } && colors.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) }, "M9 identity menus include all thirteen symbols/swatches")
+        check(symbols.items.count == BodyIdentityAdapter.choices.count && colors.items.count == OrbTint.allCases.count && symbols.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) } && colors.items.allSatisfy { $0.image?.size == CGSize(width: 16, height: 16) }, "M9 identity menus include every available body and tint")
         (menu.items.first { $0.title == "Customize Chat…" } as! NormieMenuItem).fire()
         check(customized == ["B"] && model.current == "A", "M9 row Customize keeps the clicked conversation instead of stealing current")
         let originalSymbol = store.conversation("B")!.identitySymbol, originalTint = store.conversation("B")!.identityTint
+        let originalIdentities=Dictionary(uniqueKeysWithValues:store.conversations.map { ($0.id,[$0.identitySymbol,$0.identityTint]) })
         (symbols.items[2] as! NormieMenuItem).fire(); (colors.items[2] as! NormieMenuItem).fire()
-        check(store.conversation("B")!.identitySymbol == "earth" && store.conversation("B")!.identityTint == "ocean" && store.conversation("A")!.identitySymbol == nil, "M9 symbol/color mutate only the clicked local identity")
+        check(store.conversation("B")!.identitySymbol == BodyIdentityAdapter.choices[2] && store.conversation("B")!.identityTint == String(describing:OrbTint.allCases[2]) && store.conversations.filter { $0.id != "B" }.allSatisfy { [$0.identitySymbol,$0.identityTint] == originalIdentities[$0.id] }, "M9 symbol/color mutate only the clicked local identity")
         store.conversation("B")!.identitySymbol = originalSymbol; store.conversation("B")!.identityTint = originalTint
         let renamed = sidebar.menu(for: menuIndex)!
         check(renamed.items.first { $0.title == "Symbol" }!.submenu!.items.filter { $0.state == .on }.count == 1, "M9 current identity has one checked symbol")
