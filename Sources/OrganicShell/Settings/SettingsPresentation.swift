@@ -212,8 +212,11 @@ import AppKit
         section("Permissions",[cards("general.access","Default access","access")])
         if let warning=get("general.fullAccess"){footer(warning.detail,tint:warning.tint)}
         section("Composer",[cards("keys.send","Send messages with","send"),cards("followUpDefault","While Codex is working","follow"),item("general.preventSleep","Prevent sleep while running","")])
-        section("Collapse",[item("collapseOnHoverSpace","Space over a chat collapses to it","")])
-        footer("Hold a bar’s grip or an orb and press Space to collapse the window to that chat. With this on, pointing at it is enough; Space still types in the input you are writing in.")
+        if OrganicFeatureAvailability.current.collapse {
+            section("Collapse", [item("collapseOnHoverSpace", "Space over a chat collapses to it", "")])
+            footer("Hold a bar’s grip or an orb and press Space to collapse the window to that chat. "
+                   + "With this on, pointing at it is enough; Space still types in the input you are writing in.")
+        }
         var folder=withActions(item("draft.folder","Chats without a project",""),[("choose.folder","Change…","")]);folder?.visual.readOnly=true
         section("Files",[folder,item("general.openIn","Open files in","")])
         section("Language",[item("general.language","App language","")])
@@ -252,9 +255,8 @@ import AppKit
         let insights=source.filter{$0.kind == .info && $0.detail.hasSuffix(" · prototype")}.map{r in var r=r;let detail=r.detail;r.detail="";r.visual.rightText=String(detail.dropLast(12));return r};section("Insights",insights)
     }
     private mutating func appearance(){
-        var modes=item("look.mode","Appearance","",height:83)!;modes.visual.style = .modes;modes.visual.cardArt="modes"
         var size=item("look.text","Text size","",height:39)!;size.visual.style = .slider
-        section(nil,[modes,size])
+        section(nil,[size])
         var themes=get("look.theme")!;themes.visual.style = .themeStrip;themes.visual.height=97
         var all=plain("m9.themes.all",session.draft("m9.themes.all") == "yes" ? "Show Less":"Show All (29)");all.kind = .button;all.perform={ [session] _ in session.setDraft("m9.themes.all",session.draft("m9.themes.all") == "yes" ? "":"yes");session.changed() };themes.visual.showsAll=session.draft("m9.themes.all") == "yes"
         section("Window Theme",[themes],actions:[all])
@@ -294,7 +296,10 @@ import AppKit
                 let id=String(row.id.dropFirst("archive.".count))
                 var r=withActions(item(row.id,height:52),[("unarchive."+id,"Unarchive",""),("delete."+id,"","trash")])!
                 if let record=session.records("archived").first(where:{$0["id"]?.settingsText == id}),let t=record["archivedAt"]?.doubleValue {
-                    let days=max(0,Int((Date().timeIntervalSince1970-t)/86400));let age=days<7 ? "\(days) days ago":days<28 ? "\(max(1,days/7)) weeks ago":"\(max(1,days/30)) months ago"
+                    let reference = SettingsArchiveClock.referenceDate ?? Date()
+                    let days = max(0, Int((reference.timeIntervalSince1970 - t) / 86400))
+                    let age = days < 7 ? "\(days) days ago"
+                        : days < 28 ? "\(max(1, days / 7)) weeks ago" : "\(max(1, days / 30)) months ago"
                     let device=session.records("devices").first{$0["id"] == record["deviceID"]}?["name"]?.settingsText ?? "Device"
                     r.detail="Archived "+age+" · "+device
                     if record["deviceID"]?.settingsText != "mac"{r.visual.cardArt=session.records("devices").first{$0["id"] == record["deviceID"]}?["online"] == true ? "status.green":"status.orange"}

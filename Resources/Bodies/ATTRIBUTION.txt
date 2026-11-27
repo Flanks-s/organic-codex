@@ -1,0 +1,23 @@
+Celestial imagery
+
+Planetary maps and Saturn ring texture by Solar System Scope
+https://www.solarsystemscope.com/textures/
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+Based on NASA imagery and elevation data. Modified by Organic: resized,
+projected, lit, and rendered as static direction-lit sprites.
+
+Ceres, Haumea, and Eris use artist-created maps from Solar System Scope;
+they are not observed surface maps.
+
+Pluto color map (PIA11707): NASA/Johns Hopkins University Applied Physics
+Laboratory/Southwest Research Institute.
+Public-domain NASA imagery (United States), used under the JPL Image Use Policy.
+https://www.jpl.nasa.gov/images/pia11707-pluto-color-map/
+https://www.jpl.nasa.gov/jpl-image-use-policy/
+Modified by Organic: resized; unobserved map gaps filled for display;
+projected and lit. The observed heart region is retained.
+
+Pallas, Juno, Vesta, Astraea, Hygiea, Chiron, Pholus, Nessus, Orcus, Quaoar,
+Makemake, Gonggong, and Sedna use procedural surface illustrations created
+for Organic from the approved PlanetBodies board recipes.

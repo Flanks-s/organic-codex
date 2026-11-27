@@ -2,6 +2,19 @@
 import AppKit
 import QuartzCore
 
+/// Fixed scheduling epoch; elapsed time still advances real timer and CPU-budget checks.
+@MainActor final class ModeContentVerificationClock {
+    private let origin=VerificationClock.renderOrigin
+    private static let began=ContinuousClock.now
+    private let previous=ModeContentWorkBoundary.verificationNow
+    var now:Double {
+        let elapsed=Self.began.duration(to:ContinuousClock.now).components
+        return origin+Double(elapsed.seconds)+Double(elapsed.attoseconds)*1e-18
+    }
+    init() {ModeContentWorkBoundary.verificationNow={ [unowned self] in self.now }}
+    func restore() {ModeContentWorkBoundary.verificationNow=previous}
+}
+
 /// Real split/layout/leases in an NSWindow that is never ordered. No App or input driver is launched.
 @MainActor enum ModeFadeClosureVerification {
     static func run(to output:URL,performance:Bool=false) throws->Int32 {

@@ -32,6 +32,21 @@ import AppKit
         let latest = app.store.conversations.filter { !$0.archived }.max { $0.updated < $1.updated }!.id
         _ = app.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false)
         check(app.windows.count == 1 && app.windows.first?.scene.current == latest, "3: Empty reopen uses startup latest-chat fallback")
+        do {
+            var mockOptions = Options(live: false, mock: true, ambient: false)
+            mockOptions.mockLaunch = true
+            let domain = "OrganicShell.MockLaunch." + UUID().uuidString
+            let mockDefaults = UserDefaults(suiteName: domain)!
+            defer { mockDefaults.removePersistentDomain(forName: domain) }
+            let mockApp = AppController(mockOptions, windowDefaults: mockDefaults, presentsWindows: false)
+            let replay = MockReplay(store: mockApp.store)
+            replay.start(live: false)
+            _ = mockApp.applicationShouldHandleReopen(NSApp, hasVisibleWindows: false)
+            check(mockApp.windows.count == 1 &&
+                  mockApp.windows.first?.scene.members.map(\.id) == MockSeed.windowMembers &&
+                  mockApp.windows.first?.shell.mode == .organic, "3: Explicit mock reopen uses Organic working set")
+            closeAll(mockApp)
+        }
         var errorPresentations = 0
         let connectionError = CoreWire.failure("Synthetic connection error")
         app.presentLiveError(connectionError) { _, target in

@@ -101,7 +101,11 @@ struct NativeApprovalSource: Equatable {
     private var keyObservations: [NSObjectProtocol] = []
     /// Explicit grid for a windowless fixture; live cards use their window backing scale.
     var verificationScale: CGFloat? { didSet { synchronizeApprovalGrid() } }
-    isolated deinit { if let commandScrollObservation { NotificationCenter.default.removeObserver(commandScrollObservation) }; keyObservations.forEach(NotificationCenter.default.removeObserver) }
+    isolated deinit {
+        if let commandScrollObservation { NotificationCenter.default.removeObserver(commandScrollObservation) }
+        if let questionScrollObservation { NotificationCenter.default.removeObserver(questionScrollObservation) }
+        keyObservations.forEach(NotificationCenter.default.removeObserver)
+    }
     private(set) var approvalSource: NativeApprovalSource?
     private var sourceAction: (() -> Void)?
     private var configuredSource: NativeApprovalSource?
@@ -169,7 +173,7 @@ struct NativeApprovalSource: Equatable {
     var preventsRecycling: Bool {
         if awaitingDecisionReview { return true }
         if fields.values.contains(where: { !$0.stringValue.isEmpty }) || jsonField.map({ $0.stringValue != "{}" }) == true ||
-            optionButtons.values.joined().contains(where: { $0.state == .on }) { return true }
+            !questionChoices.isEmpty { return true }
         if let first = window?.firstResponder as? NSView, first.isDescendant(of: self) { return true }
         if fields.values.contains(where: { $0.currentEditor() != nil }) || jsonField?.currentEditor() != nil { return true }
         func active(_ view: NSView) -> Bool {
@@ -199,14 +203,39 @@ struct NativeApprovalSource: Equatable {
     private var displayRevision = -1
     private var appearanceRevision = -1
     private var paintRect = CGRect.zero
-    private var fields: [String: NSTextField] = [:]
-    private var optionButtons: [String: [NativeCardButton]] = [:]
+    private var fields: [Int: NSTextField] = [:]
+    private enum QuestionChoice { case option(String), freeform }
+    private var questionChoices: [Int: QuestionChoice] = [:]
+    private weak var otherButton: NativeCardButton?
+    private var questionIndex = 0
+    private var displayedQuestionIndex = -1
     private var submitButton: NativeCardButton?
     private var answer: (([String: [String]]) -> Void)?
     private var request: UserInputRequest?
     private var questionWidth: CGFloat = -1
     private var questionEnabled = true
     private var questionGrid: CGFloat = -1
+    private var questionMaximumHeight: CGFloat = 0
+    private var questionScrollObservation: NSObjectProtocol?
+    private lazy var questionViewport: NSScrollView = {
+        let scroll = NSScrollView()
+        scroll.contentView = NativeCardClipView()
+        scroll.drawsBackground = false
+        scroll.borderType = .noBorder
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.scrollerStyle = .overlay
+        scroll.horizontalScrollElasticity = .none
+        scroll.verticalScrollElasticity = .none
+        scroll.automaticallyAdjustsContentInsets = false
+        scroll.documentView = NativeQuestionBody(frame: .zero)
+        scroll.contentView.postsBoundsChangedNotifications = true
+        questionScrollObservation = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification,
+            object: scroll.contentView, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.onVisualChange?() }
+            }
+        return scroll
+    }()
     private var approval: Approval?
     private var approvalWidth: CGFloat = -1
     private var approvalEnabled = true
@@ -367,71 +396,233 @@ struct NativeApprovalSource: Equatable {
         approvalAccept?.isEnabled = approvalEnabled && !approval.submitting && approvalValue != nil && valid
     }
 
-    func configureQuestion(_ value: UserInputRequest, width: CGFloat, enabled: Bool = true, action: @escaping ([String: [String]]) -> Void) {
+    func configureQuestion(_ value: UserInputRequest, width: CGFloat, enabled: Bool = true,
+                           maximumHeight: CGFloat = 276,
+                           action: @escaping ([String: [String]]) -> Void) {
         answer = action
-        if request == value && questionWidth == width && questionEnabled == enabled && questionGrid == grid && displayRevision == NativeDisplayOptions.shared.revision && appearanceRevision == NativeAppearance.revision { return }
+        if request == value && questionWidth == width && questionEnabled == enabled && questionGrid == grid &&
+            questionMaximumHeight == maximumHeight && displayRevision == NativeDisplayOptions.shared.revision &&
+            appearanceRevision == NativeAppearance.revision && displayedQuestionIndex == questionIndex &&
+            questionViewport.superview === self { return }
         let same = request?.id == value.id && request?.questions == value.questions
-        let retained = same ? fields : [:]
-        request = value; questionWidth = width; questionEnabled = enabled; questionGrid = grid;displayRevision=NativeDisplayOptions.shared.revision;appearanceRevision=NativeAppearance.revision
-        clear(keeping: Set(retained.values.map(ObjectIdentifier.init))); fields = [:]; optionButtons = [:]
+        if !same {
+            questionIndex = 0
+            questionChoices.removeAll()
+            fields.removeAll()
+        }
+        let viewport = questionViewport
+        let body = viewport.documentView!
+        let offset = same && displayedQuestionIndex == questionIndex ? viewport.contentView.bounds.origin : .zero
+        displayedQuestionIndex = questionIndex
+        request = value
+        questionWidth = width
+        questionEnabled = enabled
+        questionGrid = grid
+        questionMaximumHeight = maximumHeight
+        displayRevision = NativeDisplayOptions.shared.revision
+        appearanceRevision = NativeAppearance.revision
+        clear(keeping: [ObjectIdentifier(viewport)])
+        let retained = fields[questionIndex]
+        for child in body.subviews where child !== retained {
+            child.removeFromSuperview()
+        }
+        guard value.questions.indices.contains(questionIndex) else {
+            viewport.removeFromSuperview()
+            finish(width: width, y: 0)
+            return
+        }
+        let question = value.questions[questionIndex]
         let x = columnX(width), w = columnWidth(width)
-        var y: CGFloat = 12
-        for question in value.questions {
-            if !question.header.isEmpty { y = addText(question.header, x: x + 12, y: y, width: w - 24, weight: .semibold) + 4 }
-            y = addText(question.prompt, x: x + 12, y: y, width: w - 24) + 8
-            for option in question.options {
-                let button = NativeCardButton(option.label) { [weak self] in
-                    guard let self, self.questionEnabled, self.request?.submitting == false else { return }
-                    self.fields[question.id]?.stringValue = option.label
-                    self.questionEdited()
-                }
-                button.setButtonType(.radio); button.identifier = NSUserInterfaceItemIdentifier(question.id)
-                button.isEnabled = enabled && !value.submitting
-                button.frame = snapped(CGRect(x: x + 12, y: y, width: max(1, w - 24), height: 26))
-                button.setAccessibilityHelp(option.description)
-                button.setAccessibilityRole(.radioButton)
-                optionButtons[question.id, default: []].append(button)
-                addSubview(button); y += 28
-                if !option.description.isEmpty { y = addText(option.description, x: x + 30, y: y, width: w - 42, quiet: true) + 4 }
+        let start = min(16, (w - 1) / 2), end = min(12, (w - 1) / 2)
+        let contentWidth = w - start - end
+        let usable = enabled && !value.submitting
+        let pagerWidth = value.questions.count > 1 ? min(112, contentWidth * 0.55) : 0
+        let titleWidth = max(1, contentWidth - pagerWidth - (pagerWidth > 0 ? 8 : 0))
+        let titleBottom = addText(question.prompt, x: start, y: 16, width: titleWidth, weight: .semibold, in: body)
+        if pagerWidth > 0 {
+            addQuestionPager(x: w - end - pagerWidth, width: pagerWidth, total: value.questions.count,
+                             enabled: usable, in: body)
+        }
+        if viewport.superview == nil { addSubview(viewport) }
+        let selected = selectedOption(question, at: questionIndex)
+        let hasOther = question.isOther && !question.options.isEmpty
+        let buttonWidth = min(84, hasOther ? contentWidth * 0.4 : contentWidth)
+        var y = max(titleBottom, pagerWidth > 0 ? 38 : 16) + 12
+        for (index, option) in question.options.enumerated() {
+            if index > 0 { y += 4 }
+            let button = NativeCardButton(option.label) { [weak self] in
+                guard let self, self.questionIndex == self.displayedQuestionIndex else { return }
+                self.questionChoices[self.questionIndex] = .option(option.label)
+                self.refreshQuestionLayout()
+                self.submit(fromOption: true)
             }
-            let field: NSTextField = retained[question.id] ?? (question.isSecret ? NativeSecureField() : NativeLabel())
-            field.placeholderString = question.options.isEmpty ? "Your answer" : "Or write an answer"
-            prepareField(field, label: question.prompt, enabled: enabled && !value.submitting)
-            field.usesSingleLineMode=question.isSecret;field.maximumNumberOfLines=question.isSecret ? 1:0
-            field.cell?.wraps = !question.isSecret;field.cell?.isScrollable=question.isSecret
+            button.setButtonType(.radio)
+            button.identifier = NSUserInterfaceItemIdentifier(question.id)
+            button.state = option.label == selected ? .on : .off
+            button.isEnabled = usable
+            button.frame = snapped(CGRect(x: start, y: y, width: contentWidth, height: 26))
+            button.setAccessibilityHelp(option.description)
+            button.setAccessibilityRole(.radioButton)
+            body.addSubview(button)
+            y += 26
+            if !option.description.isEmpty {
+                y = addText(option.description, x: start + 18, y: y, width: contentWidth - 18, quiet: true, in: body)
+            }
+        }
+        otherButton = nil
+        if hasOther { y += 4 }
+        if question.options.isEmpty || hasOther {
+            let field: NSTextField = retained ?? (question.isSecret ? NativeSecureField() : NativeLabel())
+            if question.isOther {
+                field.placeholderString = "No, and tell Codex what to do differently"
+            } else {
+                field.placeholderString = question.isSecret ? "Your answer" : "Type here"
+            }
+            if hasOther {
+                let other = NativeCardButton("") { [weak self, weak field] in
+                    self?.selectOther()
+                    self?.window?.makeFirstResponder(field)
+                }
+                other.setButtonType(.radio)
+                other.state = selected == nil ? .on : .off
+                other.isEnabled = usable
+                other.setAccessibilityLabel("Other answer")
+                other.setAccessibilityRole(.radioButton)
+                other.frame = snapped(CGRect(x: start, y: y, width: 18, height: 28))
+                body.addSubview(other)
+                otherButton = other
+            }
+            prepareField(field, label: hasOther ? "Type your own answer" : question.prompt, enabled: usable)
+            field.usesSingleLineMode = question.isSecret
+            field.maximumNumberOfLines = question.isSecret ? 1 : 0
+            field.cell?.wraps = !question.isSecret
+            field.cell?.isScrollable = question.isSecret
             field.lineBreakMode=question.isSecret ? .byClipping:.byWordWrapping
             field.identifier = NSUserInterfaceItemIdentifier(question.id)
-            let fieldWidth=max(1,w-24-2*Self.fieldInset.width),height=answerHeight(field,width:fieldWidth,secret:question.isSecret)
-            field.frame = snapped(CGRect(x: x + 12+Self.fieldInset.width, y: y+Self.fieldInset.height, width:fieldWidth, height:height))
-            fields[question.id] = field
-            if field.superview == nil { addSubview(field) }
-            y += height+2*Self.fieldInset.height+12
+            let fieldStart = hasOther ? start + 18 : start
+            let rowWidth = hasOther ? contentWidth - 18 - buttonWidth - 8 : contentWidth
+            let fieldWidth = max(1, rowWidth - 2 * Self.fieldInset.width)
+            let height = answerHeight(field, width: fieldWidth, secret: question.isSecret)
+            field.frame = snapped(CGRect(x: fieldStart + Self.fieldInset.width, y: y + Self.fieldInset.height,
+                                         width: fieldWidth, height: height))
+            fields[questionIndex] = field
+            if field.superview == nil { body.addSubview(field) }
+            y += height + 2 * Self.fieldInset.height
         }
-        let button = NativeCardButton("Submit answer") { [weak self] in self?.submit() }
-        button.frame = snapped(CGRect(x: x + 12, y: y, width: min(130, max(1, w - 24)), height: 28))
-        submitButton = button; addSubview(button)
-        finish(width: width, y: y + 40)
-        setAccessibilityLabel("Question")
+        let button = NativeCardButton("") {
+            [weak self] in self?.submit()
+        }
+        let buttonY = hasOther ? y - 28 : y + 12
+        button.frame = snapped(CGRect(x: w - end - buttonWidth, y: buttonY,
+                                     width: buttonWidth, height: 28))
+        submitButton = button
+        body.addSubview(button)
+        let height = button.frame.maxY + 8
+        viewport.frame = snapped(CGRect(x: x, y: 0, width: w, height: min(height, max(40, maximumHeight))))
+        body.frame = snapped(CGRect(x: 0, y: 0, width: w, height: height))
+        viewport.contentView.scroll(to: offset)
+        viewport.reflectScrolledClipView(viewport.contentView)
+        finish(width: width, y: viewport.frame.maxY)
+        setAccessibilityLabel(question.prompt)
         updateQuestionValidity()
+    }
+    private func addQuestionPager(x: CGFloat, width: CGFloat, total: Int, enabled: Bool, in body: NSView) {
+        let count = "\(questionIndex + 1) of \(total)"
+        let arrowWidth = min(22, width / 4)
+        for (offset, glyph, label) in [(-1, "‹", "Previous question"), (1, "›", "Next question")] {
+            let button = NativeCardButton(glyph) { [weak self] in self?.changeQuestion(by: offset) }
+            button.setAccessibilityLabel(label)
+            button.isEnabled = enabled && (0..<total).contains(questionIndex + offset)
+            let left = offset < 0 ? x : x + width - arrowWidth
+            button.frame = snapped(CGRect(x: left, y: 16, width: arrowWidth, height: 22))
+            body.addSubview(button)
+        }
+        let text = NativeLabel(labelWithString: count)
+        text.setAccessibilityLabel(count)
+        text.alignment = .center
+        text.font = .systemFont(ofSize: 11)
+        text.frame = snapped(CGRect(x: x + arrowWidth, y: 19, width: width - 2 * arrowWidth, height: 16))
+        body.addSubview(text)
+    }
+    private func changeQuestion(by offset: Int) {
+        guard let request, questionEnabled, !request.submitting,
+              request.questions.indices.contains(questionIndex + offset) else { return }
+        let editing = fields[questionIndex]?.currentEditor() != nil
+        let focused = editing || (window?.firstResponder as? NSView)?.isDescendant(of: self) == true
+        if editing, window?.makeFirstResponder(nil) == false { return }
+        questionIndex += offset
+        refreshQuestionLayout()
+        if focused {
+            let option = questionViewport.documentView?.subviews.first { ($0 as? NativeCardButton)?.radio == true }
+            let selected = selectedOption(request.questions[questionIndex], at: questionIndex)
+            let target: NSView? = (selected == nil ? fields[questionIndex] : option) ?? option ?? submitButton
+            window?.makeFirstResponder(target)
+        }
+    }
+    private func selectedOption(_ question: UserInputRequest.Question, at index: Int) -> String? {
+        switch questionChoices[index] {
+        case .option(let label): return label
+        case .freeform: return nil
+        case nil: return question.options.first?.label
+        }
+    }
+    private func freeformText(at index: Int) -> String {
+        fields[index]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+    private func questionText(_ question: UserInputRequest.Question, at index: Int) -> String {
+        selectedOption(question, at: index)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? freeformText(at: index)
+    }
+    private func questionAnswers(_ request: UserInputRequest) -> [String: [String]] {
+        var answers: [String: [String]] = [:]
+        for (index, question) in request.questions.enumerated() {
+            let text = questionText(question, at: index)
+            if !text.isEmpty { answers[question.id] = [text] }
+        }
+        return answers
     }
     private func updateQuestionValidity() {
-        guard let request else { return }
-        for question in request.questions {
-            let answer = fields[question.id]?.stringValue ?? ""
-            for button in optionButtons[question.id] ?? [] { button.state = button.title == answer ? .on : .off; button.needsDisplay = true }
-        }
-        submitButton?.isEnabled = questionEnabled && !request.submitting && !request.questions.isEmpty
-            && Set(request.questions.map(\.id)).count == request.questions.count && request.questions.allSatisfy { !$0.id.isEmpty }
-            && request.questions.allSatisfy { fields[$0.id]?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false }
+        guard let request, request.questions.indices.contains(questionIndex) else { return }
+        let ids = request.questions.map(\.id)
+        let validIDs = !ids.contains("") && Set(ids).count == ids.count
+        let last = questionIndex + 1 == request.questions.count
+        let title = freeformText(at: questionIndex).isEmpty ? "Skip" : (last ? "Submit" : "Next")
+        submitButton?.title = title
+        submitButton?.setAccessibilityLabel(title)
+        submitButton?.isEnabled = questionEnabled && !request.submitting && validIDs
+        questionViewport.documentView?.needsDisplay = true
     }
-    private func submit() {
+    private func submit(fromOption: Bool = false) {
         updateQuestionValidity()
         guard let request, questionEnabled, !request.submitting, submitButton?.isEnabled == true else { return }
-        answer?(Dictionary(uniqueKeysWithValues: request.questions.map { ($0.id, [fields[$0.id]?.stringValue ?? ""]) }))
+        if !fromOption && freeformText(at: questionIndex).isEmpty {
+            questionChoices[questionIndex] = .freeform
+            fields[questionIndex]?.stringValue = ""
+        }
+        if questionIndex + 1 < request.questions.count { changeQuestion(by: 1) }
+        else { answer?(questionAnswers(request)) }
+    }
+    private func selectOther() {
+        guard let otherButton else { return }
+        questionChoices[questionIndex] = .freeform
+        for case let button as NativeCardButton in questionViewport.documentView?.subviews ?? [] where button.radio {
+            button.state = button === otherButton ? .on : .off
+        }
+        onVisualChange?()
+    }
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        guard let field = obj.object as? NSTextField, field === fields[questionIndex] else { return }
+        selectOther()
     }
     func controlTextDidChange(_ obj: Notification) {
-        if let control = obj.object as? NSTextField, control === jsonField { validateApproval(); onVisualChange?() }
-        else { questionEdited() }
+        guard let field = obj.object as? NSTextField else { return }
+        if field === jsonField {
+            validateApproval()
+            onVisualChange?()
+        } else if field === fields[questionIndex] {
+            selectOther()
+            questionEdited()
+        }
     }
     private func answerHeight(_ field:NSTextField,width:CGFloat,secret:Bool)->CGFloat {
         guard !secret else{return 18}
@@ -443,9 +634,20 @@ struct NativeApprovalSource: Equatable {
     private func questionEdited(){
         updateQuestionValidity()
         onVisualChange?()
-        guard let request,let answer,request.questions.contains(where:{q in guard let field=fields[q.id]else{return false};return abs(field.frame.height-answerHeight(field,width:field.frame.width,secret:q.isSecret))>0.1})else{return}
-        let width=questionWidth;questionWidth = -1
-        configureQuestion(request,width:width,enabled:questionEnabled,action:answer)
+        guard let request, request.questions.indices.contains(questionIndex), let field = fields[questionIndex],
+              abs(field.frame.height - answerHeight(field, width: field.frame.width,
+                                                    secret: request.questions[questionIndex].isSecret)) > 0.1
+        else { return }
+        refreshQuestionLayout()
+        if field.currentEditor() != nil { field.scrollToVisible(field.bounds) }
+    }
+    private func refreshQuestionLayout() {
+        guard let request, let answer else { return }
+        let width = questionWidth
+        questionWidth = -1
+        configureQuestion(request, width: width, enabled: questionEnabled,
+                          maximumHeight: questionMaximumHeight, action: answer)
+        onVisualChange?()
         onHeightChange?()
     }
     func control(_ control:NSControl,textView:NSTextView,doCommandBy commandSelector:Selector)->Bool {
@@ -459,7 +661,7 @@ struct NativeApprovalSource: Equatable {
         field.isEditable = true; field.isSelectable = true; field.delegate = self
         field.focusRingType = .none; field.setAccessibilityLabel(label)
     }
-    private static let fieldInset = CGSize(width: 8, height: 5)
+    fileprivate static let fieldInset = CGSize(width: 8, height: 5)
     private func columnWidth(_ width: CGFloat) -> CGFloat { approvalSource == nil ? max(1,min(740,width-56)) : max(1,min(768,width-28)) }
     private func columnX(_ width: CGFloat) -> CGFloat { (width - columnWidth(width)) / 2 }
     private func snapped(_ r: CGRect) -> CGRect {
@@ -482,7 +684,8 @@ struct NativeApprovalSource: Equatable {
         needsDisplay = true; setAccessibilityElement(true); setAccessibilityRole(.group)
     }
     @discardableResult private func addText(_ text: String, x: CGFloat, y: CGFloat, width: CGFloat,
-                                            weight: NSFont.Weight = .regular, mono: Bool = false, quiet: Bool = false, size: CGFloat? = nil) -> CGFloat {
+                                            weight: NSFont.Weight = .regular, mono: Bool = false, quiet: Bool = false,
+                                            size: CGFloat? = nil, in containerView: NSView? = nil) -> CGFloat {
         let view = NativeTranscriptTextView()
         let rail = approvalSource != nil
         let font: NSFont = mono ? (rail ? .monospacedSystemFont(ofSize:12,weight:weight) : NativeAppearance.current.code.font((size ?? 12)*NativeAppearance.current.textScale,weight:weight)) : .systemFont(ofSize:(size ?? 13)*NativeAppearance.current.textScale,weight:weight)
@@ -504,7 +707,8 @@ struct NativeApprovalSource: Equatable {
             view.identifier = NSUserInterfaceItemIdentifier("approval.note")
             view.textStorage?.addAttribute(.foregroundColor, value: NativeCardButton.railSecondary(in: window), range: NSRange(location: 0, length: view.string.utf16.count))
         }
-        addSubview(view); return nextY
+        (containerView ?? self).addSubview(view)
+        return nextY
     }
     private func addCommand(_ text:String,x:CGFloat,y:CGFloat,width:CGFloat)->CGFloat {
         _ = addText(text,x:x,y:y,width:width,mono:true)
@@ -559,6 +763,29 @@ struct NativeApprovalSource: Equatable {
             let enabled = (view as? NSControl)?.isEnabled ?? true
             NativeDisplayOptions.plate(alpha:enabled ? (rail ? 0.25:0.10):0.05).setFill()
             NSBezierPath(roundedRect: plate, xRadius: rail ? 6:7, yRadius: rail ? 6:7).fill()
+        }
+    }
+}
+
+@MainActor private final class NativeQuestionBody: NativeFlippedView {
+    override func draw(_ dirtyRect: NSRect) {
+        let inset = NativeTranscriptCard.fieldInset
+        for case let control as NSControl in subviews where !control.isHidden {
+            let plate: CGRect? = switch control {
+            case let field as NSTextField where field.isEditable:
+                field.frame.insetBy(dx: -inset.width, dy: -inset.height)
+            case let button as NativeCardButton where !button.radio: button.frame
+            default: nil
+            }
+            guard let plate, plate.intersects(dirtyRect) else { continue }
+            if let button = control as? NativeCardButton, button.title == "Skip" {
+                let border = plate.insetBy(dx: 0.5, dy: 0.5)
+                NativePalette.tertiaryLabel.withAlphaComponent(button.isEnabled ? 0.6 : 0.3).setStroke()
+                NSBezierPath(roundedRect: border, xRadius: 7, yRadius: 7).stroke()
+            } else {
+                NativeDisplayOptions.plate(alpha: control.isEnabled ? 0.10 : 0.05).setFill()
+                NSBezierPath(roundedRect: plate, xRadius: 7, yRadius: 7).fill()
+            }
         }
     }
 }

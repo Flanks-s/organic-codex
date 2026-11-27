@@ -182,9 +182,18 @@ import QuartzCore
         let toast=SheetToast(clock:clock);toast.reduceMotion=true;toast.present(text:"Archived",anchor:.zero,in:host)
         let toastTime=toast.sceneClock.mediaTime()
         check(toast.openingOpacity(at:toastTime)<0.05 && toast.openingOpacity(at:toastTime+0.35)==1,"toast closing can continue the existing opening opacity without snapping to 1")
-        toast.reduceMotion=false;toast.startContent(visible:true,at:1000)
-        clock.advance(by:0.101)
-        check(toast.contentTransition==nil,"toast restores native hover/text immediately after its 100ms Gaussian, before original 350ms motion ends")
+        let nativeViews = toast.card.content.subviews.filter { !$0.isHidden }
+        let nativeVisibility = nativeViews.map { $0.layer?.isHidden == true }
+        toast.zoom = .gauss
+        toast.exposureEnabled = true
+        toast.reduceMotion = false
+        toast.startContent(visible: true, at: 1000)
+        clock.advance(by: 0.099)
+        check(toast.contentTransition?.effect != nil && nativeViews.allSatisfy { $0.layer?.isHidden == true },
+              "Toast still uses its Gaussian content plane just before 100 ms")
+        clock.advance(by: 0.002)
+        check(toast.contentTransition == nil && nativeViews.map { $0.layer?.isHidden == true } == nativeVisibility,
+              "Toast restores native hover and text at 100 ms while the 350 ms motion can continue")
         toast.dismiss(reason:.programmatic,animated:false)
         let fresh=fixture("sheet-down-in"),driver=SheetBudDriver()
         driver.zoom = .gauss;driver.start(card:fresh.0 as! SheetCard,upward:false,reduceMotion:false,at:1000,windowless:true)

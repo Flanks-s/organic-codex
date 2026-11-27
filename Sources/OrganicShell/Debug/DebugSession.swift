@@ -11,6 +11,8 @@ typealias DebugInjection = MockInjection
     let tuning: DebugTuning
     var onArrive: ((Conversation) -> Void)?
     var onChange: (() -> Void)?
+    var onBrowserMockChanged: (() -> Void)?
+    var onBrowserScenario: ((BrowserMockScene) -> Void)?
     private(set) var selectedID: String?
     private let initiallyPaused: Bool
     private var tuningObservation: UUID?

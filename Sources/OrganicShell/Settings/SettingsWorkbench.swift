@@ -34,6 +34,8 @@ import AppKit
         forward.title="";forward.symbolName="chevron.right";forward.chromeless=true;forward.setAccessibilityLabel("Forward");forward.run={ [weak self] in self?.session.forward() }
         table.addTableColumn(NSTableColumn(identifier:.init("settings")));table.headerView=nil;table.rowHeight=32;table.intercellSpacing = .zero
         table.style = .plain;table.dataSource=self;table.delegate=self;table.backgroundColor = .clear
+        table.focusRingType = .none
+        sidebarScroll.focusRingType = .none
         table.floatsGroupRows=false;table.allowsEmptySelection=true;table.setAccessibilityLabel("Settings directory");table.setAccessibilityRole(.outline)
         catalogDocument.addSubview(table);sidebarScroll.documentView=catalogDocument;sidebarScroll.hasVerticalScroller=true;sidebarScroll.drawsBackground=false
         detailScroll.documentView=form;detailScroll.hasVerticalScroller=true;detailScroll.drawsBackground=false

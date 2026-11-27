@@ -30,7 +30,9 @@ import AppKit
         preference("followUpDefault","Follow-up messages",choices:[("steer","Steer the current response"),("queue","Add to queue")])
         if let warning=session.keyWarning { info("Shortcut unavailable",warning) }
         preference("general.preventSleep","Prevent sleep while working")
-        preference("collapseOnHoverSpace","Collapse when hovering over an empty space")
+        if OrganicFeatureAvailability.current.collapse {
+            preference("collapseOnHoverSpace", "Collapse when hovering over an empty space")
+        }
         draft("folder","Default project folder",local("general.folder").settingsText)
         let s=session;button("save.folder","Use this folder") { let path=s.draft("folder",fallback:s.preferences["general.folder"].settingsText).trimmingCharacters(in:.whitespacesAndNewlines);if !path.isEmpty { s.preferences.set("general.folder",.string(path)) } }
         button("choose.folder","Choose folder…") { s.onApplicationAction?("chooseProjectFolder") }
@@ -89,7 +91,6 @@ import AppKit
     }
     mutating func appearance() {
         heading("Appearance")
-        preference("look.mode","Appearance",choices:[("auto","Auto"),("light","Light"),("dark","Dark")])
         preference("look.text","Text size",choices:[("0.85","85%"),("1","100%"),("1.15","115%"),("1.3","130%"),("1.5","150%")])
         // Numeric preferences are kept numeric for the host's typography adapter.
         rows[rows.count-1].perform={ [session] v in session.preferences.set("look.text",.number(Double(v.settingsText) ?? 1)) }

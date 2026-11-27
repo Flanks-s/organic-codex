@@ -7,6 +7,17 @@ import CoreImage
         try? FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
         HeaderPickupPaintVerification.run(to:output.appendingPathComponent("pickup"),check:check)
         IslandEventRenderingVerification.run(to:output.appendingPathComponent("rendered"),check:check)
+        do {
+            let root=IslandPlane(),h=HeaderIsland();root.addSubview(h);defer {h.dispose()}
+            var time=1000.0;h.now={time}
+            var input=HeaderIslandConfiguration(id:"non-key",title:"Non-key event",band:44,ambient:false,isKeyWindow:false)
+            h.configure(input);h.setPresentationActive(false);input.signals.approvals=1;h.configure(input)
+            check(h.eventButton.alphaValue==0,"M11.21 non-key entry starts transparent")
+            time+=0.125;h.sampleMotion(at:time);check(abs(h.eventButton.alphaValue-0.684643)<0.00002,"M11.21 non-key intermediate phase")
+            time+=0.1;h.sampleMotion(at:time);check(h.eventButton.alphaValue==1,"M11.21 non-key entry settles visible")
+            h.isHidden=true;input.signals.approvals=0;h.configure(input)
+            check(!h.motionIsRunning,"M11.21 hidden configure schedules no animation")
+        }
         var records=[[String:Any]]()
         for scale:CGFloat in [1,2] {for reduced in [false,true] {
             let root=IslandPlane(frame:CGRect(x:0,y:0,width:400,height:300)),header=HeaderIsland()

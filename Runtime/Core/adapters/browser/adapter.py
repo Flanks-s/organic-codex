@@ -105,7 +105,10 @@ async def register(core):
     ],standalone_call,close=close_standalone)
     core.register_route('GET','/browser/tabs',browser_tabs)
     core.register_route('POST','/browser/screenshot',browser_screenshot)
-    for route,action in (('open','new'),('close','close'),('snapshot','snapshot')):
+    for route, action in (
+        ('open', 'new'), ('close', 'close'), ('snapshot', 'snapshot'),
+        ('back', 'back'), ('forward', 'forward'), ('reload', 'reload'),
+    ):
         async def endpoint(body,query,action=action):
             async with standalone_lock:
                 if action=='new':

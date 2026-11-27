@@ -3,8 +3,7 @@
 import CoreGraphics
 
 /// Focused / Split geometry (spec §6.2–6.4), in the detail view's top-left coordinates.
-/// The bar or capsule is pinned under the main content, centred; it does not move when orbs come and go
-/// unless they no longer fit beside it. Orbs line up outward on both sides.
+/// Columns retain their reading width; the capsule fills the space between the two orb banks.
 struct FocusLayout: Equatable {
     /// One transcript column per capsule segment, aligned with it.
     var columns: [CGRect] = []
@@ -18,6 +17,11 @@ struct FocusLayout: Equatable {
     var rightOrbs: [CGRect] = []
 
     init() {}
+
+    /// An explicit pair uses half-window columns; single Focused retains the original reading-width layout.
+    static func explicitPair(size: CGSize, bankCount: Int, metrics: AutoLayout.Metrics) -> AutoLayout? {
+        SplitPresentationLayout.geometry(size: size, bankCount: bankCount, metrics: metrics)
+    }
 
     /// How many segments Split has room for at a width: each needs FocusLayout's narrowest, 220 pt, and the window's
     /// other `members` become orbs beside the capsule, which need room too, at the 0.6 size they may close up to
@@ -48,17 +52,24 @@ struct FocusLayout: Equatable {
         let per = max(220, min(cap, (available - CGFloat(n - 1) * m.gap) / CGFloat(n)))
         let total = per * CGFloat(n) + CGFloat(n - 1) * m.gap
         let x0 = (size.width - total) / 2
+        let step = m.orb + m.orbGap
+        let bankWidth = CGFloat(l + r) * step
+        let minimum = n == 1 ? CGFloat(320) : CGFloat(n) * 220 + CGFloat(n - 1) * m.gap
+        let factor = bankWidth > 0 ? min(1, max(0, content - minimum) / bankWidth) : 1
+        let barLeft = m.inset + CGFloat(l) * step * factor
+        let barRight = size.width - m.inset - CGFloat(r) * step * factor
         let top = m.topInset, bottom = rowY - m.barHeight / 2 - m.dockGap
         for i in 0..<n {
             let x = x0 + CGFloat(i) * (per + m.gap)
             columns.append(CGRect(x: x, y: top, width: per, height: max(0, bottom - top)))
-            let left = i == 0 ? x0 : x - m.gap / 2
-            let right = i == n - 1 ? x0 + total : x + per + m.gap / 2
+            let left = i == 0 ? barLeft : x - m.gap / 2
+            let right = i == n - 1 ? barRight : x + per + m.gap / 2
             segments.append(CGRect(x: left, y: rowY - m.barHeight / 2, width: right - left, height: m.barHeight))
             if i > 0 { dividers.append(x - m.gap / 2) }
         }
-        capsule = CGRect(x: x0, y: rowY - m.barHeight / 2, width: total, height: m.barHeight)
-        me = CGRect(x: x0 + (m.barHeight - embedded) / 2, y: rowY - embedded / 2, width: embedded, height: embedded)
+        capsule = CGRect(x: barLeft, y: rowY - m.barHeight / 2, width: barRight - barLeft, height: m.barHeight)
+        me = CGRect(x: barLeft + (m.barHeight - embedded) / 2, y: rowY - embedded / 2,
+                    width: embedded, height: embedded)
         // Orbs that would run past the window's edge close up: smaller, down to 0.6 of their size, then overlapping, so
         // every one stays in the window and in reach (2026-10-25 review r2: a narrow Split put them off the window).
         func side(_ count: Int, room: CGFloat) -> (size: CGFloat, step: CGFloat) {
@@ -69,54 +80,61 @@ struct FocusLayout: Equatable {
             let size = m.orb * 0.6
             return (size, count > 1 ? max(0, room - size) / CGFloat(count - 1) : 0)
         }
-        let edge: CGFloat = 6
-        let left = side(l, room: x0 - m.orbGap - edge), right = side(r, room: size.width - edge - (x0 + total + m.orbGap))
+        let gap = m.orbGap * factor
+        let left = side(l, room: max(0, barLeft - m.inset - gap))
+        let right = side(r, room: max(0, size.width - m.inset - barRight - gap))
         for k in 0..<l {
-            let midX = x0 - m.orbGap - left.size / 2 - CGFloat(k) * left.step
+            let midX = barLeft - gap - left.size / 2 - CGFloat(k) * left.step
             leftOrbs.append(CGRect(x: midX - left.size / 2, y: rowY - left.size / 2, width: left.size, height: left.size))
         }
         for k in 0..<r {
-            let midX = x0 + total + m.orbGap + right.size / 2 + CGFloat(k) * right.step
+            let midX = barRight + gap + right.size / 2 + CGFloat(k) * right.step
             rightOrbs.append(CGRect(x: midX - right.size / 2, y: rowY - right.size / 2, width: right.size, height: right.size))
         }
     }
 
     /// The orbs under the pointer (the macOS Dock's magnification, as in Auto): each grows toward `orbMagnified` with
-    /// a cosine falloff over `magnifyReach` resting slots, up from where it rests; each side re-packs outward from the
-    /// capsule, so the capsule never moves.
+    /// a cosine falloff over `magnifyReach` resting slots, within each bank's resting bounds.
     func magnified(pointerX x: CGFloat?, amount: CGFloat, metrics m: AutoLayout.Metrics) -> FocusLayout {
         guard let x, amount > 0.001, m.orbMagnified > m.orb, !(leftOrbs.isEmpty && rightOrbs.isEmpty) else { return self }
         let reach = max(1, m.magnifyReach) * (m.orb + m.orbGap)
-        func size(_ r: CGRect) -> CGFloat {
-            let d = abs(x - r.midX) / reach
-            return r.width + (m.orbMagnified - m.orb) * (r.width / m.orb) * (d < 1 ? (cos(d * .pi) + 1) / 2 : 0) * amount
-        }
-        // A side closed up to fit the window grows in place: re-packed outward, its outer orbs would leave it again.
-        func grown(_ r: CGRect) -> CGRect {
-            let s = size(r)
-            return CGRect(x: r.midX - s / 2, y: r.maxY - s, width: s, height: s)
+        let rightEdge = max(capsule.maxX, me.maxX, rightOrbs.map(\.maxX).max() ?? 0) + m.inset
+        func bank(_ original: [CGRect], right: Bool) -> [CGRect] {
+            guard let first = original.first else { return original }
+            if original.count == 1 {
+                let d = abs(x - first.midX) / reach
+                let falloff = d < 1 ? (cos(d * .pi) + 1) / 2 : 0
+                let desired = first.width + (m.orbMagnified - m.orb) * (first.width / m.orb) * falloff * amount
+                let inner = right ? max(capsule.maxX, me.maxX) : min(capsule.minX, me.minX)
+                let clearance = right ? first.midX - inner : inner - first.midX
+                let radius = min(first.midX, rightEdge - first.midX, clearance)
+                let size = max(first.width, min(desired, 2 * radius))
+                return [CGRect(x: first.midX - size / 2, y: first.maxY - size, width: size, height: size)]
+            }
+            let sorted = original.sorted { $0.minX < $1.minX }
+            let span = sorted.last!.maxX - sorted.first!.minX
+            let rest = sorted.reduce(CGFloat(0)) { $0 + $1.width }
+            let room = span - rest - CGFloat(sorted.count - 1) * 4
+            guard room > 0 else { return original }
+            let growth = sorted.map { r -> CGFloat in
+                let d = abs(x - r.midX) / reach
+                let falloff = d < 1 ? (cos(d * .pi) + 1) / 2 : 0
+                return (m.orbMagnified - m.orb) * (r.width / m.orb) * falloff * amount
+            }
+            let sum = growth.reduce(0, +)
+            let factor = sum > 0 ? min(1, room / sum) : 0
+            let sizes = zip(sorted, growth).map { $0.width + $1 * factor }
+            let gap = (span - sizes.reduce(0, +)) / CGFloat(sorted.count - 1)
+            var cursor = sorted[0].minX
+            let frames = zip(sorted, sizes).map { r, size -> CGRect in
+                defer { cursor += size + gap }
+                return CGRect(x: cursor, y: r.maxY - size, width: size, height: size)
+            }
+            return original.first == sorted.first ? frames : Array(frames.reversed())
         }
         var out = self
-        if leftOrbs.first.map({ $0.width < m.orb - 0.5 }) ?? false {
-            out.leftOrbs = leftOrbs.map(grown)
-        } else {
-            var cursor = capsule.minX - m.orbGap
-            out.leftOrbs = leftOrbs.map { r in
-                let s = size(r)
-                defer { cursor -= s + m.orbGap }
-                return CGRect(x: cursor - s, y: r.maxY - s, width: s, height: s)
-            }
-        }
-        if rightOrbs.first.map({ $0.width < m.orb - 0.5 }) ?? false {
-            out.rightOrbs = rightOrbs.map(grown)
-        } else {
-            var cursor = capsule.maxX + m.orbGap
-            out.rightOrbs = rightOrbs.map { r in
-                let s = size(r)
-                defer { cursor += s + m.orbGap }
-                return CGRect(x: cursor, y: r.maxY - s, width: s, height: s)
-            }
-        }
+        out.leftOrbs = bank(leftOrbs, right: false)
+        out.rightOrbs = bank(rightOrbs, right: true)
         return out
     }
 

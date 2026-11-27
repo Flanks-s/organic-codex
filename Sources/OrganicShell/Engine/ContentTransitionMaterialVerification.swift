@@ -15,7 +15,7 @@ import ImageIO
             ink.frame=CGRect(x:40,y:40,width:180,height:60);root.addSublayer(ink)
             let image=texture();ink.contents=image;ink.contentsScale=2
             let r=M101Renderer(size:CGSize(width:260,height:140),host:root,scale:scale)
-            let begin=CACurrentMediaTime()+3600
+            let begin=VerificationClock.renderOrigin
             let reference=r.render(at:begin-1)
             let c=ContentGaussianTransition(content:ink,clock:clock,configuration:.spotlight)
             check(reference == r.render(at:begin-0.5),"init exact \(scale)")
@@ -101,7 +101,7 @@ import ImageIO
             edge.filters=[filter]
             for radius in [0.0,2,4,8,12] {
                 filter.setValue(radius,forKey:"inputRadius");edge.filters=nil;edge.filters=[filter];CATransaction.flush()
-                try r.write(r.render(at:CACurrentMediaTime()+3600+radius),out.appendingPathComponent("kernel-\(Int(scale))x-r\(Int(radius)).png"))
+                try r.write(r.render(at:VerificationClock.renderOrigin+radius),out.appendingPathComponent("kernel-\(Int(scale))x-r\(Int(radius)).png"))
             }
         }
         // Material detector negative/positive controls, including a manual-copy host and a baked container.

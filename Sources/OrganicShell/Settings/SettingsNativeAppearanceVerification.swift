@@ -19,10 +19,29 @@ import AppKit
         let look=preferences.nativeLook,change=NativeAppearance.apply(look)
         check(look.background==SettingsDrawing.hex("#112233") && look.foreground==SettingsDrawing.hex("#ddeeff") && look.accent==SettingsDrawing.hex("#334455"),"f132 custom colours reach the host contract")
         check(look.code.fontID=="courier" && look.code.pointSize==18 && look.textScale==1.5,"f133 font, code size and independent body scale reach the host")
-        check(look.requestedMode=="light" && change.effectiveMode=="dark" && change.clearGlass,"f132 persisted Light preference is rendered as dark")
+        check(change.effectiveMode=="dark" && change.clearGlass,"f132 legacy Light preference keeps dark rendering and clear glass")
+        let reloaded=SettingsPreferences(defaults:defaults)
+        check(reloaded.nativeLook==look,"#130 a persisted legacy Light value does not change the resolved look after reload")
+        check(SettingsPreferences.standard["look.mode"] == nil,"#130 new preferences have no mode default")
+        for mode in ["auto","dark","light"] {
+            preferences.set("look.mode",.string(mode))
+            let ignored=NativeAppearance.apply(preferences.nativeLook)
+            check(preferences.nativeLook==look && !ignored.redrawSnapshots && !ignored.geometryChanged && ignored.revision==change.revision,"#130 legacy mode is a semantic no-op: "+mode)
+        }
+        let display=NativeDisplayOptions.shared,originalDisplay=display.state
+        defer{display.setVerificationState(nil);display.refresh()}
+        for contrast in [false,true,false] {
+            display.setVerificationState(.init(increaseContrast:contrast,reduceTransparency:originalDisplay.reduceTransparency));display.refresh()
+            check(display.state.increaseContrast==contrast && NativeDisplayOptions.appearance?.bestMatch(from:[.aqua,.darkAqua]) == .darkAqua,"#130 Increase Contrast preserves the Native dark appearance and state: \(contrast)")
+            let alpha=NativeDisplayOptions.plate(alpha:0.2).alphaComponent
+            check(abs(alpha-(contrast || originalDisplay.reduceTransparency ? 1:0.2))<0.001,"#130 Increase Contrast still makes glass plates opaque: \(contrast)")
+            check(preferences.nativeLook==look,"#130 contrast selection remains independent of the retired mode preference")
+        }
         check(look.code.text==SettingsDrawing.hex(SettingsThemes.theme("dracula").fg),"f133 independent code theme overrides Match Window")
         preferences.resetAppearance();NativeAppearance.apply(preferences.nativeLook)
         check(NativeAppearance.current==NativeAppearance.Look(),"f132 appearance Reset returns to the standard resolved contract")
+        let persisted=defaults.data(forKey:"settings.look").flatMap{try? JSONDecoder().decode([String:JSONValue].self,from:$0)}
+        check(persisted?["mode"] == "light","#130 Reset preserves legacy mode data without migration or deletion")
     }
 }
 #endif

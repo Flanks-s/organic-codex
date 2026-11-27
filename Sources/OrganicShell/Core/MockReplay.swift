@@ -30,8 +30,10 @@ import Foundation
     private var ticks = 0, injectionSerial = 0
     private var elapsed: TimeInterval = 0, backgroundElapsed: TimeInterval = 0
     private var started = false
+    private var phaseDemonstrationPrepared = false
     private var loop: Task<Void, Never>?
     private let clock: any CoreRuntimeClock
+    var browserReplay: MockBrowserReplay?
     private var advancing = false
     private(set) var playbackSettings = MockPlaybackSettings()
     private(set) var isPlaybackActive = false
@@ -73,6 +75,11 @@ import Foundation
                 .command("render --batch scenes/*.json --no-texture-reload", "Rendered 240 frames in 3m 12s (was 6m 40s)."),
                 .write("Caching the textures across frames cut the batch time roughly in half."), .finish], endless: true)
         }
+        prepareBodyIdentities()
+        if ProcessInfo.processInfo.environment["ORGANIC_M1145_PHASE_DEMO"] == "1",!phaseDemonstrationPrepared {
+            phaseDemonstrationPrepared=true
+            for e in MockPhaseDemonstration.prepare(store:store) {emit(e.method,thread:e.thread,e.params)}
+        }
         guard live, !isPlaybackActive else { return }
         isPlaybackActive = true
         playbackGeneration &+= 1
@@ -88,7 +95,18 @@ import Foundation
             }
         }
     }
+    /// Every entry seeds through start(), before any host can display its first frame.
+    /// Mock identities have no durable domain; live stores retain their persistence guard.
+    private func prepareBodyIdentities() {
+        guard !store.bodyIdentityMigrationRequired,!store.bodyIdentitiesReady else { return }
+        let records=store.conversations.map { BodyIdentityMigration.Record(id:$0.id,title:$0.title,identityIndex:$0.identityIndex,symbol:$0.identitySymbol,tint:$0.identityTint) }
+        let migrated=BodyIdentityMigration.migrate(records,choices:ConversationBodyIdentity.choices)
+        for (c,identity) in zip(store.conversations,migrated) { c.identitySymbol=identity.symbol; c.identityTint=identity.tint }
+        store.bodyIdentitiesReady=true
+        for c in store.conversations { store.changed(c) }
+    }
     func stopPlayback() {
+        if !canPlay { browserReplay?.disable(); browserReplay = nil }
         playbackGeneration &+= 1
         isPlaybackActive = false; loop?.cancel(); loop = nil
     }
@@ -135,6 +153,11 @@ import Foundation
         advancing = true; defer { advancing = false }
         ticks += 1
         elapsed += interval
+        browserReplay?.advance(by: interval)
+        if phaseDemonstrationPrepared {
+            for e in MockPhaseDemonstration.notifications(at:ticks) {emit(e.method,thread:e.thread,e.params)}
+            return
+        }
         for c in store.conversations {
             guard canPlay else { stopPlayback(); return }
             guard c.running, !store.isOffline(c) else { continue }
@@ -149,11 +172,20 @@ import Foundation
                     emit("item/started", thread: c.id, ["turnId": .string(run.turnID), "item": ["id": .string(run.current!), "type": .string(type), "text": ""]])
                 }
                 let chars = Array(text), end = min(chars.count, run.written + playbackSettings.charactersPerTick)
-                emit(type == "reasoning" ? "item/reasoning/textDelta" : "item/agentMessage/delta", thread: c.id,
-                     ["turnId": .string(run.turnID), "itemId": .string(run.current!), "delta": .string(String(chars[run.written..<end]))])
+                var delta: [String: JSONValue] = ["turnId": .string(run.turnID), "itemId": .string(run.current!),
+                                                  "delta": .string(String(chars[run.written..<end]))]
+                if type == "reasoning" { delta["summaryIndex"] = 0 }
+                let method = type == "reasoning" ? "item/reasoning/summaryTextDelta" : "item/agentMessage/delta"
+                emit(method, thread: c.id, delta)
                 run.written = end
                 if end == chars.count {
-                    emit("item/completed", thread: c.id, ["turnId": .string(run.turnID), "item": ["id": .string(run.current!), "type": .string(type), "text": .string(text)]])
+                    var item: [String: JSONValue] = ["id": .string(run.current!), "type": .string(type)]
+                    if type == "reasoning" {
+                        item["summary"] = [.string(text)]
+                    } else {
+                        item["text"] = .string(text)
+                    }
+                    emit("item/completed", thread: c.id, ["turnId": .string(run.turnID), "item": .object(item)])
                     run.current = nil; run.written = 0; run.index += 1
                 }
             case .command(let command, let output):
@@ -241,7 +273,17 @@ import Foundation
             runs[c.id] = Run(turnID:turn, steps:[.command("swift test --filter LayoutTests", "Demo checks passed."), .write("The demo command completed."), .finish], current:itemID, blocked:itemID+"-approval")
         case .question:
             settle()
-            emit("core/approvalRequested",["approvalId":.string(itemID),"request":["id":.string(itemID),"method":"item/tool/requestUserInput","params":["questions":[["id":"direction","header":"Direction","question":"Which direction should I take?","options":[["label":"Small change","description":"Keep the existing design."],["label":"Broader pass","description":"Update the surrounding code too."]]]]]]])
+            let choices: JSONValue = [
+                ["label": "Small change", "description": "Keep the existing design."],
+                ["label": "Broader pass", "description": "Update the surrounding code too."]
+            ]
+            let question: JSONValue = [
+                "id": "direction", "header": "Direction", "question": "Which direction should I take?",
+                "isOther": true, "options": choices
+            ]
+            emit("core/approvalRequested", ["approvalId": .string(itemID), "request": [
+                "id": .string(itemID), "method": "item/tool/requestUserInput", "params": ["questions": [question]]
+            ]])
         case .errorRunning:
             if !c.running{emit("turn/started",["turn":["id":.string(turn)]])}
             emit("error",["willRetry":true,"error":["message":"Demo: temporary tool failure; retrying."]])
@@ -293,7 +335,9 @@ import Foundation
             switch item.rowKind {
             case .user: value["type"] = "userMessage"
             case .assistant: value["type"] = "agentMessage"
-            case .reasoning: value["type"] = "reasoning"
+            case .reasoning:
+                value["type"] = "reasoning"
+                value["summary"] = [.string(item.text)]
             case .tool(.command): value["type"] = "commandExecution"; value["command"] = .string(item.text)
             case .tool(.fileChange): value["type"] = "fileChange"
             case .tool(.webSearch): value["type"] = "webSearch"

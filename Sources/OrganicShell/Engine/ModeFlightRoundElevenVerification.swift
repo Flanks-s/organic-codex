@@ -11,6 +11,8 @@ import Darwin
     }
     static func run(to output:URL) throws -> Int32 {
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        let clock=ModeContentVerificationClock()
+        defer {clock.restore()}
         var checks=0,failures:[String]=[],facts:[String:Any]=[:]
         func check(_ value:Bool,_ name:String) {checks+=1;if !value {failures.append(name);print("FAIL: "+name)}}
         let root=ModeFlight.Plane(frame:CGRect(x:0,y:0,width:320,height:192));root.wantsLayer=true
@@ -57,7 +59,9 @@ import Darwin
         _=workbench.composerForHandoff();scene.install();scene.settle()
         let shell=WindowShell(organic:root,scene:scene,workbench:workbench,mode:.organic);_=shell.view
         defer {shell.disposeModePreparation();shell.flight.shutdown();workbench.dispose();scene.disposeTranscriptPresentation();sessions.dispose();seed.stopPlayback()}
-        var now=CACurrentMediaTime();shell.flight.manualTime={now};shell.flight.verificationServerMotion=true
+        var now=ModeContentWorkBoundary.verificationNow!()
+        shell.flight.manualTime={now}
+        shell.flight.verificationServerMotion=true
         shell.verificationFlightSettle(asOrganic:true);shell.prepareModeSwitch(reason:"round11.cache")
         var transferNotifications=0
         shell.verificationTargetObservation={_,_ in

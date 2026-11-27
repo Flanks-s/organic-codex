@@ -36,7 +36,7 @@ import QuartzCore
             while !builder.ready {builder.step()};let picture=builder.finish()!
             let flattened=picture.flattened();Offscreen.write(flattened,output.appendingPathComponent("capture-\(presentation).png"))
             let plate=ModeHandoffPlate(frame:host.bounds);plate.hold(picture,in:host,below:front,holes:[])
-            let first=render(plate,at:CACurrentMediaTime());Offscreen.write(first,output.appendingPathComponent("held-\(presentation).png"))
+            let first=render(plate,at:VerificationClock.renderOrigin);Offscreen.write(first,output.appendingPathComponent("held-\(presentation).png"))
             for (name,bitmap) in [("capture",flattened),("held",first)] {
                 for x in [32,96,160] {
                     let top=rgb(bitmap,x:x,y:10),bottom=rgb(bitmap,x:x,y:278)
@@ -50,10 +50,10 @@ import QuartzCore
             }
             let deadline=Date(timeIntervalSinceNow:3)
             while plate.verificationFlattenPending,Date()<deadline {RunLoop.main.run(until:Date(timeIntervalSinceNow:0.001))}
-            let compacted=render(plate,at:CACurrentMediaTime());Offscreen.write(compacted,output.appendingPathComponent("compacted-\(presentation).png"))
+            let compacted=render(plate,at:VerificationClock.renderOrigin);Offscreen.write(compacted,output.appendingPathComponent("compacted-\(presentation).png"))
             for x in [32,96,160] {let top=rgb(compacted,x:x,y:10),bottom=rgb(compacted,x:x,y:278);check(top.0>top.1+100 && bottom.1>bottom.0+100,"P1 compacted photo keeps asymmetric markers \(presentation) x=\(x)")}
             plate.pinNativeBackdrop(picture,in:host,below:front,holes:[])
-            let pinned=render(plate.verificationNativeBackdropView,at:CACurrentMediaTime())
+            let pinned=render(plate.verificationNativeBackdropView,at:VerificationClock.renderOrigin)
             for x in [32,96,160] {let top=rgb(pinned,x:x,y:10),bottom=rgb(pinned,x:x,y:278);check(top.0>top.1+100 && bottom.1>bottom.0+100,"P1 native backing retains the same top-left photo convention \(presentation) x=\(x)")}
             plate.clear()
         }

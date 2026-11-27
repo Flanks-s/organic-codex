@@ -79,7 +79,7 @@ import QuartzCore
             }
             let photo=ModeWarmPicture(mode:"normie",revision:"R0",image:actual,size:marker.bounds.size,scale:1,captureMS:0,maximumSliceMS:0)
             let retained=ModeContentPictureView(frame:marker.bounds);retained.install(photo)
-            let shown=ModeFlightRoundEightVerification.render(retained,at:CACurrentMediaTime()+1000)
+            let shown=ModeFlightRoundEightVerification.render(retained,at:VerificationClock.renderOrigin)
             for point in [(8,8),(312,8),(8,184),(312,184)] {
                 let a=ModeFlightRoundEightVerification.rgb(shown,x:point.0,y:point.1),b=ModeFlightRoundEightVerification.rgb(reference,x:point.0*reference.width/320,y:point.1*reference.height/192)
                 check(abs(a.0-b.0)+abs(a.1-b.1)+abs(a.2-b.2)<=3,"retained picture keeps marker orientation \(flipped) \(point)")

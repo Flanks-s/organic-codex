@@ -34,8 +34,17 @@ private actor M9SettingsClock:CoreRuntimeClock {
     static func run(output:URL,check:(Bool,String)->Void) async {
         let name="organic.settings.m9."+UUID().uuidString,defaults=UserDefaults(suiteName:name)!
         defer{defaults.removePersistentDomain(forName:name)}
-        let dates=Date(),archived=[("X1","Old sidebar spike",Optional("spw"),"mac",6),("X2","Try SwiftData for drafts",nil,"mac",15),("X3","Render farm notes",Optional("rs"),"pc",22)].map{id,title,project,device,days in
-            let c=Conversation(id:id,identityIndex:0,title:title,projectID:project,deviceID:device,updated:dates,contextUsed:0);c.archived=true;c.archivedAt=dates.addingTimeInterval(-Double(days)*86400);return c
+        let dates = VerificationRaster.date
+        let archived = [
+            ("X1", "Old sidebar spike", Optional("spw"), "mac", 6),
+            ("X2", "Try SwiftData for drafts", nil, "mac", 15),
+            ("X3", "Render farm notes", Optional("rs"), "pc", 22)
+        ].map { id, title, project, device, days in
+            let c = Conversation(id: id, identityIndex: 0, title: title, projectID: project,
+                                 deviceID: device, updated: dates, contextUsed: 0)
+            c.archived = true
+            c.archivedAt = dates.addingTimeInterval(-Double(days) * 86400)
+            return c
         }
         let active=Conversation(id:"M9-active",identityIndex:1,title:"Active mock conversation",projectID:nil,deviceID:"mac",updated:dates,contextUsed:0)
         let store=ConversationStore(conversations:archived+[active],projects:[.init(id:"spw",name:"Synthetic preview workspace",deviceID:"mac"),.init(id:"rs",name:"Render Scripts",deviceID:"pc")],devices:[.init(id:"mac",name:"This Mac",kind:.mac),.init(id:"pc",name:"Preview PC",kind:.pc),.init(id:"srv",name:"Preview Server",kind:.server,online:false)])
@@ -45,7 +54,7 @@ private actor M9SettingsClock:CoreRuntimeClock {
         var titles:[String]=[]
         let productURL=URL(fileURLWithPath:ProcessInfo.processInfo.environment["SETTINGS_PARITY_REFERENCE"] ?? FileManager.default.currentDirectoryPath+"/runs/parity-settings-all")
         let landmarks:[String:(String,CGFloat,CGFloat)]=[
-            "general":("general.daybreak",72,170),"notifications":("m9.notifications.permission",72,40),"import":("demo.global.importSync",98,37),"profile":("m9.profile.hero",72,179),"appearance":("look.mode",72,83),"organic":("organic.playfulSummaries",98,41),"archived":("listQuery",72,44),"storage":("device",72,41),"configuration":("device",72,41),"personalization":("device",72,41),"shortcuts":("listQuery",72,44),"usage":("demo.global.usageTab",72,44),"data":("demo.global.improveModel",72,52),"plugins":("m9.plugins.toolbar",72,44),"computer":("m9.computer.ax",98,52),"appshots":("appshots.preview",72,170),"browser":("demo.global.browserOn",72,46),"scheduler":("m9.scheduler.empty",72,540),"connections":("demo.global.connectionsTab",72,44)]
+            "general":("general.daybreak",72,170),"notifications":("m9.notifications.permission",72,40),"import":("demo.global.importSync",98,37),"profile":("m9.profile.hero",72,179),"appearance":("look.text",72,39),"organic":("organic.playfulSummaries",98,41),"archived":("listQuery",72,44),"storage":("device",72,41),"configuration":("device",72,41),"personalization":("device",72,41),"shortcuts":("listQuery",72,44),"usage":("demo.global.usageTab",72,44),"data":("demo.global.improveModel",72,52),"plugins":("m9.plugins.toolbar",72,44),"computer":("m9.computer.ax",98,52),"appshots":("appshots.preview",72,170),"browser":("demo.global.browserOn",72,46),"scheduler":("m9.scheduler.empty",72,540),"connections":("demo.global.connectionsTab",72,44)]
         for pane in panes {
             defaults.set(pane,forKey:"settings.pane")
             let session=SettingsSession(source:source,preferences:preferences);session.prepareInitialPane(pane)

@@ -77,7 +77,7 @@ import SwiftUI
                     if count == 3 {
                         let image=VerificationRaster.capture(composer.modelButton,scale:scale)
                         try NSBitmapImageRep(cgImage:image).representation(using:.png,properties:[:])?.write(to:out.appendingPathComponent("model-\(Int(scale))x-\(index).png"))
-                        let title=["Sol ·…","Sol · H…","Sol ·…"][index]
+                        let title=["Sol · High","Sol · H…","Sol · High"][index]
                         // Use the same native text renderer with the explicit expected literal; its roomy text
                         // rectangle does not truncate it again. Geometry comes from the separate SwiftUI reference.
                         let text=NativeComposerMenuButton(frame:composer.modelButton.bounds)

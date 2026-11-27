@@ -8,6 +8,9 @@ struct HeaderIslandSignals: Equatable {
     var question = false, running = false, stopping = false
     var stops = 0, files = 0, added = 0, removed = 0, compactions = 0
     var context: Double?
+    var planCompleted=0,planTotal=0
+    var planStep:String?,planTurn:String?
+    var planReplay=false
     var satellites: [OrbSatellite] = []
     var mark: Mark? {
         if let error { return error == .stopped ? .stoppedError:.runningError }
@@ -30,13 +33,24 @@ struct HeaderIslandSignals: Equatable {
 enum HeaderIslandPanel: String, CaseIterable { case subAgents, changes, context, status }
 enum HeaderIslandRoute: Equatable { case panel(HeaderIslandPanel), satellite(String), transcript }
 struct HeaderIslandEvent: Equatable {
-    enum Kind: Int, CaseIterable { case working, changes, spawn, finish, context, compacted, done, question, approval, error }
+    enum Kind: Int, CaseIterable {
+        case working, changes, spawn, finish, context, compacted, done, question, approval, error, plan
+    }
     var kind: Kind
     var text: String
     var satellite: String?
     var at: TimeInterval
+    var turnID:String?
     var hold: Double {
-        switch kind { case .error:5; case .question,.approval:4; case .done:3; case .compacted,.context,.changes:2.4; case .finish:2.2; case .spawn:2; case .working:1.5 }
+        switch kind {
+        case .error:5
+        case .question,.approval:4
+        case .done:3
+        case .compacted,.context,.changes,.plan:2.4
+        case .finish:2.2
+        case .spawn:2
+        case .working:1.5
+        }
     }
     var urgent: Bool { kind == .error || kind == .question || kind == .approval }
     var route: HeaderIslandRoute {
@@ -53,10 +67,13 @@ struct HeaderIslandEvent: Equatable {
         case .error:"exclamationmark.triangle.fill"; case .approval:"hand.raised.fill"; case .question:"questionmark.bubble.fill"
         case .done:"checkmark.circle.fill"; case .compacted:"arrow.down.right.and.arrow.up.left"; case .context:"circle.dashed"
         case .finish:"checkmark.circle"; case .spawn:"circle.hexagongrid"; case .changes:"doc.text"; case .working:"sparkle"
+        case .plan:"checklist"
         }
     }
     static func between(_ a: HeaderIslandSignals, _ b: HeaderIslandSignals, contextArmed: Bool, now: Double) -> Self? {
-        func e(_ kind: Kind,_ text: String,_ satellite: String? = nil) -> Self { .init(kind:kind,text:text,satellite:satellite,at:now) }
+        func e(_ kind: Kind,_ text: String,_ satellite: String? = nil) -> Self {
+            .init(kind:kind,text:text,satellite:satellite,at:now,turnID:kind == .plan ? b.planTurn : nil)
+        }
         if let error=b.error, a.error != error { return e(.error,error == .stopped ? "Stopped by an error":"Error · still working") }
         if b.approvals>a.approvals { return e(.approval,b.approvals == 1 ? "1 approval needs you":"\(b.approvals) approvals need you") }
         if b.question && !a.question { return e(.question,"A question for you") }
@@ -69,6 +86,12 @@ struct HeaderIslandEvent: Equatable {
             return e(.finish,"Sub-agent \(latest.offset+1) finished · \(b.satellites.filter { !$0.done }.count) running",latest.element.id)
         }
         if b.satellites.count>a.satellites.count { let n=b.satellites.filter { !$0.done }.count; return e(.spawn,"\(n) sub-agent\(n == 1 ? "":"s") running") }
+        if !b.planReplay,b.planTotal>0,
+           a.planTurn != b.planTurn || a.planCompleted != b.planCompleted || a.planTotal != b.planTotal {
+            let base="Plan \(b.planCompleted)/\(b.planTotal)"
+            let step=b.planStep.map { $0.trimmingCharacters(in:.whitespacesAndNewlines) } ?? ""
+            return e(.plan,step.isEmpty ? base : base+" · "+step)
+        }
         if b.files>a.files || b.added>a.added || b.removed>a.removed { return e(.changes,"+\(b.added) −\(b.removed) · \(b.files) file\(b.files == 1 ? "":"s")") }
         if b.running && !a.running { return e(.working,"Working") }; return nil
     }
@@ -92,8 +115,14 @@ struct HeaderIslandState: Equatable {
     mutating func show(_ event: HeaderIslandEvent, now: Double) {
         guard !editing, !expanded else { return }
         if activity?.urgent == true && !event.urgent { waiting=event; return }
+        if activity?.kind == .done && event.kind == .plan {
+            waiting=event
+            return
+        }
+        if activity?.kind == .plan && (event.kind == .changes || event.kind == .working) { return }
         if event.urgent { waiting=nil }
-        if let old=activity, old.kind == event.kind, event.at-old.at<0.25 {
+        if let old=activity, old.kind == event.kind, event.at-old.at<0.25,
+           event.kind != .plan || old.turnID == event.turnID {
             var replacement=event; replacement.at=old.at; activity=replacement
         } else { activity=event; lobeRevision+=1; timing = .activityIn }
         held=false; dismissAt=now+event.hold

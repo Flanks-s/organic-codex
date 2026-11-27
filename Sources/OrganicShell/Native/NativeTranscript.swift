@@ -107,6 +107,7 @@ struct NativeFlightSource {
         // A second freeze captures the prefix actually on screen, never the unpresented store tail.
         if modeEpochModel == nil {modeEpochModel=snapshot ?? ModeContentEpoch.copy(modeContentRenderedValue);modeCatchupFollowsEnd=shouldFollowEnd && isAtEnd}
         modeEpochFrozen=true;modeContentInputBlocked=true
+        syncReferenceInteractions()
         modeScrollGeneration+=1
         document.wantsLayer=true
         // Freeze the displayed compensation rather than snapping a new warm/cold epoch to its model endpoint.
@@ -122,15 +123,18 @@ struct NativeFlightSource {
     }
     func endModeContentEpoch() {
         guard modeEpochFrozen else {return};modeEpochFrozen=false;modeContentInputBlocked=false;modeCatchupGeneration+=1
+        defer { syncReferenceInteractions() }
         prepareModeFollowResumption()
         let frozenShift=(document.layer?.value(forKeyPath:"transform.translation.y") as? NSNumber)?.doubleValue ?? 0
         let settling=applyModeScrollCompensation(frozenShift)
         guard modeEpochModel != nil else {finishModeScroller(after:settling);return}
         if !presentationActive || isHiddenOrHasHiddenAncestor {modeEpochModel=nil;restoreModeScroller();refreshDeferred=true;return}
         if modeEpochModel?.revision == conversation.revision,renderedRevision == conversation.revision {modeEpochModel=nil;finishModeScroller(after:settling);return}
-        modeReplayNext=CACurrentMediaTime()+modeReplayInterval
         #if M11_MODE_SELFTEST
+        modeReplayNext=(verificationModeReplayNow?() ?? CACurrentMediaTime())+modeReplayInterval
         if verificationManualModeCatchup {return}
+        #else
+        modeReplayNext=CACurrentMediaTime()+modeReplayInterval
         #endif
         let generation=modeCatchupGeneration
         NativeModeContentCatchupClock.shared.enqueue(self) { [weak self] budget in
@@ -212,6 +216,10 @@ struct NativeFlightSource {
     private weak var store: ConversationStore?
     private var observation: UUID?
     private var rows: [String: NativeTranscriptRow] = [:]
+    private var quoteViews: [String: NativeSidechatQuoteRow] = [:]
+    private var quotesByEntry: [String: SidechatQuote] = [:]
+    private var renderedQuotes: [SidechatQuote] = []
+    private var renderQuotes: [SidechatQuote] { modeEpochModel == nil ? conversation.sidechatQuotes : renderedQuotes }
     private var cards: [String: NativeTranscriptCard] = [:]
     private var order: [NSView] = []
     private var entries: [NativeTranscriptLayoutEntry] = []
@@ -308,6 +316,27 @@ struct NativeFlightSource {
     var onApproval: ((Approval, ApprovalAction) -> Void)? { didSet { refresh(preservingOffset: true) } }
     var onAnswer: ((UserInputRequest, [String: [String]]) -> Void)? { didSet { refresh(preservingOffset: true) } }
     var onReviewChanges: ((TranscriptItem) -> Void)?
+    var onReference: ((TranscriptReferenceRequest) -> Void)? { didSet { syncReferenceInteractions() } }
+    var onReferenceHostState: ((Bool) -> Void)?
+    private var referencesAdmitted: Bool { onReference != nil && !isDisposed && !modeEpochFrozen && !modeContentInputBlocked && isPresentationVisible }
+    func refreshReferenceAdmission() { syncReferenceInteractions() }
+    private func syncReferenceInteractions() {
+        onReferenceHostState?(referencesAdmitted)
+        for row in rows.values { wireReferences(row) }
+    }
+    private func wireReferences(_ row: NativeTranscriptRow) {
+        guard referencesAdmitted else { row.onReference = nil; return }
+        let expected = row.item
+        row.onReference = { [weak self, weak row] target, range in
+            guard let self, let row, self.referencesAdmitted, row.item == expected,
+                  NativeInteractionSurface.permits(row), NSMaxRange(range) <= row.sourceOffsets.count,
+                  let start = row.sourceOffsets[range.location..<NSMaxRange(range)].first(where: { $0 >= 0 }),
+                  let reference = TranscriptContentIndex.parse(expected.text).first(where: {
+                      $0.target == target && NSLocationInRange(start, $0.labelRange)
+                  }) else { return }
+            self.onReference?(.init(source: .init(itemID: expected.id, range: reference.range, target: target)))
+        }
+    }
     var onRevertChanges: ((TranscriptItem) -> Void)? { didSet { refresh(preservingOffset: true) } }
 
     init(conversation: Conversation, store: ConversationStore? = nil) {
@@ -450,6 +479,7 @@ struct NativeFlightSource {
     /// nil follows only if already near the end; true freezes the current viewport during a flight.
     override func presentationVisibilityDidChange(){
         guard !isDisposed else { return }
+        syncReferenceInteractions()
         if !isPresentationVisible { refinementTask?.cancel(); refinementTask = nil; return }
         if refreshDeferred { refreshDeferred = false; refresh() }
         else { scheduleHeightRefinement() }
@@ -460,6 +490,9 @@ struct NativeFlightSource {
         if let observation{store?.removeObserver(observation);self.observation=nil}
         if let scrollObservation{NotificationCenter.default.removeObserver(scrollObservation);self.scrollObservation=nil}
         if let pinnedObservation{NotificationCenter.default.removeObserver(pinnedObservation);self.pinnedObservation=nil}
+        quoteViews.removeAll()
+        quotesByEntry.removeAll()
+        onReference = nil; onReferenceHostState?(false); onReferenceHostState = nil
         onEditMessage=nil;onForkMessage=nil;onUserMessageAction=nil;onApproval=nil;onApprovalValue=nil;onAnswer=nil;onReviewChanges=nil;onRevertChanges=nil;messageDraftTarget=nil
         for view in document.subviews{view.isHidden=true;view.removeFromSuperview()};for card in externalCards.values{card.isHidden=true;card.removeFromSuperview()};externalCards=[:];retainedDecisionCards=[:];cards=[:];rows=[:];rowPool=[];entries=[];entryPositions=[:];order=[];document.update([])
     }
@@ -478,6 +511,7 @@ struct NativeFlightSource {
         }
     }
     func clearPresentationCallbacks() {
+        onReference = nil; onReferenceHostState?(false); onReferenceHostState = nil
         configurePresentation {
             messageDraftTarget = nil; onUserMessageAction = nil; onEditMessage = nil; onForkMessage = nil
             onApproval = nil; onApprovalValue = nil; onAnswer = nil; onReviewChanges = nil; onRevertChanges = nil
@@ -516,10 +550,15 @@ struct NativeFlightSource {
         lastViewportHeight = scrollView.contentSize.height
         lastWidth = width; lastGrid = grid; layoutAppearanceRevision = NativeAppearance.revision
         layoutDisplayRevision = NativeDisplayOptions.shared.revision; layoutCodeStyle = codeStyle
-        let precise = !invalid && change?.itemID != nil && renderedRevision == renderConversation.revision - 1
+        let quotesChanged = renderedQuotes != renderQuotes
+        let precise = !invalid && !quotesChanged && change?.itemID != nil &&
+            renderedRevision == renderConversation.revision - 1
         let updated: Bool
         if precise, let id = change?.itemID { updated = updateItemLayoutIndex(itemID: id) }
-        else if !invalid && change == nil { historyScanCount += 1; updated = updateStreamingLayoutIndex() }
+        else if !invalid && !quotesChanged && change == nil {
+            historyScanCount += 1
+            updated = updateStreamingLayoutIndex()
+        }
         else { updated = false }
         if updated {
             incrementalRefreshCount += 1
@@ -534,6 +573,7 @@ struct NativeFlightSource {
             rebuildLayoutIndex(invalidating: invalid)
         }
         renderedApprovals = renderConversation.approvals; renderedQuestion = renderConversation.userInput
+        if quotesChanged { renderedQuotes = renderQuotes }
         renderedLegacyQuestion = renderConversation.question; layoutExpanded = expanded; layoutReviewed = reviewedChanges
         layoutInlinePolicy = decisionCardsInline
         renderedItemCount = renderConversation.items.count; renderedRevision = renderConversation.revision
@@ -547,7 +587,8 @@ struct NativeFlightSource {
         needsDisplay = true
     }
 
-    private struct ReadingAnchor { let key: String; let distance: CGFloat }
+    struct ReadingAnchor { let key: String; let distance: CGFloat }
+    var verificationReadingAnchor: ReadingAnchor? { readingAnchor() }
     private func readingAnchor() -> ReadingAnchor? {
         guard !entries.isEmpty else { return nil }
         let index = heights.row(at: scrollOffset.y - 18)
@@ -646,6 +687,18 @@ struct NativeFlightSource {
         }
         let old = Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0) })
         var next: [NativeTranscriptLayoutEntry] = []
+        let quoteSlots = sidechatQuoteSlots()
+        quotesByEntry.removeAll(keepingCapacity: true)
+        func appendQuotes(after index: Int) {
+            guard let quotes = quoteSlots[index] else { return }
+            for quote in quotes {
+                let key = "sidechat-quote:" + quote.id
+                let entry = old[key] ?? NativeTranscriptLayoutEntry(key: key)
+                entry.exact = false
+                quotesByEntry[key] = quote
+                next.append(entry)
+            }
+        }
         let itemIDs = Set(renderConversation.items.map(\.id))
         let grouped = Dictionary(grouping: decisionCardsInline ? renderConversation.approvals : [], by: \.toolItemID)
         func addApproval(_ approval: Approval) {
@@ -654,6 +707,7 @@ struct NativeFlightSource {
             entry.exact = false
             entry.approval = approval; next.append(entry)
         }
+        appendQuotes(after: -1)
         for (index, item) in renderConversation.items.enumerated() {
             let key = "item:" + item.id, entry = old[key] ?? NativeTranscriptLayoutEntry(key: key)
             let previous = index > 0 ? renderConversation.items[index - 1] : nil
@@ -667,6 +721,7 @@ struct NativeFlightSource {
             entry.itemIndex = index; entry.item = item; entry.previous = previous; entry.expanded = opened; entry.reviewed = reviewed
             next.append(entry)
             for approval in grouped[item.id] ?? [] { addApproval(approval) }
+            if !quoteSlots.isEmpty { appendQuotes(after: index) }
         }
         for approval in renderConversation.approvals where decisionCardsInline && !itemIDs.contains(approval.toolItemID) { addApproval(approval) }
         if decisionCardsInline, let request = inlineQuestion {
@@ -683,6 +738,19 @@ struct NativeFlightSource {
         }
         renderedChanges = renderConversation.changes; refinementCursor = 0
     }
+    private func sidechatQuoteSlots() -> [Int: [SidechatQuote]] {
+        guard !renderQuotes.isEmpty else { return [:] }
+        var slots: [Int: [SidechatQuote]] = [:]
+        var index = -1
+        for row in TranscriptPresentation.rows(items: renderConversation.items, quotes: renderQuotes) {
+            switch row {
+            case .item: index += 1
+            case .quote(let quote): slots[index, default: []].append(quote)
+            }
+        }
+        return slots
+    }
+
     private var inlineQuestion: UserInputRequest? {
         renderConversation.userInput ?? renderConversation.question.map { UserInputRequest(id: "fixture-question:" + renderConversation.id,
             questions: [.init(id: "answer", header: "Question", prompt: $0, options: [])]) }
@@ -730,6 +798,8 @@ struct NativeFlightSource {
             else {value=NativeTranscriptPreparedRow(item:shownItem(entry),source:item,index:itemIndex,items:renderConversation.items,width:lastWidth,expanded:entry.expanded,style:codeStyle,stream:entry.stream)}
             height = ceil(value.geometry.rowHeight * grid) / grid; prepared = value
             if retainingText { entry.prepared = value; preparedKeys.insert(entry.key) }
+        } else if let quote = quotesByEntry[entry.key] {
+            height = ceil(NativeSidechatQuoteRow.height(for: quote, width: lastWidth) * grid) / grid
         } else {
             let card = cards[entry.key] ?? retainedDecisionCards[entry.key] ?? sizingCard
             configureCard(card, entry: entry)
@@ -763,6 +833,11 @@ struct NativeFlightSource {
             if overscanRange().allSatisfy({ entries[$0].exact }) { break }
         }
         let desired = Set(overscanRange().map { entries[$0].key })
+        for (key, row) in Array(quoteViews) where !desired.contains(key) {
+            retireAccessibilitySubtree(row)
+            row.removeFromSuperview()
+            quoteViews[key] = nil
+        }
         for (id, row) in Array(rows) where !desired.contains("item:" + id) && (!row.preventsRecycling || entryPositions["item:" + id] == nil) {
             retireAccessibilitySubtree(row); row.prepareForReuse(); rows[id] = nil
             // As many as an all-compact overscan mounts: real histories are mostly one-line activity rows, and a row costs
@@ -783,6 +858,9 @@ struct NativeFlightSource {
         var positioned: [(String, NSView, Int)] = []
         for (id, row) in rows { if let i = entryPositions["item:" + id] { position(row, at: i); positioned.append(("item:" + id, row, i)) } }
         for (key, card) in cards { if let i = entryPositions[key] { position(card, at: i); positioned.append((key, card, i)) } }
+        for (key, row) in quoteViews {
+            if let i = entryPositions[key] { positioned.append((key, row, i)) }
+        }
         positioned.sort { $0.2 < $1.2 }; order = positioned.map(\.1); document.updateVirtual(positioned)
         let retained = desired.union(rows.keys.map { "item:" + $0 })
         for key in preparedKeys.subtracting(retained) {
@@ -793,10 +871,19 @@ struct NativeFlightSource {
             }
         }
         preparedKeys = retained
+        for row in rows.values { row.reconcileReferenceVisibility() }
         updateLatest()
     }
     private func mountEntry(_ index: Int, preparedOverride: NativeTranscriptPreparedRow? = nil, reconfigure: Bool = true) {
         let entry = entries[index]
+        if entry.item == nil, let quote = quotesByEntry[entry.key] {
+            let row = quoteViews[entry.key] ?? NativeSidechatQuoteRow(frame: .zero)
+            row.configure(quote, width: lastWidth)
+            if row.superview == nil { document.addSubview(row) }
+            quoteViews[entry.key] = row
+            position(row, at: index)
+            return
+        }
         if let item = entry.item, let itemIndex = entry.itemIndex {
             // Pure scrolling changes document positions, not row values or action routing. Model/appearance/
             // geometry refreshes still configure every mounted row, including rows pinned by an interaction.
@@ -822,6 +909,7 @@ struct NativeFlightSource {
             let prepared = preparedOverride ?? measureEntry(index, retainingText: true)
             row.configure(shownItem(entry), sourceItem: item, index: itemIndex, items: renderConversation.items, width: lastWidth,
                 expanded: entry.expanded, codeStyle: codeStyle, prepared: prepared, fallbackTimestamp: entry.firstSeen)
+            wireReferences(row)
             configurationCounts[item.id, default: 0] += row.configurationCount - before
             row.applyFlightHidden(hiddenFlightParts[item.id] ?? [], textHidden: hiddenText.contains(item.id))
             row.applyHiddenSourceRanges(hiddenTextRanges[item.id] ?? [])
@@ -942,6 +1030,16 @@ struct NativeFlightSource {
     }
     func isExpanded(itemID: String) -> Bool { expanded.contains(itemID) }
     func selectedRange(itemID: String) -> NSRange? { withRow(itemID) { $0.body.selectedRange() } }
+    func sidechatSelection(itemID: String) -> (range: NSRange, rect: CGRect)? {
+        guard let range = withRow(itemID, { $0.selectedSourceRange() }) ?? nil,
+              let rect = glyphFrames(itemID: itemID, range: range).first?.rect else { return nil }
+        return (range, rect)
+    }
+
+    func sidechatQuoteFrame(id: String) -> CGRect? {
+        guard let index = entryPositions["sidechat-quote:" + id] else { return nil }
+        return CGRect(x: 0, y: 18 + heights.prefix(index), width: lastWidth, height: entries[index].height)
+    }
     func setSelectedRange(_ range: NSRange, itemID: String) {
         _ = withRow(itemID) { row in
             row.body.setSelectedRange(NSIntersectionRange(range, NSRange(location: 0, length: (row.body.string as NSString).length)))
@@ -1112,7 +1210,12 @@ struct NativeFlightSource {
         // ApprovalCard's own plate has 14 pt margins. Passing column+4 puts its edge exactly 12 pt inside the
         // column; its 560 pt product cap is a 588 pt control width. The 34 pt bottom includes our 22 pt bleed.
         let width = min(588, bounds.width + 4)
-        let controls = externalDecisionCards(width:width,source:.init(project:store?.project(renderConversation.projectID)?.name ?? "No Project",conversation:renderConversation.title,isOtherConversation:false,canShowConversation:!renderConversation.archived))
+        let availableHeight = max(0, bounds.height - 34)
+        let source = NativeApprovalSource(project: store?.project(renderConversation.projectID)?.name ?? "No Project",
+            conversation: renderConversation.title, isOtherConversation: false,
+            canShowConversation: !renderConversation.archived)
+        // Leave room for conversation text above an overflowing question.
+        let controls = externalDecisionCards(width: width, source: source, questionMaximumHeight: availableHeight - 64)
         let cards = controls.filter { !$0.isApprovalCard } + controls.filter(\.isApprovalCard)
         var y: CGFloat = 0
         for card in cards {
@@ -1128,25 +1231,40 @@ struct NativeFlightSource {
         }
         let height = max(0, y - (cards.isEmpty ? 0 : 8))
         pinnedDocument.frame = CGRect(x: 0, y: 0, width: width, height: height)
-        let viewport = min(height, max(0, bounds.height - 34))
-        pinnedReserve = cards.isEmpty ? 0 : viewport + 24
+        let viewport = min(height, availableHeight)
+        let bottomInset: CGFloat = cards.first?.isApprovalCard == false ? 34 : 24
+        pinnedReserve = cards.isEmpty ? 0 : viewport + bottomInset
         pinnedScroll.frame = CGRect(x: ((bounds.width - width) / 2 * grid).rounded() / grid,
             y: ((bounds.maxY - 34 - viewport) * grid).rounded() / grid, width: width, height: viewport)
         pinnedScroll.isHidden = cards.isEmpty
     }
     /// One retained set of controls, rendered in Normie's bottom cluster; inline mode remains the Organic default.
-    func externalDecisionCards(width:CGFloat,includeQuestion:Bool=true,source:NativeApprovalSource?=nil,showConversation:(()->Void)?=nil)->[NativeTranscriptCard]{
+    func externalDecisionCards(width: CGFloat, includeQuestion: Bool = true, source: NativeApprovalSource? = nil,
+                               questionMaximumHeight: CGFloat? = nil,
+                               showConversation: (() -> Void)? = nil) -> [NativeTranscriptCard] {
         var next:[String:NativeTranscriptCard]=[:],result:[NativeTranscriptCard]=[]
         for approval in renderConversation.approvals{let key="approval:"+approval.id
             let old=externalCards[key] ?? retainedDecisionCards[key] ?? NativeTranscriptCard()
             old.prepareForPresentation(scale:window?.backingScaleFactor)
             if let source {old.setApprovalSource(source,showConversation:showConversation,reconfigure:false)}
             let card=approvalCard(approval,old:old,width:width,attach:false);next[key]=card;retainedDecisionCards[key]=card;cards[key]=nil;result.append(card)}
-        if renderConversation.question != nil || renderConversation.userInput != nil {
-            let request=renderConversation.userInput ?? UserInputRequest(id:"fixture-question:"+renderConversation.id,questions:[.init(id:"answer",header:"Question",prompt:renderConversation.question ?? "",options:[])])
-            let key="question:"+request.id,card=externalCards[key] ?? retainedDecisionCards[key] ?? NativeTranscriptCard()
+        if includeQuestion, let request = renderConversation.userInput {
+            let key = "question:" + request.id
+            let card = externalCards[key] ?? retainedDecisionCards[key] ?? NativeTranscriptCard()
+            card.prepareForPresentation(scale: window?.backingScaleFactor)
             card.onVisualChange = { [weak self] in self?.captureRevision &+= 1 }
-            card.configureQuestion(request,width:width,enabled:!(store?.isOffline(conversation) ?? false) && (!renderConversation.isLiveConversation || onAnswer != nil)){[weak self] values in self?.answer(request,answers:values)};next[key]=card;retainedDecisionCards[key]=card;cards[key]=nil;if includeQuestion{result.append(card)}
+            let enabled = !(store?.isOffline(conversation) ?? false)
+                && (!renderConversation.isLiveConversation || onAnswer != nil)
+            let maximumHeight = questionMaximumHeight.map { limit in
+                result.reduce(limit) { $0 - $1.frame.height - 8 }
+            } ?? 276
+            card.configureQuestion(request, width: width, enabled: enabled, maximumHeight: maximumHeight) {
+                [weak self] values in self?.answer(request, answers: values)
+            }
+            next[key] = card
+            retainedDecisionCards[key] = card
+            cards[key] = nil
+            result.append(card)
         }
         for (key,card) in externalCards where next[key] == nil{card.removeFromSuperview()};externalCards=next;for card in result { card.isHidden = false };return result
     }

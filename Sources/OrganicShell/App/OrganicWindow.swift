@@ -3,16 +3,193 @@ import AppKit
 /// One window (product OrganicWindowController, f002): its own working set, scene, Normie workbench and composer
 /// sessions, over the app's one store. The app keeps a list of them; a conversation and its editor can move between
 /// them.
-@MainActor final class OrganicWindow: NSObject, NSWindowDelegate {
+@MainActor final class OrganicWindow: NSObject, ForegroundEscapeRouting {
     let window: NSWindow
     let scene: AutoScene
+    var browserOwner: BrowserOrbWindowOwner?
+    var browserApp: AppController? { app }
+    var browserCanPresent: Bool { !isClosed && collapsed == nil }
     let shell: WindowShell
     let workbench: NormieWorkbench
     let transcriptSessions: NativeTranscriptSessions
     let root: RootView
     let actions = NormieActions()
+    private(set) var functionPanelOwner: FunctionPanelWindowOwner?
+    private var functionPanelActions: FunctionPanelActionOwner?
     private weak var app: AppController?
     private var workbenchDisposed = false
+    private var sidechatObservation: UUID?
+    private var sidechatRuntime: SidechatRuntime?
+    private var sidechatOwned: [String: SidechatRuntime.Chat] = [:]
+    private var sidechatOpenEpoch = 0
+    private var sidechatConfirmation: SidechatPanePresentation?
+
+    private var functionPanelColumn: ColumnNode? {
+        guard shell.mode == .organic, !shell.modeContentInputBlocked, !scene.modeHandoffActive,
+              !isClosed, !isCollapsed, scene.presented, scene.isFull(scene.current) else { return nil }
+        return scene.columns.first {
+            $0.conversation.id == scene.current && !$0.conversation.archived && $0.browserAttachment?.covers != true
+                && $0.island?.isHiddenOrHasHiddenAncestor == false
+        }
+    }
+
+    func openFunctionPanel(_ target: Conversation, destination: FunctionPanelDestination) -> Bool {
+        guard let app, !scene.isMoving, functionPanelColumn?.conversation === target,
+              scene.store.conversation(target.id) === target,
+              functionPanelEnvironment().visible else { return false }
+        scene.orbMenu.dismiss(animated: false)
+        scene.dismissPeek()
+        scene.sunHover?.retire()
+        for sheet in scene.overlayPlane.subviews.compactMap({ $0 as? SheetSurface }) {
+            sheet.dismiss(reason: .replaced, animated: false)
+        }
+        for binding in scene.overlays.values where binding.holdsOverlay {
+            binding.modelPicker.dismiss()
+            binding.sendOptions.dismiss()
+            _ = binding.cancelGesture()
+        }
+
+        let owner = functionPanelOwner ?? makeFunctionPanelOwner(app)
+        functionPanelOwner = owner
+        owner.synchronize()
+        if !owner.isOpen {
+            let colours = FunctionPanelSourceOwner.colours(owner.resources)
+            let actions = FunctionPanelActionOwner(conversation: target, store: scene.store, runtime: app.runtime,
+                presentation: app.live?.presentation, windows: scene.subAgentWindows,
+                current: { [weak self] in
+                    guard let self, self.functionPanelOwner?.isOpen == true else { return nil }
+                    return self.functionPanelColumn?.conversation
+                }, connected: { [weak self, weak target] in
+                    guard let self, let target else { return false }
+                    return !self.scene.store.isOffline(target)
+                }, capabilities: { [weak self, weak target] in
+                    guard let self, let target else { return [] }
+                    return self.functionPanelCapabilities(target, colours: colours)
+                }, colours: colours)
+            actions.onChange = { [weak owner] in owner?.refresh() }
+            functionPanelActions = actions
+        }
+        owner.present(destination)
+        if !owner.isOpen { functionPanelActions = nil }
+        return owner.isOpen
+    }
+
+    func retireFunctionPanels() {
+        scene.cancelFunctionPanelRequest()
+        functionPanelOwner?.retire()
+    }
+
+    func routeForegroundEscape(_ event: NSEvent) -> Bool {
+        guard let owner = functionPanelOwner, owner.isOpen else { return false }
+        return owner.host.route(event) == nil
+    }
+
+    private func functionPanelEnvironment() -> FunctionPanelWindowEnvironment {
+        let width = shell.view.bounds.width
+        let height = shell.view.bounds.height
+        let column = functionPanelColumn
+        let visible = (scene.verificationPresented ?? (window.isVisible && window.occlusionState.contains(.visible)))
+            && !window.isMiniaturized && column != nil
+        return .init(viewport: CGRect(x: 0, y: 32, width: width, height: max(0, height - 32)),
+                     column: column?.rect.target ?? .zero, visible: visible,
+                     scale: max(1, Int(window.backingScaleFactor.rounded())), reduced: Motion.reduce)
+    }
+
+    private func functionPanelCapabilities(_ target: Conversation, colours: [FunctionPanelColour]) -> Set<String> {
+        guard !scene.store.isOffline(target), !target.archived else { return [] }
+        var available: Set<String> = ["rename"]
+        if !target.running && (!scene.store.usesLiveCore || target.backendThreadID != nil) {
+            available.insert("compact")
+        }
+        if target.running { available.insert("stop") }
+        if scene.store.canSelectBodyIdentity {
+            available.formUnion(BodyIdentityAdapter.choices.map { "body." + $0 })
+            available.formUnion(colours.map { "colour." + $0.id })
+        }
+        for child in target.satellites {
+            guard let thread = child.threadID, let model = scene.store.conversation(thread) else { continue }
+            available.insert("sub.open." + child.id)
+            if model.running { available.insert("sub.stop." + child.id) }
+        }
+        return available
+    }
+
+    private var functionPanelViews: [NSView] {
+        scene.columns.flatMap { column -> [NSView] in
+            guard column.browserAttachment?.covers != true else { return [] }
+            var views: [NSView] = column.ownsNative ? [column.native] : []
+            if let header = column.island { views.append(header) }
+            if let editor = scene.composers.existingComposer(for: column.conversation.id), editor.window === window {
+                views.append(editor)
+            }
+            return views
+        }
+    }
+
+    private func suspendFunctionPanelColumns() -> () -> Void {
+        guard let owner = functionPanelOwner else { return {} }
+        var restore: [() -> Void] = []
+        for view in functionPanelViews {
+            if let header = view as? HeaderIsland {
+                let resume = header.headerHolds.suspend([HeaderIslandHold.Role.interaction], by: owner) {
+                    [weak owner] _, _ in owner?.retire()
+                }
+                restore.append(resume)
+            } else if let surface = view as? NativeInteractionSurface {
+                let clip = surface.presentationClip
+                surface.presentationClip = .zero
+                surface.invalidateAccessibilityLease()
+                restore.append { [weak surface, weak mount = surface.superview] in
+                    guard let surface, surface.presentationClip == .zero else { return }
+                    surface.presentationClip = surface.superview === mount ? clip : nil
+                    surface.invalidateAccessibilityLease()
+                }
+            }
+        }
+        return { for release in restore.reversed() { release() } }
+    }
+
+    private func makeFunctionPanelOwner(_ app: AppController) -> FunctionPanelWindowOwner {
+        let store = scene.store
+        let owner = FunctionPanelWindowOwner(window: window, store: store, resources: BodyResources.shared,
+            current: { [weak self] in self?.functionPanelColumn?.conversation },
+            connected: { [weak self] in
+                guard let target = self?.functionPanelColumn?.conversation else { return false }
+                return !store.isOffline(target)
+            }, commands: { [weak self] _ in self?.functionPanelActions?.value ?? .init() }, read: { target, _ in
+                let model: FunctionPanelValue<String> = store.usesLiveCore && !target.next.model.reportedByCore
+                    ? .unavailable : .known(target.next.model.full)
+                return .init(id: target.id, revision: target.revision, model: model)
+            }, observe: { target, _, receive in
+                let token = store.observe { changed in
+                    if changed === target || target.satellites.contains(where: { $0.threadID == changed.id }) {
+                        receive()
+                    }
+                }
+                return { store.removeObserver(token) }
+            }, environment: { [weak self] in
+                self?.functionPanelEnvironment() ?? .init(viewport: .zero, column: .zero, visible: false,
+                                                         scale: 1, reduced: true)
+            }, intent: { [weak self] in self?.functionPanelActions?.beginIntent() },
+            clearFeedback: { [weak self] in self?.functionPanelActions?.dismissFeedback() },
+            columns: .init(views: { [weak self] in self?.functionPanelViews ?? [] }, isPaused: { [weak self] in
+                self?.functionPanelOwner?.isOpen == true
+            }, suspend: { [weak self] in self?.suspendFunctionPanelColumns() ?? {} }, admitsFocus: {
+                NativeInteractionSurface.permits($0)
+            }), actions: { [weak self] in self?.functionPanelActions?.submit($0) })
+        owner.onRetired = { [weak self] in self?.functionPanelActions = nil }
+        if app.live != nil {
+            let controller = app.liveArtifacts
+            owner.source.artifacts = FunctionPanelArtifactPreviewOwner(controller: controller,
+                endpoint: { controller.endpointIdentity }, current: { [weak self] in
+                    self?.functionPanelColumn?.conversation
+                }, connected: { [weak self] in
+                    guard let target = self?.functionPanelColumn?.conversation else { return false }
+                    return !store.isOffline(target)
+                })
+        }
+        return owner
+    }
     /// Retire source editor callbacks before a target installs its own. Final close must not withdraw the moved
     /// editor's target bindings through Normie's retained reference to that same composer.
     func prepareConversationTransfer(_ id: String, closing: Bool) {
@@ -38,7 +215,7 @@ import AppKit
         transcriptSessions = NativeTranscriptSessions(store: store)
         for session in transferredTranscripts { precondition(transcriptSessions.adopt(session), "A new window must adopt the released transcript before constructing hosts") }
         let size = frame.size
-        window = NSWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+        window = ModeContentWindow(contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
                           backing: .buffered, defer: false, screen: screen)
         window.contentMinSize = CGSize(width: 560, height: 520)
         window.titlebarAppearsTransparent = true
@@ -68,6 +245,7 @@ import AppKit
         workbench.account = .prototype
         shell = WindowShell(organic: root, scene: scene, workbench: workbench, mode: normie ? .normie : .organic)
         super.init()
+        window.setSpinnerAmbient(false)
         root.owner = self
         window.delegate = self
         actions.command = { [weak self] command, tag in self?.command(command, tag: tag) }
@@ -86,6 +264,20 @@ import AppKit
             case .signOut: self.command(.signOut, tag: 0)
             }
         }
+        scene.sunHover?.command = { [weak self] action in
+            guard let self, !self.isClosed else { return }
+            switch action {
+            case .search: self.command(.search, tag: 0)
+            case .sidebar: self.command(.sidebar, tag: 0)
+            case .profile: self.command(.profile, tag: 0)
+            case .settings: self.command(.settings, tag: 0)
+            case .shortcuts: self.command(.shortcuts, tag: 0)
+            case .collapse: self.command(.collapse, tag: 0)
+            case .signOut: self.command(.signOut, tag: 0)
+            case .newChat, .conversation: break
+            }
+        }
+        scene.sunHover?.bindAccountUsage(app.observeAccountUsage)
         scene.onStatus = { [weak self] in self?.statusText() ?? "" }
         // Sends and stops go to the app's runtime (mock or live) and finish on their receipts (CORE-M7 App 接线).
         scene.onSubmit = { [weak app] c, request, finish in
@@ -120,10 +312,41 @@ import AppKit
             guard let app, let self, let fork = app.runtime.fork(c, at: item.id) else { return }
             (app.windows.first { $0.scene.members.contains { $0.id == fork.id } } ?? self).reveal(fork.id)
         }
+        scene.onForkWhole = { [weak app, weak self] c, _, finish in
+            Task { @MainActor [weak self] in
+                guard let self, !self.isClosed, let runtime = app?.runtime else { return }
+                let result: Result<Conversation, Error>
+                do { result = .success(try await runtime.forkWhole(c)) }
+                catch { result = .failure(error) }
+                guard !self.isClosed else { return }
+                finish(result)
+            }
+        }
         actions.revertTranscript = { [weak app] c, item in app?.runtime.revert(item, in: c) }
         // Live: what Normie does to a conversation goes to the Core (CORE-M7 App 接线): seen (which reads its history),
         // pin, archive, rename, fork, compact, commit. The mock keeps its local handling.
         if let live = app.live {
+            sidechatRuntime = live.sidechats
+            scene.sidechatEligible = { [weak live] c in
+                live?.sidechats.available == true && c.backendThreadID != nil && !c.archived && c.isLiveConversation
+            }
+            scene.onSidechat = { [weak self, weak live] c in
+                guard let self, let live else { return }
+                self.openSidechat(c, runtime: live.sidechats)
+            }
+            sidechatObservation = live.sidechats.observe { [weak self, weak live] _ in
+                guard let self, let live else { return }
+                self.updateSidechat(runtime: live.sidechats)
+            }
+            let confirm: @MainActor ([SidechatRuntime.CloseTarget]) async -> Bool = { [weak app] targets in
+                guard let app else { return false }
+                let owner = app.windows.first { window in
+                    targets.contains { window.sidechatOwned[$0.id] != nil }
+                } ?? app.windows.first { $0.window.isKeyWindow }
+                return await owner?.confirmSidechats(targets) ?? false
+            }
+            live.sidechats.confirmArchive = confirm
+            app.liveSettings.confirmSidechatClosure = confirm
             // The sidebar's Show More reads the Core's next history page; the Core keeps the cursor (f015).
             actions.hasMoreHistory = { [weak live] in live?.hasMoreHistory() ?? false }
             actions.loadMoreHistory = { [weak live] finish in
@@ -148,6 +371,12 @@ import AppKit
         }
         // The Status inspector's sub-agent rows open their read-only windows (AP23).
         actions.subAgent = { [weak self] c, s in self?.scene.subAgentWindows.present(subagentID: s.id, of: c) }
+        actions.referencePreview = { [weak app] target, c in
+            await app?.liveArtifacts.referencePreview(target, in: c) ?? .init(state: .unavailable, message: "Preview is unavailable.")
+        }
+        actions.referenceWeb = { [weak app] url in
+            if let open = app?.liveArtifacts.onOpenURL { open(url) } else { NSWorkspace.shared.open(url) }
+        }
         // A new draft starts with General ▸ Default access, once per draft editor (AP11).
         actions.configureComposer = { [weak app] composer, c in
             guard c == nil, let app, !OrganicWindow.defaulted.contains(ObjectIdentifier(composer)) else { return }
@@ -165,9 +394,21 @@ import AppKit
         shell.view.frame = CGRect(origin: .zero, size: size)
         window.contentViewController = shell
         window.setContentSize(size)
+        shell.onFunctionPanelModePreparation = { [weak self] in self?.retireFunctionPanels() }
+        scene.onFunctionPanelRequest = { [weak self] target, destination in
+            self?.openFunctionPanel(target, destination: destination) ?? false
+        }
+        scene.canRequestFunctionPanel = { [weak self] in
+            guard let self else { return false }
+            return self.scene.sceneView.window === self.window && self.shell.mode == .organic
+                && !self.shell.modeContentInputBlocked && !self.isCollapsed && !self.isClosed
+        }
+        scene.isFunctionPanelOpen = { [weak self] in self?.functionPanelOwner?.isOpen == true }
+        scene.onRetireFunctionPanel = { [weak self] in self?.functionPanelOwner?.retire() }
         shell.installToolbar(in: window)
         scene.islandActions = actions
         scene.onUndoArchive = { [weak self] in self?.workbench.undoArchive() ?? false }
+        scene.onSplitEligibilityChanged = { [weak self] in self?.refreshSplitCommand() }
         if !bare { scene.install(members: members) }
         // Menu commands act on what Organic shows (Split: the segment being typed into), told at rest.
         workbench.memberOrder = scene.order
@@ -175,11 +416,21 @@ import AppKit
         // (OWC searchChats, renameChat; app audit AP04, AP05, AP17); the window title follows what shows (AP16).
         shell.onModeChange = { [weak self] mode in
             guard let self else { return }
+            self.browserOwner?.modeChanged(mode)
             self.actions.externalCommands = mode == .organic ? Self.windowCommands.union(Self.organicCommands) : Self.windowCommands
+            self.refreshSplitCommand()
             DispatchQueue.main.async { [weak self] in self?.shell.refreshTitle() }
         }
         if !normie { actions.externalCommands = Self.windowCommands.union(Self.organicCommands) }
+        refreshSplitCommand()
+        reconcileBrowserOrb()
+        scene.subAgentWindows.onDismiss = { [weak self] _ in self?.updateAmbient() }
+        for c in store.conversations { spinnerStatus[c.id] = Self.spinnerStatus(of: c) }
         titleObservation = store.observe { [weak self] c in
+            let next = Self.spinnerStatus(of: c)
+            if let self, spinnerStatus.updateValue(next, forKey: c.id).map({ $0 != next }) ?? true {
+                activity()
+            }
             guard let self, c.id == (self.shell.mode == .normie ? self.workbench.selectedConversation?.id : self.scene.focusTarget) else { return }
             self.shell.refreshTitle()
         }
@@ -215,6 +466,8 @@ import AppKit
         scene.dock.focusTarget = scene.focusTarget
         scene.onTarget = { [weak self] id in
             guard let self else { return }
+            if id != self.scene.current { self.retireFunctionPanels() }
+            self.functionPanelOwner?.synchronize()
             self.scene.dock.focusTarget = id
             guard self.shell.mode == .organic else { return }
             self.workbench.memberOrder = self.scene.order
@@ -283,6 +536,14 @@ import AppKit
         }
     }
 
+    func refreshSplitCommand() {
+        if !isClosed && shell.mode == .organic && scene.canSplitWithNext {
+            actions.externalCommands.insert(.split)
+        } else {
+            actions.externalCommands.remove(.split)
+        }
+    }
+
     func statusText() -> String {
         var s = "Organic Shell v2 · Auto · \(scene.profile.summary) · 曝光 \(scene.exposure.enabled ? "开" : "关") \(Int(scene.exposure.shutter * 360))° · 堵主线程 \(scene.blockMain ? "开" : "关")"
         if let last = scene.lastSwitch {
@@ -295,6 +556,7 @@ import AppKit
 
     func click(_ p: CGPoint) {
         guard !isClosed else { return }
+        browserOwner?.prepareForSceneInput()
         if scene.isMe(at: p) { scene.meClicked(); return }
         if scene.isFocused, let i = scene.column(at: p) { scene.focusColumn(i); return }
         if let c = scene.orb(at: p) { scene.land(c.id, reason: "click") }
@@ -310,6 +572,8 @@ import AppKit
 
     /// Menu commands the window owns rather than the workbench (NormieActions.externalCommands).
     func command(_ command: NormieCommand, tag: Int) {
+        browserOwner?.prepareForSceneInput()
+        defer { reconcileBrowserOrb() }
         if shell.modeContentInputBlocked,[NormieCommand.newChat,.focus,.attach,.inspector,.terminal,.moveWindow,.mergeWindows].contains(command) {return}
         guard !isClosed else { return }
         switch command {
@@ -387,6 +651,8 @@ import AppKit
     /// To the screen's right third (at least 320 pt), floating, showing `id`; the window's arrangement is kept to come
     /// back to. Refused (a beep) without a member to show, or when already collapsed.
     func collapseToSide(_ id: String?, fromFullScreen: Bool = false) {
+        guard OrganicFeatureAvailability.current.collapse else { return }
+        browserOwner?.retire();browserOwner=nil
         // The draft has no command target (WindowModel commandTarget): nothing to collapse to.
         if shell.mode == .organic, scene.composingNew { NSSound.beep(); return }
         if window.styleMask.contains(.fullScreen), let id, collapsed == nil {
@@ -404,6 +670,7 @@ import AppKit
         // The real sidebar folds (the window is Organic underneath); a draft and a peek close.
         if shell.mode == .normie { shell.setMode(.organic, animated: false) }
         guard shell.mode == .organic else { return }
+        retireFunctionPanels()
         scene.setTranscriptPresentationActive(false)
         scene.dismissPeek()
         let vis = screen.visibleFrame
@@ -415,6 +682,10 @@ import AppKit
         let size = window.contentRect(forFrameRect: target).size
         let strip = CollapseStrip(store: scene.store, sessions: scene.composers, members: scene.members, shown: id, scale: screen.backingScaleFactor,
                                   transcriptSessions: transcriptSessions)
+        strip.sunHoverBadge = { [weak scene] changed in
+            scene?.sunHover?.refreshData(changed: changed)
+            return scene?.sunHover?.badge
+        }
         strip.frame = CGRect(x: shell.view.bounds.width - size.width, y: 0, width: size.width, height: size.height)
         strip.onRestore = { [weak self] in self?.restoreFromSide() }
         strip.onSelect = { [weak self] id in _ = self?.workbench.select(id) }
@@ -476,18 +747,27 @@ import AppKit
         if c.fullScreen { window.toggleFullScreen(nil) }
     }
 
-    func key(_ e: NSEvent) -> Bool {
+    func key(_ e: NSEvent, collapseHoverPoint: CGPoint? = nil) -> Bool {
         guard !isClosed else { return false }
+        if browserOwner?.full == true,e.keyCode == 53 {browserOwner?.toggleFull();return true}
+        browserOwner?.prepareForSceneInput()
         // Space while a dock node is held: Collapse to it (f050; not while typing: the root only sees keys no editor took).
-        if e.keyCode == 49, !e.isARepeat, e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty, let id = scene.pressedNode {
-            scene.cancelDrag(); collapseToSide(id); return true
+        if OrganicFeatureAvailability.current.collapse, e.keyCode == 49, !e.isARepeat,
+           e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty, let id = scene.pressedNode {
+            scene.cancelDrag()
+            collapseToSide(id)
+            return true
         }
         // With Settings' "collapse on hover + Space" on, pointing at a bar or orb in Auto is enough (the root only sees
         // Space when no input has the keyboard; OrganicWindowController collapseOnHoverSpace).
-        if e.keyCode == 49, !e.isARepeat, e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
+        if OrganicFeatureAvailability.current.collapse, e.keyCode == 49, !e.isARepeat,
+           e.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
            UserDefaults.standard.bool(forKey: "settings.collapseOnHoverSpace"), shell.mode == .organic, !scene.isFocused,
-           let id = scene.dockNode(at: root.convert(window.mouseLocationOutsideOfEventStream, from: nil)), id != DockNode.meID {
-            collapseToSide(id); return true
+           let id = scene.dockNode(at: collapseHoverPoint
+                                  ?? root.convert(window.mouseLocationOutsideOfEventStream, from: nil)),
+           id != DockNode.meID {
+            collapseToSide(id)
+            return true
         }
         // ⇧⌘Return: Focused on the full conversation, and back (MainMenu Focus).
         if e.keyCode == 36, e.modifierFlags.intersection([.command, .shift, .control, .option]) == [.command, .shift] {
@@ -511,6 +791,11 @@ import AppKit
 
     private var idle: DispatchWorkItem?
     private var eventMonitor: Any?, reduceObserver: NSObjectProtocol?
+    private typealias SpinnerStatus = (Bool, Int, Int, Int, ErrorState?, String?)
+    private var spinnerStatus: [String: SpinnerStatus] = [:]
+    private static func spinnerStatus(of c: Conversation) -> SpinnerStatus {
+        (c.running, c.satellites.count, c.runningSatellites, c.completions, c.error, c.plan.first { !$0.done }?.id)
+    }
 
     /// Listens for what holds the ambient motion: key, occlusion, miniaturize, and 8 s without input; and for the
     /// system's Reduce Motion.
@@ -518,13 +803,32 @@ import AppKit
         guard !isClosed else { return }
         guard eventMonitor == nil else { activity(); return }
         eventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .keyDown, .scrollWheel, .leftMouseDragged]) { [weak self] e in
-            if e.window === self?.window { self?.activity() }
+            if let self, let target = e.window,
+               target === window || scene.subAgentWindows.ambientWindows.contains(where: { $0 === target }) {
+                if target === window, e.type == .keyDown, e.keyCode == 53,
+                   scene.cancelFunctionPanelRequest() { return nil }
+                activity()
+            }
             return e
         }
         reduceObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.scene.reduceMotionChanged(); self?.strip?.displayOptionsChanged() }
+            MainActor.assumeIsolated {
+                self?.scene.reduceMotionChanged()
+                self?.strip?.displayOptionsChanged()
+                self?.updateAmbient()
+            }
+        }
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification,
+                     NSWindow.didChangeOcclusionStateNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(historyChanged), name: name, object: nil)
         }
         activity()
+    }
+
+    @objc private func historyChanged(_ note: Notification) {
+        guard let target = note.object as? NSWindow,
+              scene.subAgentWindows.ambientWindows.contains(where: { $0 === target }) else { return }
+        if note.name == NSWindow.didBecomeKeyNotification { activity() } else { updateAmbient() }
     }
 
     private func activity() {
@@ -537,11 +841,19 @@ import AppKit
     /// input, whatever asks, and its end is scheduled for what is left (OWC updateAmbient; app audit AP22).
     private var lastInput = 0.0
     private func updateAmbient(idle _: Bool = false) {
+        guard !isClosed else { return }
+        browserOwner?.visibilityChanged()
+        functionPanelOwner?.synchronize()
         let left = 8 - (CACurrentMediaTime() - lastInput)
-        let visible = window.occlusionState.contains(.visible) && !window.isMiniaturized
-        let running = visible && window.isKeyWindow && left > 0
-        scene.setAmbientRunning(running)
-        strip?.setAmbientRunning(running)
+        let histories = scene.subAgentWindows.ambientWindows
+        let key = histories.first(where: \.isKeyWindow) ?? window
+        let running = key.isKeyWindow && key.occlusionState.contains(.visible) && !key.isMiniaturized && left > 0
+        let primary = running && key === window
+        scene.setAmbientRunning(primary)
+        strip?.setAmbientRunning(primary)
+        let animate = running && !Motion.reduce
+        window.setSpinnerAmbient(animate && key === window)
+        for history in histories { history.setSpinnerAmbient(animate && key === history) }
         idle?.cancel(); idle = nil
         guard running else { return }
         let w = DispatchWorkItem { [weak self] in self?.updateAmbient() }
@@ -556,6 +868,7 @@ import AppKit
     }
     /// In full screen the menu says what Collapse will do first (OWC:809-812).
     private func titleCollapseItem(fullScreen: Bool) {
+        guard OrganicFeatureAvailability.current.collapse else { return }
         func find(_ menu: NSMenu?) -> NSMenuItem? {
             for item in menu?.items ?? [] {
                 if item.identifier?.rawValue == "shortcut.collapse" { return item }
@@ -573,21 +886,149 @@ import AppKit
         collapseToSide(id, fromFullScreen: true)
     }
     func windowDidResignKey(_ n: Notification) {
+        retireFunctionPanels()
+        scene.sunHover?.retire()
+        scene.orbTrash.suspend()
         updateAmbient(); scene.updateEditing()
         // A held node goes home when the window loses key, as a header's does. A tear is already between windows.
         if !scene.isTearing { scene.cancelDrag() }
     }
     func windowDidChangeOcclusionState(_ n: Notification) { updateAmbient() }
-    func windowDidChangeBackingProperties(_ n: Notification) { scene.backingChanged(window.backingScaleFactor) }
+    func windowDidChangeBackingProperties(_ n: Notification) {
+        scene.backingChanged(window.backingScaleFactor)
+        functionPanelOwner?.synchronize()
+    }
     func windowDidMiniaturize(_ n: Notification) { updateAmbient() }
     func windowDidDeminiaturize(_ n: Notification) { activity() }
 
     // MARK: NSWindowDelegate
 
+    private func sidechatError(_ error: Error, parent: Conversation) {
+        let rect = scene.orbPose(parent.id) ?? scene.nativePlane.bounds
+        scene.orbToast.present(error.localizedDescription, anchor: CGPoint(x: rect.midX, y: rect.midY),
+                               in: scene.overlayPlane)
+    }
+
+    private func openSidechat(_ parent: Conversation, runtime: SidechatRuntime) {
+        guard scene.sidechatEligible?(parent) == true, let thread = parent.backendThreadID else { return }
+        if scene.sidechatParentID != parent.id { scene.foldSidechat() }
+        sidechatOpenEpoch += 1
+        let epoch = sidechatOpenEpoch
+        Task { @MainActor [weak self] in
+            do {
+                let chat = try await runtime.open(parentID: thread)
+                guard let self, !self.isClosed, self.sidechatOpenEpoch == epoch,
+                      self.shell.mode == .organic,
+                      self.scene.sidechatEligible?(parent) == true,
+                      self.scene.members.contains(where: { $0 === parent }) else {
+                    try? await runtime.close(chat)
+                    return
+                }
+                self.sidechatOwned[chat.id] = chat
+                self.scene.openSidechat(parent: parent, chat: chat) { [weak self] host in
+                    host.pane.onDraft = { text in runtime.edit(chat, text: text) }
+                    host.pane.onSend = { [weak self] in
+                        Task { @MainActor in
+                            do { try await runtime.send(chat) }
+                            catch { self?.sidechatError(error, parent: parent) }
+                        }
+                    }
+                    host.pane.onStop = { [weak self] in
+                        Task { @MainActor in
+                            do { try await runtime.stop(chat) }
+                            catch { self?.sidechatError(error, parent: parent) }
+                        }
+                    }
+                    host.pane.onSendToMain = { [weak self, weak host] in
+                        Task { @MainActor in
+                            do {
+                                _ = try await runtime.sendToMain(chat)
+                                host?.acceptQuoteReceipt()
+                                self?.scene.sidechatMotionChanged()
+                            } catch {
+                                host?.pane.rejectSendToMain()
+                                self?.sidechatError(error, parent: parent)
+                            }
+                        }
+                    }
+                    host.onClose = { [weak self] in
+                        self?.sidechatOwned[chat.id] = nil
+                        Task { @MainActor [weak self] in
+                            try? await runtime.close(chat)
+                            if self?.scene.sidechatChatID == chat.id { self?.scene.removeSidechat() }
+                        }
+                    }
+                }
+                if self.scene.sidechatChatID != chat.id {
+                    self.sidechatOwned[chat.id] = nil
+                    try? await runtime.close(chat)
+                }
+            } catch {
+                guard let self, !self.isClosed, self.sidechatOpenEpoch == epoch else { return }
+                self.sidechatError(error, parent: parent)
+            }
+        }
+    }
+
+    private func updateSidechat(runtime: SidechatRuntime) {
+        guard let id = scene.sidechatChatID, let host = scene.sidechatPane else { return }
+        guard let chat = sidechatOwned[id], runtime.chats[id] === chat else {
+            sidechatOwned[id] = nil
+            scene.removeSidechat()
+            return
+        }
+        let title = scene.sidechatParentID.flatMap { scene.conversation($0)?.title } ?? ""
+        host.pane.apply(chat, parentTitle: title)
+    }
+
+    private func confirmSidechats(_ targets: [SidechatRuntime.CloseTarget]) async -> Bool {
+        guard !isClosed, sidechatConfirmation == nil else { return false }
+        let existing = shell.mode == .organic ? scene.sidechatPane : nil
+        let host = existing ?? SidechatPanePresentation()
+        guard !host.confirmation.isShowing else { return false }
+        if existing == nil {
+            let container = shell.mode == .organic ? scene.overlayPlane : shell.view
+            host.frame = container.bounds
+            host.autoresizingMask = [.width, .height]
+            container.addSubview(host, positioned: .above, relativeTo: nil)
+            sidechatConfirmation = host
+        }
+        let names = targets.map { target in
+            target.parentID.flatMap { scene.store.backendConversation($0)?.title } ?? "Sidechat"
+        }
+        return await withCheckedContinuation { continuation in
+            host.confirmClosure(title: "Close sidechats?", names: names) { [weak self, weak host] accepted in
+                if let self, let host, self.sidechatConfirmation === host {
+                    self.sidechatConfirmation = nil
+                    host.dispose()
+                }
+                continuation.resume(returning: accepted)
+            }
+        }
+    }
+
     private(set) var isClosed = false
     func windowWillClose(_ n: Notification) {
         guard !isClosed else { return }
         isClosed = true
+        retireFunctionPanels()
+        NotificationCenter.default.removeObserver(self)
+        scene.subAgentWindows.dismiss()
+        sidechatOpenEpoch += 1
+        sidechatConfirmation?.dispose()
+        sidechatConfirmation = nil
+        scene.removeSidechat(restore: false)
+        if let runtime = sidechatRuntime {
+            if let id = sidechatObservation { runtime.removeObserver(id) }
+            let chats = Array(sidechatOwned.values)
+            sidechatOwned.removeAll()
+            Task {
+                for chat in chats { try? await runtime.close(chat) }
+            }
+        }
+        sidechatRuntime = nil
+        browserOwner?.retire();browserOwner=nil
+        scene.orbTrash.close()
         app?.closing(self)
         shell.flight.shutdown()
         shell.clearTranscriptStandIns()
@@ -650,6 +1091,7 @@ import AppKit
         ModeSignposts.measure("OrganicResizeCaptureBakeKeyframes", detail: "inclusive AutoScene.resize; no internal per-column hooks") {
             scene.resize(to: content.bounds.size, live: window.inLiveResize || resizingLive)
         }
+        functionPanelOwner?.synchronize()
         app?.resizeLog.append(["t": start, "width": content.bounds.width, "ms": (CACurrentMediaTime() - start) * 1000, "live": window.inLiveResize || resizingLive])
     }
 
@@ -658,6 +1100,7 @@ import AppKit
         // A person resizing the strip: it follows the window.
         if let c = collapsed { c.strip.frame = content.bounds; return }
         scene.resize(to: content.bounds.size, live: false)
+        functionPanelOwner?.synchronize()
     }
 }
 

@@ -33,7 +33,13 @@ enum MockBrief {
     /// The source's first real sentence, without markup, cut to its main clause.
     static func leadClause(of source: String) -> String {
         var sentences: [String] = []
+        var fence: (mark: Character, length: Int)?
         for line in source.split(separator: "\n").map({ String($0).trimmingCharacters(in: .whitespaces) }) {
+            let run = line.prefix(while: { $0 == line.first && ($0 == "`" || $0 == "~") })
+            if let open = fence, line.first == open.mark, run.count >= open.length,
+               line.dropFirst(run.count).trimmingCharacters(in: .whitespaces).isEmpty { fence = nil; continue }
+            if fence != nil { continue }
+            if run.count >= 3, let mark = run.first { fence = (mark, run.count); continue }
             // Labels ("**What changed**"), headings, fences and code lines say nothing about the work.
             if line.hasPrefix("**") && line.hasSuffix("**") || line.hasPrefix("#") || line.hasPrefix("```") { continue }
             let plain = line.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")

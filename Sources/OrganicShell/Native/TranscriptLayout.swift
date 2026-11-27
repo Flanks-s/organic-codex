@@ -84,6 +84,13 @@ struct TranscriptGeometry {
             }
             return (output, sourceOffsets)
         }
+        let references = presentation.kind == .assistant || presentation.kind == .user ? TranscriptContentIndex.parse(value) : []
+        for reference in references where reference.labelRange.length > 0 {
+            // Deliberately not NSAttributedString.Key.link: Organic shares these pixels without link behavior.
+            output.addAttributes([.transcriptReference: reference.target.raw,
+                .foregroundColor: palette.accent,
+                .font: font(bodyFont.pointSize / scale, scale: scale, weight: .medium)], range: reference.labelRange)
+        }
         if value.utf8.count <= 256 * 1024 {
             if let headings = try? NSRegularExpression(pattern: "^#{1,6} .*$", options: [.anchorsMatchLines]) {
                 for match in headings.matches(in: value, range: NSRange(location: 0, length: output.length)) {
@@ -117,7 +124,7 @@ struct TranscriptGeometry {
                         output.replaceCharacters(in: NSRange(location: NSMaxRange(match.range(at: 1)), length: 1), with: "•")
                     }
                 }
-                var markup: [NSRange] = code.delimiters
+                var markup: [NSRange] = code.delimiters + references.flatMap(\.markup)
                 for inline in code.inline {
                     markup.append(NSRange(location: inline.location - 1, length: 1))
                     markup.append(NSRange(location: NSMaxRange(inline), length: 1))
@@ -133,10 +140,21 @@ struct TranscriptGeometry {
                         markup.append(NSRange(location: NSMaxRange(match.range(at: 1)), length: 2))
                     }
                 }
-                for range in markup.sorted(by: { $0.location > $1.location }) where NSMaxRange(range) <= output.length {
+                var removed = IndexSet()
+                for range in markup { removed.insert(integersIn: range.location..<NSMaxRange(range)) }
+                for indices in removed.rangeView.reversed() {
+                    let range = NSRange(location: indices.lowerBound, length: indices.count)
                     output.deleteCharacters(in: range)
                     sourceOffsets.removeSubrange(range.location..<NSMaxRange(range))
                 }
+            } else if presentation.kind == .user {
+                for range in references.flatMap(\.markup).sorted(by: { $0.location > $1.location }) {
+                    output.deleteCharacters(in: range); sourceOffsets.removeSubrange(range.location..<NSMaxRange(range))
+                }
+            }
+        } else {
+            for range in references.flatMap(\.markup).sorted(by: { $0.location > $1.location }) {
+                output.deleteCharacters(in: range); sourceOffsets.removeSubrange(range.location..<NSMaxRange(range))
             }
         }
         return (output, sourceOffsets)

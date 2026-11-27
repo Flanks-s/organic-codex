@@ -106,18 +106,28 @@ struct NativeComposerWorkspace: Equatable {
 }
 
 /// The same threaded AppKit mini-spinner as product Design/Spinner.swift. No main-thread frame loop.
-@MainActor final class NativeComposerSpinner: NSProgressIndicator {
+@MainActor final class NativeComposerSpinner: NSProgressIndicator, AmbientSpinner {
     var animating = false { didSet { if animating != oldValue { updateMotion() } } }
+    private var spinning = false
     override init(frame: NSRect) {
         super.init(frame:frame);style = .spinning;isIndeterminate=true;isDisplayedWhenStopped=false
         usesThreadedAnimation=true;controlSize = .mini;setAccessibilityElement(false)
     }
     required init?(coder:NSCoder){fatalError("init(coder:)")}
     private func updateMotion() {
-        if animating && !isHiddenOrHasHiddenAncestor { startAnimation(nil) } else { stopAnimation(nil) }
+        isDisplayedWhenStopped = animating
+        let moving = animating && !isHiddenOrHasHiddenAncestor && canAnimateSpinner
+        guard moving != spinning else { return }
+        spinning = moving
+        if moving { startAnimation(nil) } else { stopAnimation(nil) }
     }
+    func refreshAmbientSpinner() { updateMotion() }
+    override var frame: NSRect { didSet { updateMotion() } }
     override func viewDidMoveToWindow(){super.viewDidMoveToWindow();updateMotion()}
-    override func viewDidHide(){super.viewDidHide();stopAnimation(nil)}
+    override func viewDidHide() {
+        super.viewDidHide()
+        updateMotion()
+    }
     override func viewDidUnhide(){super.viewDidUnhide();updateMotion()}
     override func draw(_ dirtyRect:NSRect){super.draw(dirtyRect)}
 }

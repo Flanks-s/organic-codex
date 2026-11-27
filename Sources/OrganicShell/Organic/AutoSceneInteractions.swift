@@ -39,7 +39,7 @@ extension AutoScene {
         if isMoving { settle() }
         let joining = !members.contains { $0.id == id }
         guard joining || id != current else { return }
-        if joining { members.append(c) }
+        if joining { members.append(c); sunHover?.refreshData() }
         current = id
         if joining { let (l, o) = arrange(members, current: current); dock.ensureItems(for: members, layout: l, order: o) }
         for other in prewarmed.values { unstage(other) }
@@ -109,7 +109,10 @@ extension AutoScene {
     /// point; when it was full, the nearest other member becomes full.
     func remove(_ id: String, reason: String) {
         guard let i = members.firstIndex(where: { $0.id == id }) else { return }
-        if reason == "archived", let c = conversation(id) { showArchiveToast(c.title); archivedOut.insert(id) }
+        if reason == "archived", let c = conversation(id) {
+            if orbArchivePositions[id] == nil { showArchiveToast(c.title) }
+            archivedOut.insert(id)
+        }
         var next = members; next.remove(at: i)
         var nextCurrent = current
         if id == current {
@@ -139,6 +142,7 @@ extension AutoScene {
         for other in prewarmed.values { unstage(other) }
         prewarmed = [:];lastPrewarmClear="remove"
         commit(prepare(members: next, current: nextCurrent, scheme: nextScheme, at: now()), reason: reason, prewarmed: false, start: start)
+        if reason == "archived" { orbDidArchive(id) }
     }
 
     // MARK: Conversation menu in Organic (app audit AP05, AP06, AP17)
@@ -191,14 +195,26 @@ extension AutoScene {
         let id: String, start: CGPoint
         var pointerOffset=CGPoint.zero
         var headerOrigin=false
+        var conversationOrb=false, freeCarry=false
+        var tidePlanetOrigin=false
+        var grab=CGPoint.zero, sourceRow:CGFloat=0
+        var pickupPose:CGRect?
+        var refuseNotified = false
         var began = false, insertAt = 0
         let before: [Conversation], beforeCurrent: String
+    }
+    func refusesDrop(_ drag: Drag, at point: CGPoint) -> Bool {
+        drag.began && drag.id != DockNode.meID && scheme.mode == .focused && scheme.split.count == 2
+            && !scheme.split.contains(drag.id) && !drag.tidePlanetOrigin
+            && (dock.capsule?.insetBy(dx: -24, dy: -24).contains(point) ?? false)
     }
     /// The product's queue spring (Tuning queueResponse / queueDamping) and the landing preview's (OrganicDockBridge).
     static var queueSpring: (response: Double, damping: Double) { Tuning.shared.queueSpring }
 
     /// A press on the dock. Returns whether it may become a drag; the release then says whether it was a click.
     func pointerDown(_ p: CGPoint, member: String? = nil) -> Bool {
+        if orbRefuse.returning { orbRefuse.retire() }
+        if member != nil || !isMe(at: p) { sunHover?.retire() }
         pressFromPointer = false; pressCancelled = false; buttonUpSince = nil
         guard drag == nil, tearing == nil, let id = member ?? dock.draggable(at: p),
               member == nil || (members.contains { $0.id == id } && dock.items[id] != nil) else { return false }
@@ -224,26 +240,63 @@ extension AutoScene {
         let p=pointer.offsetBy(d.pointerOffset)
         if d.id == DockNode.meID {
             if !d.began, hypot(pointer.x - d.start.x, pointer.y - d.start.y) >= 6 {
+                cancelFunctionPanelRequest()
+                sunHover?.dragBegan()
                 drag?.began = true; setPeeking(nil); dock.holdMe(at: d.start); clock.keepRunning = true
             }
             if drag?.began == true {
                 dock.moveMe(to: p)
                 // Over a bar or orb it would land on: an alignment tick, once per target (f195).
                 let target = dock.meTarget(at: p)
-                if target != meHoverTarget { meHoverTarget = target; if target != nil { NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now) } }
+                if target != meHoverTarget {
+                    meHoverTarget = target
+                    if target != nil { OrganicHaptics.perform(.alignment) }
+                }
             }
             return
         }
         if !d.began, hypot(pointer.x - d.start.x, pointer.y - d.start.y) >= 8 { beginDrag(at: pointer) }
         guard var d = drag, d.began else { return }
         if tearing != nil { onTear?(.move(pointer)); return }
+        let refuse = refusesDrop(d, at: p)
+        if refuse {
+            if d.conversationOrb { orbTrash.move(pointer) }
+            orbRefuse.request(d.id)
+            dock.moveHeld(to: pointer)
+            dock.heldFrame(at: now())
+            orbRefuse.frame(now())
+            if !d.refuseNotified, let capsule = dock.capsule {
+                d.refuseNotified = true
+                drag = d
+                let anchor = CGPoint(x: capsule.midX, y: capsule.minY)
+                orbToast.present("Split holds two conversations", anchor: anchor, in: overlayPlane)
+            }
+            runClock(until: max(ends, now() + 0.6))
+            return
+        }
+        orbRefuse.leave()
         // Out of the window, or 90 pt off the dock's row (the raw pointer, not the damped node): it tears loose (f182).
         let row = d.headerOrigin ? d.start.y : (scheme.mode == .focused ? (dock.capsule?.midY ?? layout.me.midY) : layout.me.midY)
+        if d.conversationOrb,!OrganicFeatureAvailability.current.conversationOrbTear {
+            if !d.freeCarry,abs(pointer.y-d.grab.y-d.sourceRow)>OrbTrashParameters.reorderBand {
+                d.freeCarry=true;drag=d
+                dock.beginFreeCarry(pointer:pointer,grab:d.grab)
+                orbTrash.move(pointer)
+            }
+            if d.freeCarry {
+                dock.moveHeld(to:pointer);orbTrash.move(pointer)
+                runClock(until:max(ends,now()+0.6));return
+            }
+        }
         dock.moveHeld(to: pointer)
-        if onTear != nil, !CGRect(origin: .zero, size: size).contains(pointer) || abs(pointer.y - row) > 90 { beginTear(d, at: pointer, row: row); return }
+        if onTear != nil, OrganicFeatureAvailability.current.allowsTear(conversationOrb: d.conversationOrb),
+           !CGRect(origin: .zero, size: size).contains(pointer) || abs(pointer.y - row) > 90 {
+            beginTear(d, at: pointer, row: row)
+            return
+        }
         runClock(until: max(ends, now() + 0.6))
         // Focused / Split previews nothing while carrying: the drop decides (OrganicDockBridge.updateQueueDrag).
-        guard scheme.mode == .auto else { return }
+        guard scheme.mode == .auto, !d.tidePlanetOrigin else { return }
         let at = insertion(at: p.x, dragging: d.id)
         guard at != d.insertAt else { return }
         d.insertAt = at; drag = d
@@ -257,9 +310,29 @@ extension AutoScene {
         meController.setDragging(false)
         guard let d = drag else { return false }
         let p=pointer.offsetBy(d.pointerOffset)
+        let refuse = refusesDrop(d, at: p)
         drag = nil
         guard d.began else { return false }
         if tearing != nil { onTear?(.drop(pointer)); return true }
+        if refuse {
+            if d.conversationOrb { orbTrash.move(pointer) }
+            orbRefuse.request(d.id)
+            dock.moveHeld(to: pointer)
+            dock.heldFrame(at: now())
+            orbRefuse.frame(now())
+            if !d.refuseNotified, let capsule = dock.capsule {
+                let anchor = CGPoint(x: capsule.midX, y: capsule.minY)
+                orbToast.present("Split holds two conversations", anchor: anchor, in: overlayPlane)
+            }
+            if d.conversationOrb { _ = orbTrash.release(pointer) }
+            dock.release()
+            clock.keepRunning = false
+            transition(to: members, current: current, scheme: scheme, spring: Self.queueSpring, reason: "drag-back")
+            orbRefuse.beginReturn()
+            runClock(until: max(ends, now() + 0.6))
+            return true
+        }
+        orbRefuse.leave()
         if d.id == DockNode.meID {
             // Dropped on a bar or orb: Focused on it. In Focused, dropped out of the capsule (44 pt round it): Auto.
             clock.keepRunning = false
@@ -280,6 +353,42 @@ extension AutoScene {
             runClock(until: max(ends, dock.meSettles))
             return true
         }
+        if !d.conversationOrb,
+           !OrganicFeatureAvailability.current.allowsTear(conversationOrb: false),
+           !CGRect(origin: .zero, size: size).contains(pointer) {
+            orbTrash.cancel()
+            clock.keepRunning = false
+            let present = Set(members.map(\.id))
+            let before = d.before.filter { present.contains($0.id) }
+            let original = Set(d.before.map(\.id))
+            let restored = before + members.filter { !original.contains($0.id) }
+            let selected = present.contains(d.beforeCurrent) ? d.beforeCurrent : current
+            let (restoredLayout, restoredOrder) = arrange(restored, current: selected)
+            let inColumn = scheme.mode == .focused ? scheme.split.contains(d.id)
+                : restoredOrder.prefix(restoredLayout.columns.count).contains(d.id)
+            dock.release(toHeader: d.headerOrigin && inColumn)
+            transition(to: restored, current: selected, scheme: scheme, spring: Self.queueSpring,
+                       reason: "tear-disabled-return")
+            return true
+        }
+        if d.conversationOrb,!d.freeCarry { orbTrash.cancel() }
+        if d.conversationOrb,!OrganicFeatureAvailability.current.conversationOrbTear,
+           d.freeCarry || !CGRect(origin:.zero,size:size).contains(pointer) {
+            let count=orbTrash.successfulRemovals
+            _=orbTrash.release(pointer)
+            clock.keepRunning=false
+            if orbTrash.successfulRemovals == count {
+                dock.release(toHeader:d.headerOrigin && columns.contains{$0.conversation.id==d.id})
+                transition(to:members,current:current,scheme:scheme,spring:Self.queueSpring,reason:"trash-return")
+            }
+            return true
+        }
+        if d.tidePlanetOrigin {
+            // A notice's displaced planet is a pickup source, never a landing preview over its borrowed brief.
+            dock.release(); clock.keepRunning = false
+            transition(to:members,current:current,scheme:scheme,spring:Self.queueSpring,reason:"tide-planet-return")
+            return true
+        }
         dock.moveHeld(to: pointer)
         let proposed = self.landing(d)
         let (proposedLayout,proposedOrder) = arrange(proposed.members,current:proposed.current)
@@ -296,7 +405,7 @@ extension AutoScene {
             let capsule = dock.capsule ?? .zero
             if !scheme.split.contains(d.id), capsule.insetBy(dx: -24, dy: -24).contains(p) {
                 var f = FocusLayout(); f.segments = layout.bars
-                NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+                OrganicHaptics.perform(.alignment)
                 graft(d.id, at: f.graftIndex(at: p.x), reason: "drag-graft")
             } else if scheme.split.count>1,scheme.split.contains(d.id), !capsule.insetBy(dx: -8, dy: -44).contains(p) {
                 ungraft(d.id, reason: "drag-ungraft")
@@ -310,17 +419,21 @@ extension AutoScene {
         return true
     }
 
-    /// Escape: everything goes back to where it was before the press.
+    /// Escape returns the carrier against the latest committed working set.
     func cancelDrag() {
         longPress?.cancel(); longPress = nil
         guard let d = drag else { return }
+        orbRefuse.leave()
+        orbTrash.cancel()
         drag = nil
         pressCancelled = true
         guard d.began else { return }
         if tearing != nil { onTear?(.cancel); return }
         if d.id == DockNode.meID { clock.keepRunning = false; dock.releaseMe(); runClock(until: dock.meSettles); return }
-        dock.release(toHeader:d.headerOrigin); clock.keepRunning = false
-        commit(prepare(members: d.before, current: d.beforeCurrent, at: now(), spring: Self.queueSpring), reason: "drag-cancel", prewarmed: false, start: CACurrentMediaTime())
+        let stillPresent=members.contains{$0.id==d.id}
+        dock.release(toHeader:d.headerOrigin && columns.contains{$0.conversation.id==d.id}); clock.keepRunning = false
+        if !stillPresent { dock.setHidden(d.id,true);dock.dropItems(keeping:Set(members.map(\.id))) }
+        commit(prepare(members: members, current: current, at: now(), spring: Self.queueSpring), reason: "drag-cancel", prewarmed: false, start: CACurrentMediaTime())
     }
 
     var isDragging: Bool { drag?.began == true }
@@ -364,7 +477,7 @@ extension AutoScene {
             }
             commit(prepare(members: others, current: current, scheme:next,at: now(), spring: Tuning.shared.autoSpring), reason: "tear-gap", prewarmed: false, start: CACurrentMediaTime())
         }
-        NSHapticFeedbackManager.defaultPerformer.perform(.alignment, performanceTime: .now)
+        OrganicHaptics.perform(.alignment)
         onTear?(.begin(id: d.id, pointer: p, row: row, press: d.start))
         if tearing == nil {cancelDrag()}
     }
@@ -403,8 +516,9 @@ extension AutoScene {
     /// The dock node under a press, held or about to be (Space then collapses to it, f050).
     var pressedNode: String? { drag.map(\.id).flatMap { $0 == DockNode.meID ? nil : $0 } }
 
-    private func beginDrag(at p: CGPoint) {
+    func beginDrag(at p: CGPoint) {
         guard var d = drag, !d.began else { return }
+        cancelFunctionPanelRequest()
         longPress?.cancel(); longPress = nil
         d.began = true
         reorderTextCandidate=d.id
@@ -412,28 +526,32 @@ extension AutoScene {
         drag = d
         for other in prewarmed.values { unstage(other) }
         prewarmed = [:];lastPrewarmClear="beginDrag"
-        setPeeking(nil)
-        dock.hold(d.id, at: p, now: now(), spring: Self.queueSpring, header: d.headerOrigin ? nodes[d.id]?.island:nil, originRow:d.start.y)
+        let orbPickup = orbFlights.pose(d.id) ?? orbPressOrigin
+        if orbPickup != nil { orbFlights.cancel(); dismissPeek() } else { setPeeking(nil) }
+        dock.hold(d.id, at: p, now: now(), spring: Self.queueSpring, header: d.headerOrigin && orbPickup == nil ? nodes[d.id]?.island:nil, originRow:d.start.y,pickupOverride:orbPickup ?? d.pickupPose,conversationOrb:d.conversationOrb && !OrganicFeatureAvailability.current.conversationOrbTear)
+        if d.conversationOrb,!OrganicFeatureAvailability.current.conversationOrbTear {
+            dock.beginFreeCarry(pointer:p,grab:d.grab);orbTrash.begin(d.id,pointer:p,grab:d.grab)
+        }
         // Picked up (f195): the trackpad's generic tap; the system setting can turn it off, the visuals stand alone.
-        NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now)
+        OrganicHaptics.perform(.generic)
         clock.keepRunning = true
     }
 
     /// Where the held member would go: how many of the others' bars and orbs (laid out without it) are left of `x`.
     private func insertion(at x: CGFloat, dragging id: String) -> Int {
-        let others = (drag?.before ?? members).filter { $0.id != id }
-        let (l, _) = arrange(others, current: drag?.beforeCurrent ?? current)
+        let others = members.filter { $0.id != id }
+        let (l, _) = arrange(others, current: current)
         return (l.bars + l.orbs).filter { $0.midX < x }.count
     }
 
     /// The working set if it landed now (WindowModel.landing): the others in their display order with the held one at
     /// `insertAt`. A full member dropped where it would be an orb passes full width to the first other one.
     private func landing(_ d: Drag) -> (members: [Conversation], current: String) {
-        guard let held = d.before.first(where: { $0.id == d.id }) else { return (d.before, d.beforeCurrent) }
-        var list = d.before.filter { $0.id != d.id }
-        let others = arrange(list, current: d.beforeCurrent).1
+        guard let held = members.first(where: { $0.id == d.id }) else { return (members, current) }
+        var list = members.filter { $0.id != d.id }
+        let others = arrange(list, current: current).1
         if d.insertAt < others.count, let i = list.firstIndex(where: { $0.id == others[d.insertAt] }) { list.insert(held, at: i) } else { list.append(held) }
-        var full = d.beforeCurrent
+        var full = current
         if full == d.id {
             let (l, _) = arrange(list, current: d.id)
             if let i = list.firstIndex(where: { $0.id == d.id }), i >= l.columns.count { full = list.first { $0.id != d.id }?.id ?? full }

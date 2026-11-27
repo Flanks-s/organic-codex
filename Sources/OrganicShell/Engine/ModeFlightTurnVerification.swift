@@ -6,6 +6,8 @@ import QuartzCore
 @MainActor enum ModeFlightTurnVerification {
     static func run(to output: URL) throws -> Int32 {
         try FileManager.default.createDirectory(at:output,withIntermediateDirectories:true)
+        let clock=ModeContentVerificationClock()
+        defer {clock.restore()}
         var checks=0,failures:[String]=[],facts:[[String:Any]]=[]
         var maximumGap=0.0,maximumStepRatio=0.0
         func check(_ value: Bool,_ name: String) {checks+=1;if !value {failures.append(name);print("FAIL: "+name)}}
@@ -151,7 +153,7 @@ import QuartzCore
         var readbacks:[[String:Any]]=[]
         let row=ModeOrreryFlightVerification.rows[0],real=ModeOrreryFlightVerification.real[0]
         for scale:CGFloat in [1,2] {for forward in [true,false] {
-            let epoch=CACurrentMediaTime()+3600
+            let epoch=VerificationClock.renderOrigin
             var clock=epoch
             let f=ModeFlight();f.manualTime={clock};f.verificationServerMotion=true;f.resize(to:size)
             let avatar=(ModeOrreryFlightVerification.sidebarAvatar,ModeOrreryFlightVerification.dockAvatar)
@@ -218,7 +220,9 @@ import QuartzCore
         _=workbench.composerForHandoff();scene.install();scene.settle()
         let shell=WindowShell(organic:root,scene:scene,workbench:workbench,mode:.organic);_=shell.view
         defer {shell.disposeModePreparation();shell.flight.shutdown();workbench.dispose();scene.disposeTranscriptPresentation();sessions.dispose();mock.stopPlayback()}
-        var now=CACurrentMediaTime();shell.flight.manualTime={now};shell.flight.verificationServerMotion=true
+        var now=ModeContentWorkBoundary.verificationNow!()
+        shell.flight.manualTime={now}
+        shell.flight.verificationServerMotion=true
         shell.verificationFlightSettle(asOrganic:true)
         // Reproduce a reentry while hidden sidebar layout and idle prewarm are both unavailable.
         shell.verificationDropFlightPreparation()

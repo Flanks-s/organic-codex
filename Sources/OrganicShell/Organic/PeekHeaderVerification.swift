@@ -3,7 +3,7 @@ import AppKit
 import QuartzCore
 
 extension OrganicM9Verification {
-    /// Native endpoint geometry, passive input, and actual retained Dock decoration visibility. No window or Core.
+    /// Ordinary endpoint geometry, protected native input and retained Dock decoration visibility. No window or Core.
     static func peekHeader(scale: CGFloat, output: URL) {
         let firstCheck = checks, firstFinding = findings.count
         let size = CGSize(width: 1280, height: 820)
@@ -28,9 +28,8 @@ extension OrganicM9Verification {
             var input = HeaderIslandConfiguration.conversation(c, variant: .brief, columnWidth: width,
                                                               band: HeaderIslandVariant.band(bleedTop: g.blur.minY),
                                                               ambient: false, scale: scale)
-            input.active = false; input.signals.satellites = []
+            input.notices=c.notices.snapshot(in:c);input.noticeColumnWidth=width+12
             reference.configure(input)
-            reference.setPresentationActive(false)
             check(peek.header.geometry == reference.geometry, "M13.2 exact brief HeaderIslandGeometry / \(width) / \(scale)x")
             check(peek.header.configuration == input, "M13.2 shared header identity/title/mark configuration / \(width) / \(scale)x")
             check(visibleGlass(peek.view) == 2, "M13.2 exactly two visible header glass surfaces, no lobe / \(width) / \(scale)x")
@@ -44,10 +43,10 @@ extension OrganicM9Verification {
             check(peek.headerFrame == pose && peek.verificationLyricsLayer.frame == lyricRect,
                   "M13.2 scrolling retains fixed header and viewport / \(width) / \(scale)x")
             let avatar = peek.header.geometry.planet.offsetBy(dx: pose!.minX, dy: pose!.minY)
-            check(peek.view.hitTest(CGPoint(x: avatar.midX, y: avatar.midY)) === peek.view,
-                  "M13.2 passive header is protected by the Peek surface / \(width) / \(scale)x")
-            check(!peek.header.planetButton.acceptsFirstResponder && !peek.header.titleButton.acceptsFirstResponder,
-                  "M13.2 header adds no keyboard target / \(width) / \(scale)x")
+            check(peek.view.hitTest(peek.view.convert(CGPoint(x: avatar.midX, y: avatar.midY),to:nil)) === peek.header.planetButton,
+                  "M11.25 protected native planet owns its hit / \(width) / \(scale)x")
+            check(peek.header.planetButton.acceptsFirstResponder && peek.header.titleButton.acceptsFirstResponder == reference.titleButton.acceptsFirstResponder,
+                  "M11.25 ordinary endpoint keyboard targets retained / \(width) / \(scale)x")
             if width == 300 {
                 let actual = peek.header.snapshot(scale: scale), expected = reference.snapshot(scale: scale)
                 check(actual.dataProvider?.data == expected.dataProvider?.data, "M13.2 exact shared header proxy pixels / \(scale)x")
