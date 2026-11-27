@@ -42,7 +42,7 @@ import AppKit
             guard self.canSend() else { self.cancelPress(); return }
             self.present(anchor: self.pendingAnchor, in: host); self.pressState = .opened
             self.pointerMoved(at: self.convert(self.pendingPointer, from: host))
-            if self.window != nil { NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .now) }
+            if self.window != nil { OrganicHaptics.perform(.generic) }
         }
         return true
     }

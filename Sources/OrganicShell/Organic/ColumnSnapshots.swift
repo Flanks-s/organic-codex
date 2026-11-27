@@ -8,7 +8,12 @@ extension ColumnNode {
     struct Snapshot {
         /// The native view's scroll and height are part of it: a capture is only good for the scroll it shows
         /// (a recording showed a stale capture at the top while the view had followed to the end).
-        struct Key: Hashable { let revision: Int; let visual: Int; let full: CGFloat; let brief: CGFloat; let offset: CGFloat; let content: CGFloat; var contentTop: CGFloat = 156 }
+        struct Key: Hashable {
+            let revision: Int, visual: Int
+            let full: CGFloat, brief: CGFloat, offset: CGFloat, content: CGFloat
+            var contentTop: CGFloat = 156
+            var cover: Int = 0
+        }
         let key: Key
         let title: (image: CGImage, size: CGSize)?
         let area: CGRect
@@ -33,18 +38,66 @@ extension ColumnNode {
         let width:CGFloat,column:CGFloat,scale:CGFloat
         let state:Bool,playful:Bool,room:CGFloat
     }
+    struct ModeBriefSource: Equatable {
+        let blockID: String
+        let revision: Int
+    }
     func boundedSummary(columnWidth:CGFloat)->SummaryLog {
         let size=Look.lyric(columnWidth:columnWidth).font.pointSize, gap=(size*0.62).rounded()
         let limit=Int(((logicalBottom-Look.contentTop.brief+18)/(size+gap)).rounded(.up))+2
         return SummaryLog(conversation,playful:Look.playful,lineLimit:limit)
     }
     func modeBrief(_ log:SummaryLog,width:CGFloat,columnWidth:CGFloat)->BriefLayout {
-        let key=ModeBriefKey(revision:0,appearance:NativeAppearance.revision,display:NativeDisplayOptions.shared.revision,width:width,column:columnWidth,scale:scale,state:island == nil,playful:Look.playful,room:logicalBottom-Look.contentTop.brief+18)
-        if let cached=modeBriefs[key],cached.log==log {return cached.layout}
-        modeBriefs=modeBriefs.filter{$0.key.revision==key.revision && $0.key.appearance==key.appearance && $0.key.display==key.display && $0.key.state==key.state && $0.key.playful==key.playful}
-        if modeBriefs.count>=4 {modeBriefs.removeAll(keepingCapacity:true)}
-        let value=BriefLayout(product:log,width:width,columnWidth:columnWidth,scale:scale,showsState:key.state,room:key.room)
-        modeBriefs[key]=(log,value);return value
+        let key = ModeBriefKey(revision: coverVersion, appearance: NativeAppearance.revision,
+            display: NativeDisplayOptions.shared.revision, width: width, column: columnWidth, scale: scale,
+            state: island == nil, playful: Look.playful, room: logicalBottom - Look.contentTop.brief + 18)
+        var rich: BriefLayout.RichProjection?
+        var signature: [ModeBriefSource] = []
+        if RichBriefProjection.enabled, let assets = richCovers {
+            let result = RichBriefProjection.make(conversation: conversation, log: log, index: richIndex,
+                                                  width: width, scale: scale, assets: assets)
+            rich = result.projection
+            signature = log.stretches.flatMap { stretch in
+                (result.projection[stretch.id] ?? []).map {
+                    ModeBriefSource(blockID: $0.source.blockID, revision: $0.source.revision)
+                }
+            }
+            let keys = Set(result.used.map(\.key))
+            for (key, pin) in coverPins where !keys.contains(key) {
+                assets.release(pin)
+                coverPins[key] = nil
+            }
+            for asset in result.used where coverPins[asset.key] == nil {
+                coverPins[asset.key] = assets.pin(asset)
+            }
+            for recipe in result.wanted where coverTickets[recipe.key] == nil && !coverFailed.contains(recipe.key) {
+                let resourceKey = recipe.key
+                coverTickets[resourceKey] = assets.request(recipe) { [weak self] result in
+                    guard let self else { return }
+                    self.coverTickets[resourceKey] = nil
+                    switch result {
+                    case .success:
+                        self.coverVersion += 1
+                        self.modeBriefs.removeAll()
+                        self.onCoversChanged?(self.conversation.id)
+                    case .failure:
+                        self.coverFailed.insert(resourceKey)
+                    }
+                }
+            }
+        }
+        if let cached = modeBriefs[key], cached.log == log, cached.signature == signature {
+            return cached.layout
+        }
+        modeBriefs = modeBriefs.filter {
+            $0.key.revision == key.revision && $0.key.appearance == key.appearance && $0.key.display == key.display
+                && $0.key.state == key.state && $0.key.playful == key.playful
+        }
+        if modeBriefs.count >= 4 { modeBriefs.removeAll(keepingCapacity: true) }
+        let value = BriefLayout(product: log, width: width, columnWidth: columnWidth, scale: scale,
+                                showsState: key.state, room: key.room, rich: rich)
+        modeBriefs[key] = (log, signature, value)
+        return value
     }
     func resolveIdleRowConfiguration() {
         guard ownsNative,idleRowConfigurationDirty else{return}
@@ -64,7 +117,8 @@ extension ColumnNode {
                 native.restoreFlightVisibility(continued);native.isHidden=hidden;native.layer?.isHidden=layerHidden
             }
         }
-        let work=M10ColumnWorkTrace.scope("column.snapshot",["id":conversation.id]);defer{work.end()}
+        let work = M10ColumnWorkTrace.scope("column.snapshot", ["id": conversation.id, "width": fullWidth])
+        defer { work.end() }
         resolveIdleRowConfiguration()
         displayWidths=(fullWidth,briefWidth)
         let layout=M10ColumnWorkTrace.scope("column.snapshot.layout")
@@ -77,8 +131,10 @@ extension ColumnNode {
             else {native.refresh(preservingOffset:catchUpHoldsOffset,allowHidden:true)}
         }
         resolve.end()
-        let key = Snapshot.Key(revision: conversation.revision, visual: native.captureRevision, full: fullWidth, brief: briefWidth,
-                               offset: native.scrollOffset.y, content: native.contentHeight.rounded(), contentTop: contentTop ?? fullContentTop)
+        let key = Snapshot.Key(revision: conversation.revision, visual: native.captureRevision,
+                               full: fullWidth, brief: briefWidth, offset: native.scrollOffset.y,
+                               content: native.contentHeight.rounded(), contentTop: contentTop ?? fullContentTop,
+                               cover: coverVersion)
         if let s=snapshots[key] {
             if gaussianCaptureNeeded && ownsNative {
                 let images=[s.withGoal,s.transcript].compactMap{$0}.filter{$0.width>1 && gaussianPairs[ObjectIdentifier($0)] == nil}
@@ -327,6 +383,17 @@ extension ColumnNode {
     }
     /// Background preparation never lays out a different native viewport between display frames.
     /// Unmounted/offscreen source rows and cold geometry retain the ordinary synchronous transition fallback.
+    func canPrepareTargetInIdle(fullWidth: CGFloat, contentTop: CGFloat) -> Bool {
+        func supported(_ view: NSView) -> Bool {
+            if view.isHidden || view.layer?.isHidden == true || view.layer?.mask?.bounds.isEmpty == true { return true }
+            return String(describing: type(of: view)) != "ToolsTerminalView" && view.subviews.allSatisfy(supported)
+        }
+        return ownsNative && native.modeRowLargestText <= Self.idleRowTextLimit && native.subviews.allSatisfy(supported)
+    }
+    func expectedTargetArea(fullWidth: CGFloat, contentTop: CGFloat) -> CGRect {
+        let top = contentTop - 18
+        return CGRect(x: 0, y: top, width: fullWidth, height: logicalBottom + 22 - top)
+    }
     func idleSnapshot(fullWidth:CGFloat,briefWidth:CGFloat,contentTop:CGFloat?=nil,idle:M11IdlePreparation) async throws ->Snapshot {
         let top=contentTop ?? fullContentTop
         let expected=CGSize(width:(fullWidth*scale).rounded()/scale,height:((logicalBottom+22-(top-18))*scale).rounded()/scale)
@@ -364,7 +431,9 @@ extension ColumnNode {
                 idleRowConfigurationDirty=false
             }
         }
-        let key=Snapshot.Key(revision:conversation.revision,visual:native.captureRevision,full:fullWidth,brief:briefWidth,offset:native.scrollOffset.y,content:native.contentHeight.rounded(),contentTop:top)
+        let key = Snapshot.Key(revision: conversation.revision, visual: native.captureRevision,
+                               full: fullWidth, brief: briefWidth, offset: native.scrollOffset.y,
+                               content: native.contentHeight.rounded(), contentTop: top, cover: coverVersion)
         let result:Snapshot
         if let cached=snapshots[key] {result=cached}
         else {result=try await makeIdleSnapshot(key,idle:idle)}

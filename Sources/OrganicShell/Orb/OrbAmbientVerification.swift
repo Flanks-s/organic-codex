@@ -31,8 +31,8 @@ import QuartzCore
         _=emit("turn/started",["threadId":"ambient","turn":["id":"turn"]])
         _=emit("item/started",["threadId":"ambient","turnId":"turn","item":["id":"build","type":"commandExecution","command":"swift build"]])
         check(!layers().contains{l in (l.animationKeys() ?? []).contains{key in let a=l.animation(forKey:key)!;return !a.repeatCount.isFinite || a.repeatCount>1_000_000}},"running orb has no infinite liquid animation")
-        check(configuration().liquidLevel == c.contextShown,"running identity liquid keeps the reported context waterline")
-        check(settle()?.duration == 0.9 && settle()?.repeatCount == 0,"command starts one finite 0.9 second settle")
+        check(configuration().liquidLevel == nil,"running textured identity hides liquid")
+        check(settle() == nil,"textured command does not animate hidden liquid")
         let commandTime=settle()?.beginTime
         let e=emit("item/commandExecution/outputDelta",["threadId":"ambient","turnId":"turn","itemId":"build","delta":"Compiling\n"])
         check(settle()?.beginTime == commandTime,"streaming command output never restarts a settle")
@@ -42,7 +42,7 @@ import QuartzCore
         store.apply(e);refresh()
         check(settle()?.beginTime == outputTime && orb.metrics.liquidPaths == paths,"duplicate event ID cannot submit another settle")
         _=emit("item/completed",["threadId":"ambient","turnId":"turn","item":["id":"build","type":"commandExecution","command":"swift build","status":"completed"]])
-        check(settle() != nil && settle()?.beginTime == outputTime,"step completion merges into the active settle")
+        check(settle() == nil,"textured step completion does not animate hidden liquid")
         let stepTime=settle()?.beginTime
         EventReducer.apply(.init(id:999,time:200,method:"item/commandExecution/outputDelta",params:["threadId":"ambient","turnId":"turn","itemId":"build","delta":"history"]),to:c)
         store.changed(c);refresh()
@@ -50,7 +50,7 @@ import QuartzCore
         var reduced=configuration();reduced.reduceMotion=true;orb.configure(reduced)
         check(settle()==nil,"Reduce Motion removes the finite event settle")
         _=emit("turn/completed",["threadId":"ambient","turn":["id":"turn","status":"completed"]])
-        check(configuration().liquidLevel == c.contextShown,"idle liquid restores the reported context waterline")
+        check(configuration().liquidLevel == nil,"idle textured identity hides liquid")
         let dots=DotsLayer();dots.frame=CGRect(x:0,y:0,width:12,height:12);dots.configure(.compact,color:.labelColor,scale:2)
         check(loops(dots)==0,"brief working dots have no idle loop")
         let header=IslandWorkingDots();header.configure(paused:false,reduced:false,scale:2,now:CACurrentMediaTime())
@@ -119,18 +119,17 @@ import QuartzCore
                 return surface.position.y-surface.bounds.minY
             }
             for (name,orb) in orbs {
-                let d=orb.verificationMotionLayers[3].bounds.width
-                record(orb.verificationLiquidLevel == 0.3 && abs(boundary(orb)-d*0.7)<1e-6,
-                       "\(name) running context 30% has a 30% liquid mask @\(Int(scale))x")
+                record(orb.verificationLiquidLevel == nil,
+                       "\(name) running textured identity hides liquid at 30% @\(Int(scale))x")
                 image(orb,name+"-running-30",scale)
             }
             c.contextUsed=0.88;c.running=false;refresh()
             let idle=orbs.map {boundary($0.1)}
             c.running=true;refresh()
             for (i,pair) in orbs.enumerated() {
-                let (name,orb)=pair,d=orb.verificationMotionLayers[3].bounds.width
-                record(orb.verificationLiquidLevel == 0.88 && abs(boundary(orb)-d*0.12)<1e-6 && boundary(orb)==idle[i],
-                       "\(name) idle and running context 88% have identical liquid masks @\(Int(scale))x")
+                let (name,orb)=pair
+                record(orb.verificationLiquidLevel == nil && boundary(orb)==idle[i],
+                       "\(name) idle and running textured identity hides liquid @\(Int(scale))x")
                 image(orb,name+"-running-88",scale)
             }
             c.contextUsed=0.3;refresh();CATransaction.flush()
@@ -142,15 +141,13 @@ import QuartzCore
                 let surface=orb.verificationMotionLayers[3] as! CAShapeLayer
                 let d=surface.bounds.width,animation=surface.animation(forKey:"eventSettle") as? CAKeyframeAnimation
                 let paths=animation?.values as? [CGPath] ?? []
-                let correct=abs(boundary(orb)-d*0.7)<1e-6 && paths.count==25 && animation?.duration==0.9
-                    && animation?.repeatCount==0 && animation?.isRemovedOnCompletion==true
-                    && paths.contains{$0.boundingBox.minY < -0.2} && paths.last?.boundingBox.minY==0
+                let correct=orb.verificationLiquidLevel == nil && animation == nil
                 observations.append(["host":name,"scale":scale,"drawingSize":d,"liquidLevel":orb.verificationLiquidLevel ?? -1,
                                      "waterlineY":boundary(orb),"keyframes":paths.count,"duration":animation?.duration ?? -1,
                                      "repeatCount":animation?.repeatCount ?? -1,"running":orb.verificationConfiguration?.running ?? false,
                                      "reduced":orb.verificationConfiguration?.reduceMotion ?? true,"ambient":orb.verificationConfiguration?.ambient ?? false])
                 settledAtContext.append(correct)
-                record(correct,"\(name) event submits one finite visible settle at context 30% @\(Int(scale))x")
+                record(correct,"\(name) textured event does not animate liquid @\(Int(scale))x")
                 let began=animation?.beginTime,draws=orb.metrics.liquidPaths
                 refresh();store.changed(c);refresh()
                 record(surface.animation(forKey:"eventSettle")?.beginTime==began && orb.metrics.liquidPaths==draws,

@@ -9,11 +9,13 @@ import AppKit
 }
 
 @MainActor protocol IslandOrbDragProvider: AnyObject {
+    func routeOrbInput(from island: HeaderIsland, event: NSEvent) -> Bool
     func beginOrbDrag(from island: HeaderIsland, event: NSEvent) -> (any IslandOrbDragGesture)?
     @discardableResult func cancelOrbDrag() -> Bool
     func prepareOrbDrag(from island:HeaderIsland)
 }
 extension IslandOrbDragProvider {
+    func routeOrbInput(from island: HeaderIsland, event: NSEvent) -> Bool { false }
     @discardableResult func cancelOrbDrag()->Bool { false }
     func prepareOrbDrag(from island:HeaderIsland) {}
 }

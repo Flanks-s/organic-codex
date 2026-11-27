@@ -40,6 +40,8 @@ struct NormieGitReview: Equatable {
     var revert: ((Conversation, NormieGitReview) -> Void)?
     var compact: ((Conversation) -> Void)?
     var subAgent: ((Conversation, Satellite) -> Void)?
+    var referencePreview: (@MainActor (ReferenceTarget, Conversation) async -> TranscriptReferencePreview)?
+    var referenceWeb: ((URL) -> Void)?
     var chooseWorkspace: ((NormieNewChatContext, @escaping @MainActor (Project?) -> Void) -> Void)?
     var configureComposer: ((NativeComposer, Conversation?) -> Void)?
     var command: ((NormieCommand, Int) -> Void)?

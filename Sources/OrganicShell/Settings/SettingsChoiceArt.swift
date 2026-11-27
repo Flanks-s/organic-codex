@@ -1,6 +1,6 @@
 import AppKit
 
-/// Independent AppKit copy of ChoiceCards/ChoiceArt/AppearanceModes (SettingsComponents.swift:257–392).
+/// Independent AppKit copy of ChoiceCards/ChoiceArt (SettingsComponents.swift:257–392).
 /// Geometry is the artwork's actual geometry; neither letters nor a native bezel are stretched into a thumbnail.
 @MainActor final class SettingsChoiceArt:SettingsButton {
     var value="",art="",selected=false,caption=""
@@ -9,19 +9,12 @@ import AppKit
     override var isFlipped:Bool{true}
     override func accessibilityValue()->Any?{selected ? 1:0}
     override func draw(_ dirtyRect:NSRect){
-        let modes=art == "modes",w:CGFloat=modes ? 66:70,h:CGFloat=modes ? 44:46
+        let w:CGFloat=70,h:CGFloat=46
         let r=CGRect(x:(bounds.width-w)/2,y:0,width:w,height:h),accent=SettingsDrawing.palette(self).accent
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(roundedRect:r,xRadius:modes ? 7:8,yRadius:modes ? 7:8).addClip()
+        NSBezierPath(roundedRect:r,xRadius:8,yRadius:8).addClip()
         NSColor.textBackgroundColor.setFill();r.fill()
-        if modes {
-            let parts=value == "auto" ? [true,false]:[value == "light"]
-            for (i,light) in parts.enumerated(){let x=r.minX+CGFloat(i)*w/CGFloat(parts.count),rw=w/CGFloat(parts.count)
-                SettingsDrawing.hex(light ? "#d8dde4":"#2a2d33").setFill();CGRect(x:x,y:0,width:rw,height:h).fill()
-                SettingsArt.plate(CGRect(x:x+6,y:9,width:26,height:22),radius:3,color:light ? .white:SettingsDrawing.hex("#45484f"))
-                SettingsArt.plate(CGRect(x:x+10,y:14,width:12,height:3),radius:1.5,color:accent)
-            }
-        } else if art == "glass" {
+        if art == "glass" {
             SettingsArt.diagonalGradient([SettingsDrawing.hex("#3bafc2",alpha:0.55),SettingsDrawing.hex("#57c27a",alpha:0.55)],in:r)
             let p=CGRect(x:r.minX+5,y:5,width:22,height:36)
             SettingsArt.plate(p,radius:5,color:.white.withAlphaComponent(value == "clear" ? 0.10:0.32))
@@ -45,7 +38,7 @@ import AppKit
         }
         NSGraphicsContext.restoreGraphicsState()
         (selected ? accent:NSColor.white.withAlphaComponent(0.12)).setStroke()
-        let line:CGFloat=selected ? 2.5:1,path=NSBezierPath(roundedRect:r.insetBy(dx:line/2,dy:line/2),xRadius:modes ? 7:8,yRadius:modes ? 7:8);path.lineWidth=line;path.stroke()
+        let line:CGFloat=selected ? 2.5:1,path=NSBezierPath(roundedRect:r.insetBy(dx:line/2,dy:line/2),xRadius:8,yRadius:8);path.lineWidth=line;path.stroke()
         SettingsDrawing.text(caption,in:CGRect(x:0,y:h+5,width:bounds.width,height:16),font:.systemFont(ofSize:11,weight:selected ? .semibold:.regular),color:selected ? .labelColor:.secondaryLabelColor,alignment:.center)
     }
 }
@@ -60,7 +53,7 @@ import AppKit
         setAccessibilityRole(.group);setAccessibilityLabel(title);needsLayout=true
     }
     override func draw(_ dirtyRect:NSRect){}
-    override func layout(){super.layout();let width:CGFloat=art == "modes" ? 66:70,gap:CGFloat=art == "modes" ? 14:10
+    override func layout(){super.layout();let width:CGFloat=70,gap:CGFloat=10
         for (i,c) in cards.enumerated(){c.frame=SettingsDrawing.align(CGRect(x:CGFloat(i)*(width+gap),y:0,width:width,height:66),window?.backingScaleFactor ?? 2)}}
     override func mouseDown(with event:NSEvent){}
     override func keyDown(with event:NSEvent){

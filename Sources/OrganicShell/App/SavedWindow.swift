@@ -16,6 +16,12 @@ struct SavedWindow: Codable {
     var layout: String? = nil
     var split: [String]? = nil
     var splitFocus: String? = nil
+    var splitPresentationVersion: Int? = nil
+    var leftBank: [String]? = nil
+    var rightBank: [String]? = nil
+    /// Legacy explicit banks remain readable; new records use leftBank and rightBank.
+    var left: [String]? = nil
+    var right: [String]? = nil
     /// New Chat not sent yet (WindowState composingNew, draft, project, device). Its files wait on the input sidecar (f107).
     var composingNew: Bool? = nil
     var draft: String? = nil
@@ -42,7 +48,14 @@ struct SavedWindow: Codable {
                                 members: w.scene.members.map(\.id), current: current,
                                 collapsed: normal == nil ? nil : true, selection: normal?.shown)
         if w.scene.isFocused && !w.scene.composingNew {
-            saved.layout = "focused"; saved.split = w.scene.scheme.split; saved.splitFocus = w.scene.focusTarget
+            saved.layout = "focused"
+            saved.split = w.scene.scheme.split
+            saved.splitFocus = w.scene.scheme.split.first {
+                w.scene.composers.existingComposer(for: $0)?.editorFocused == true
+            }
+            saved.splitPresentationVersion = SplitPresentationLayout.version
+            saved.leftBank = w.scene.scheme.left
+            saved.rightBank = w.scene.scheme.right
         }
         if normie ? w.workbench.composingNew : w.scene.composingNew {
             let context = normie ? w.workbench.newContext : w.scene.draftContext

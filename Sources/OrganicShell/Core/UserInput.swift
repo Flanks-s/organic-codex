@@ -10,9 +10,11 @@ struct UserInputRequest: Identifiable, Equatable, Sendable {
         var prompt: String
         var options: [Option]
         var isSecret = false
+        var isOther = false
     }
     var id: String
     var questions: [Question]
     var submitting = false
+    var revision = 0
 }
 

@@ -23,9 +23,13 @@ enum CoreResponseValidation {
         return nil
     }
     static func answers(_ values: [String: [String]], request: UserInputRequest) -> String? {
-        guard Set(values.keys) == Set(request.questions.map(\.id)), !request.questions.isEmpty else { return "Answer each question using its original ID." }
-        for q in request.questions {
-            guard let answer = values[q.id], !answer.isEmpty, answer.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else { return "Every question needs a nonempty answer." }
+        guard !request.questions.isEmpty, Set(values.keys).isSubset(of: Set(request.questions.map(\.id))) else {
+            return "Use the original question IDs."
+        }
+        for answer in values.values {
+            guard !answer.isEmpty, answer.allSatisfy({
+                !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }) else { return "Every supplied answer must be nonempty." }
         }
         return nil
     }

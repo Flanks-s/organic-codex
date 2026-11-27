@@ -202,6 +202,7 @@ import CoreText
     /// Native, over the column, when there is a window; tests keep the drawn header. With it, the state goes in its
     /// nameplate and no longer under the brief (DECISIONS #2).
     var island: HeaderIsland?
+    var browserAttachment: BrowserColumnAttachment?
     var islandVariant = HeaderIslandVariant.brief
     var islandFrom = HeaderIslandVariant.brief
 
@@ -236,13 +237,31 @@ import CoreText
         capsuleTitle.transform = CATransform3DMakeScale(h.titleScale, h.titleScale, 1)
     }
 
-    var modeBriefs:[ModeBriefKey:(log:SummaryLog,layout:BriefLayout)]=[:]
+    var modeBriefs: [ModeBriefKey: (log: SummaryLog, signature: [ModeBriefSource], layout: BriefLayout)] = [:]
+    let richIndex = TranscriptContentIndex()
+    var richCovers: RichCoverAssets?
+    var coverVersion = 0
+    var coverTickets: [NativeFileCover.Key: RichCoverAssets.Ticket] = [:]
+    var coverPins: [NativeFileCover.Key: RichCoverAssets.Pin] = [:]
+    var coverFailed: Set<NativeFileCover.Key> = []
+    var onCoversChanged: ((String) -> Void)?
+
+    func releaseCovers() {
+        if let richCovers {
+            for ticket in coverTickets.values { richCovers.cancel(ticket) }
+            for pin in coverPins.values { richCovers.release(pin) }
+        }
+        coverTickets.removeAll()
+        coverPins.removeAll()
+        coverFailed.removeAll()
+    }
     var snapshots: [Snapshot.Key: Snapshot] = [:]
     var applied: Snapshot.Key?
     var displayWidths: (full:CGFloat, brief:CGFloat)?
     var idleRowConfigurationDirty=false
     /// The window moved to a screen of another density. Every capture and cut is in pixels of the old one.
     func backingChanged(_ next: CGFloat) {
+        releaseCovers()
         scale = next
         for l in [card, separator, planet, capsule, capsuleTitle, transcriptClip, transcript, goalText, brief, briefContent,
                   presenceMaterial, cardBody, cardSweep, separatorSweep, separatorSweepMask, inkMaterial, presenceTrail, presenceInk] {

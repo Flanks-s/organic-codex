@@ -89,7 +89,8 @@ import QuartzCore
             let logicalWidth: CGFloat = variant == .full ? 495:305
             let column=ColumnNode(c,store:store,identity:.white,rect:CGRect(x:0,y:0,width:logicalWidth,height:800),full:variant == .full,scale:scale,logicalBottom:760)
             let header=HeaderIsland(); column.attachIsland(header)
-            var time=CACurrentMediaTime()+3600, serial=0
+            // A board trace is a deterministic clock fixture; machine uptime must not move its expiry tick.
+            var time=4096.0, serial=0
             header.now={time}
             func configure(_ v:HeaderIslandVariant?=nil) { column.configureIsland(v ?? variant,width:logicalWidth) }
             func emit(_ method:String,_ p:JSONValue=[:]) {

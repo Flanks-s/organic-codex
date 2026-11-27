@@ -10,11 +10,12 @@ import QuartzCore
         var covers: (CGPoint) -> Bool = { _ in false }
         var click: ((CGPoint) -> Void)?
         var scroll: ((CGFloat, CGPoint) -> Void)?
+        var orbInput: ((NSEvent) -> Bool)?
         override var isFlipped: Bool { true }
-        override func mouseDown(with event: NSEvent) { click?(convert(event.locationInWindow, from: nil)) }
+        override func mouseDown(with event: NSEvent) { if orbInput?(event) != true { click?(convert(event.locationInWindow, from: nil)) } }
         override func mouseDragged(with event: NSEvent) {}
         override func mouseUp(with event: NSEvent) {}
-        override func rightMouseDown(with event: NSEvent) {}
+        override func rightMouseDown(with event: NSEvent) { _ = orbInput?(event) }
         override func pressureChange(with event: NSEvent) {}
         override func scrollWheel(with event: NSEvent) { scroll?(event.scrollingDeltaY, convert(event.locationInWindow, from: nil)) }
         override func hitTest(_ point: NSPoint) -> NSView? {
@@ -25,24 +26,39 @@ import QuartzCore
         }
     }
 
-    /// A visual endpoint only: the existing Peek surface keeps all pointer and scroll ownership.
+    /// Ordinary header controls own native hits; the surrounding canvas remains Peek's surface.
     final class HeaderPlane: NSView {
+        var admitsControls=false
         override var isFlipped: Bool { true }
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            guard admitsControls else {return nil}
+            let hit=super.hitTest(point)
+            return hit === self ? nil:hit
+        }
     }
 
     let view = Plane()
     lazy var pointerShield = NativePointerShield(plane: view)
     private var pointerRegions: [CGRect] = []
     private var pointerPassage = CGRect.zero
+    func setReplyPassage(_ rect: CGRect) {
+        pointerPassage = rect.isNull ? .zero : rect
+    }
     func coversPointer(_ p: CGPoint) -> Bool {
         containsPointerSurface(p) && !pointerPassage.contains(p)
     }
     private let root = CALayer()
     // Keep the native endpoint prepared but detached while closed: no extra WindowServer glass at rest.
-    let header = HeaderIsland()
+    let header:HeaderIsland = {
+        let work=M10ColumnWorkTrace.scope("peek.header.construct"),value=HeaderIsland()
+        work.end();return value
+    }()
     private let headerPlane = HeaderPlane()
     private(set) var headerVisible = false
+    var wiredConversation:String?
+    var onHeaderPresentation:(()->Void)?
+    private var generation=0
+    private var headerActive=true
     var headerFrame: CGRect? { headerPlane.superview == nil ? nil : headerPlane.frame }
     func containsPointerSurface(_ p: CGPoint) -> Bool {
         shown != nil && pointerRegions.contains { $0.contains(p) }
@@ -77,32 +93,6 @@ import QuartzCore
     private var imageKey: PeekHalo.Key?
     var scale: CGFloat
     var ambient = true
-    private var satelliteButtons:[String:IslandButton]=[:]
-    private var satelliteOpeners:[String:SatelliteOpener]=[:]
-    func satellites(_ values:[OrbSatellite],positions:[String:CGFloat],rowY:CGFloat,diameter:CGFloat,
-                    open:@escaping (String,CGPoint?)->Void) {
-        let ids=Set(positions.keys)
-        for id in satelliteButtons.keys.filter({!ids.contains($0)}) {
-            satelliteOpeners.removeValue(forKey:id)?.cancel();satelliteButtons.removeValue(forKey:id)?.removeFromSuperview()
-        }
-        for s in values {
-            guard let x=positions[s.id] else{continue}
-            let button=satelliteButtons[s.id] ?? IslandButton()
-            if button.superview == nil {view.addSubview(button);satelliteButtons[s.id]=button}
-            button.drawsText=false;button.circular=true;button.linkCursor=true;button.circularHit=true;button.drawsPointerHighlight=false;button.text="Sub-agent \(s.face), \(s.done ? "done":"running")"
-            button.frame=CGRect(x:x-diameter/2,y:rowY-diameter/2,width:diameter,height:diameter)
-            button.invoke={open(s.id,nil)}
-            let opener=satelliteOpeners[s.id] ?? SatelliteOpener(satellite:s,diameter:diameter)
-            satelliteOpeners[s.id]=opener;opener.satellite=s;opener.diameter=diameter
-            opener.admitted={ [weak self] in self?.shown != nil && self?.satelliteButtons[s.id] === button }
-            opener.open={point in open(s.id,point)}
-            button.beginPointerGesture={ [weak button,weak opener] event in guard let button else{return nil};return opener?.begin(from:button,event:event) }
-        }
-    }
-    func clearSatellites() {
-        satelliteOpeners.values.forEach{$0.cancel()};satelliteOpeners=[:]
-        satelliteButtons.values.forEach{$0.removeFromSuperview()};satelliteButtons=[:]
-    }
     static let feather = PeekHalo.outer
 
     init(size: CGSize, scale: CGFloat) {
@@ -114,6 +104,8 @@ import QuartzCore
         headerPlane.wantsLayer = true
         headerPlane.addSubview(header)
         header.motionExposure.enabled = false
+        header.isHidden=true
+        header.actions.presentation={ [weak self] in self?.placeHeaderPresentation($0) }
         for l in [backdrop, backdropMask, wash, lyrics, content, capsuleShadow] { l.anchorPoint = .zero }
         // M11.13 pixel-aligned exception to product HaloBlur: a distance-field fog, no plate silhouette.
         halo.name = "peek.halo"; backdrop.name = "peek.backdrop"; wash.name = "peek.wash"
@@ -154,23 +146,22 @@ import QuartzCore
 
     /// Opens (or moves to another conversation while open): the halo over `geometry.blur`, the brief in its lyrics.
     func open(_ c: Conversation, geometry g: AutoLayout.Peek, showHeader: Bool = true) {
+        generation+=1
         let moving = shown != nil && halo.opacity > 0
         shown = c.id
         CATransaction.begin(); CATransaction.setDisableActions(true)
         let headerWork = M10ColumnWorkTrace.scope("peek.header")
-        var input = HeaderIslandConfiguration.conversation(c, variant: .brief, columnWidth: g.blur.width,
-                                                          band: HeaderIslandVariant.band(bleedTop: g.blur.minY),
-                                                          reduceMotion: Motion.reduce, ambient: ambient, scale: scale)
-        input.active = false
-        // The existing Peek row owns the satellites; do not draw another orbit above it.
-        input.signals.satellites = []
+        header.isHidden = !showHeader
+        let input=headerInput(c,width:g.blur.width,band:HeaderIslandVariant.band(bleedTop:g.blur.minY))
+        let configureWork=M10ColumnWorkTrace.scope("peek.header.configure")
         header.configure(input)
-        // A passive endpoint must settle immediately when a differently sized Peek replaces it.
-        header.setPresentationActive(false)
+        configureWork.end()
         header.setFrameOrigin(.zero)
         headerPlane.frame = CGRect(x: g.blur.minX, y: 0,
                                   width: header.frame.width, height: header.frame.height)
         if headerPlane.superview == nil { view.addSubview(headerPlane) }
+        // The header was configured before its host moved; resolve LL after the final common-space placement.
+        header.orb.setFrame(header.geometry.planet)
         setHeaderVisible(showHeader)
         headerWork.end()
         // Cover the actual painted header, not its transparent canvas above the Peek. Pointer and halo
@@ -194,6 +185,7 @@ import QuartzCore
         pointerRegions = [g.blur, header.geometry.planet.offsetBy(dx: headerPlane.frame.minX, dy: 0),
                           header.geometry.capsule.offsetBy(dx: headerPlane.frame.minX, dy: 0)]
         pointerPassage = g.capsule
+        placeHeaderPresentation(header.hostPresentation)
         let lyricWork = M10ColumnWorkTrace.scope("peek.lyrics")
         // Match the real brief column's contentTop - 18 clip and existing 16pt gradient. This only changes
         // retained layer geometry; the halo mask/cache and all pointer regions remain independent.
@@ -220,27 +212,78 @@ import QuartzCore
 
     /// The Dock's existing veil finishes before this endpoint appears; this is not an orb flight.
     func setHeaderVisible(_ visible: Bool, duration: Double = 0) {
+        let work=M10ColumnWorkTrace.scope("peek.header.reveal");defer {work.end()}
+        generation+=1
+        let epoch=generation
         headerVisible = visible && shown != nil && headerPlane.superview != nil
+        if headerVisible {header.isHidden=false}
+        placeHeaderPresentation(header.hostPresentation)
+        if !headerVisible {
+            if duration == 0 {header.isHidden=true}
+            else {DispatchQueue.main.asyncAfter(deadline:.now()+duration) { [weak self] in
+                guard let self,self.generation==epoch,!self.headerVisible else {return}
+                self.header.isHidden=true
+            }}
+        }
         guard let layer = headerPlane.layer else { return }
         OverlayMotion.animate(layer, "opacity", from: layer.opacity, to: headerVisible ? 1 : 0,
                               curve: OverlayCurve(0, 0, 0.58, 1, duration), enabled: duration > 0)
     }
 
     private func detachHeader() {
+        let work=M10ColumnWorkTrace.scope("peek.header.detach");defer {work.end()}
         setHeaderVisible(false)
         headerPlane.removeFromSuperview()
+        let epoch=generation
+        DispatchQueue.main.async { [weak self] in
+            guard let self,self.generation==epoch,self.shown == nil else {return}
+            self.header.retireHiddenInteraction()
+        }
+    }
+
+    private func headerInput(_ c:Conversation,width:CGFloat,band:CGFloat)->HeaderIslandConfiguration {
+        var input=HeaderIslandConfiguration.conversation(c,variant:.brief,columnWidth:width,band:band,
+            reduceMotion:Motion.reduce,ambient:ambient,isKeyWindow:view.window?.isKeyWindow ?? true,scale:scale)
+        input.notices=c.notices.snapshot(in:c);input.noticeColumnWidth=width+12
+        return input
+    }
+    func refreshHeader(_ c:Conversation) {
+        guard shown==c.id,let previous=header.configuration,previous.active else {return}
+        header.configure(headerInput(c,width:previous.columnWidth,band:previous.band))
+    }
+    func setHeaderPresentationActive(_ active:Bool) {
+        guard headerActive != active else {return}
+        headerActive=active;header.setPresentationActive(active)
+    }
+    private func placeHeaderPresentation(_ value:HeaderIslandHostPresentation) {
+        guard shown != nil else {return}
+        if let title=header.configuration?.title,header.planetButton.text != "Open "+title {
+            header.planetButton.text="Open "+title;header.planetButton.setAccessibilityHelp("Opens the conversation")
+        }
+        let regions=value.interactiveRegions.map{$0.offsetBy(dx:headerPlane.frame.minX,dy:headerPlane.frame.minY)}
+        pointerRegions=[core]+regions
+        headerPlane.frame.size.height=max(header.frame.height,value.interactiveRegions.map(\.maxY).max() ?? 0)
+        headerPlane.admitsControls=headerVisible && value.acceptsInput
+        header.setAccessibilityHidden(!headerPlane.admitsControls)
+        onHeaderPresentation?()
+    }
+    /// Scene shutdown owns the component's dispose; this only withdraws host callbacks and delayed work.
+    func disposeIslandPresentation() {
+        generation+=1;onHeaderPresentation=nil;header.actions.presentation=nil
+        headerPlane.admitsControls=false;wiredConversation=nil
     }
 
     /// A scroll over the halo (f045 "阅读可滚动"): back towards the brief's first lines, and down to its end again.
     func scroll(by dy: CGFloat) {
         guard shown != nil, scrollRange > 0 else { return }
+        let profile = exposureProfile
         let previous = scrolled
         let previousGlyphs = Dictionary(uniqueKeysWithValues: glyphTrails.map { (ObjectIdentifier($0.layer), $0.layer.convert($0.layer.bounds, to: root)) })
         scrolled = min(scrollRange, max(0, scrolled + dy))
         CATransaction.begin(); CATransaction.setDisableActions(true)
         content.frame.origin.y = restY + scrolled
-        refreshVirtualLyrics(followEnd: scrolled == 0)
-        let delta = scrolled-previous, profile = exposureProfile, now = CACurrentMediaTime()
+        refreshVirtualLyrics(followEnd: scrolled == 0, profile: profile)
+        let delta = scrolled-previous, now = CACurrentMediaTime()
         for (layer, trail) in glyphTrails {
             let r = layer.convert(layer.bounds, to: root)
             let f = M10DockMotion.frame(name: "peek.scroll.glyph", now: r, earlier: previousGlyphs[ObjectIdentifier(layer)] ?? r.offsetBy(dx: 0, dy: -delta), time: now,
@@ -274,7 +317,6 @@ import QuartzCore
     /// The halo closes (peekOpen false): to 70 % and transparent, ease-in 0.23 s.
     func retract() {
         setHeaderVisible(false)
-        clearSatellites()
         OverlayMotion.animate(halo, "opacity", from: halo.opacity, to: 0, curve: OverlayMotion.blurOut)
         OverlayMotion.animate(halo, "transform.scale", from: 1, to: 0.7, curve: OverlayMotion.blurOut)
     }
@@ -282,7 +324,6 @@ import QuartzCore
     /// Gone at once with a short fade, when the peeked orb lands (its column grows where the halo was).
     func dismiss() {
         detachHeader()
-        clearSatellites()
         let fade = OverlayCurve(0, 0, 0.58, 1, 0.12)
         for l in [halo, lyrics] { OverlayMotion.animate(l, "opacity", from: l.opacity, to: 0, curve: fade) }
         shown = nil
@@ -291,7 +332,6 @@ import QuartzCore
     /// Nothing shown any more (shownPeek nil): the rows go.
     func clear() {
         detachHeader()
-        clearSatellites()
         lyricConversation = nil; lyricLayouts = [:]; lyricRows = [:]; lyricHeights.reset([]); mountedLyricCount = 0
         shown = nil
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -376,7 +416,7 @@ import QuartzCore
         lyricDocumentHeight = height
     }
 
-    private func refreshVirtualLyrics(followEnd: Bool = false) {
+    private func refreshVirtualLyrics(followEnd: Bool = false, profile: DisplayProfile? = nil) {
         guard let c = lyricConversation, lyricCount > 0 else { mountedLyricCount = 0; return }
         let anchorIndex = lyricHeights.row(at: -content.frame.minY)
         let anchorY = content.frame.minY + lyricHeights.prefix(anchorIndex)
@@ -430,7 +470,9 @@ import QuartzCore
             }
             content.addSublayer(row); lyricRows[line] = resident; entered.append(line)
         }
-        if lyricEntranceTime.isFinite { for line in entered { enterRow(line) } }
+        if lyricEntranceTime.isFinite {
+            entered.forEach { enterRow($0, profile: profile) }
+        }
         rows = (first...last).compactMap { lyricRows[$0]?.layer }
         glyphTrails = (first...last).flatMap { lyricRows[$0]?.glyphs ?? [] }
         movingDots = (first...last).flatMap { lyricRows[$0]?.dots ?? [] }
@@ -445,7 +487,7 @@ import QuartzCore
         for line in Array(lyricRows.keys) { enterRow(line) }
         rowTrails = lyricRows.values.compactMap(\.trail)
     }
-    private func enterRow(_ line: Int) {
+    private func enterRow(_ line: Int, profile: DisplayProfile? = nil) {
         guard var resident = lyricRows[line] else { return }
         let row = resident.layer, order = Double(min(lyricCount - 1 - line, 8))
         guard CACurrentMediaTime() < lyricEntranceTime + order * 0.03 + 1.5 else { return }
@@ -459,7 +501,7 @@ import QuartzCore
         }
         if motionEnabled, M10DockMotion.enabled, !Motion.reduce {
             resident.trail = M10DockRowTrail.install(on: row, distance: 18, response: 0.55, damping: 0.92,
-                                                     profile: exposureProfile, begin: lyricEntranceTime + order * 0.03)
+                profile: profile ?? exposureProfile, begin: lyricEntranceTime + order * 0.03)
         }
         lyricRows[line] = resident
     }

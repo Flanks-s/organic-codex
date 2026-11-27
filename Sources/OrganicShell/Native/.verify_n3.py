@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# RETIRED (#186, 2026-11-12): historical comparison. Kept, not deleted (#181).
 """N3 isolated -O component checks. Dependencies come from git HEAD, never concurrent Core/Debug edits."""
 import argparse
 import io

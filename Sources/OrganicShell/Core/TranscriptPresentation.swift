@@ -30,6 +30,26 @@ struct TranscriptActivityPart: Equatable, Sendable {
 
 /// Display-only decisions. No state, transport, persistence or attributed-text IO.
 enum TranscriptPresentation {
+    enum ProjectedRow: Equatable {
+        case item(TranscriptItem)
+        case quote(SidechatQuote)
+    }
+
+    static func rows(items: [TranscriptItem], quotes: [SidechatQuote]) -> [ProjectedRow] {
+        guard !quotes.isEmpty else { return items.map(ProjectedRow.item) }
+        let ordered = quotes.sorted { ($0.order, $0.id) < ($1.order, $1.id) }
+        var ends: [String: Int] = [:]
+        for (index, item) in items.enumerated() { ends[item.turnID] = index }
+        let anchored = Dictionary(grouping: ordered) { $0.anchorTurnID.flatMap { ends[$0] } }
+        var rows: [ProjectedRow] = []
+        for (index, item) in items.enumerated() {
+            rows.append(.item(item))
+            rows.append(contentsOf: (anchored[index] ?? []).map(ProjectedRow.quote))
+        }
+        rows.append(contentsOf: (anchored[nil] ?? []).map(ProjectedRow.quote))
+        return rows
+    }
+
     static func presentation(for item: TranscriptItem) -> RowPresentation {
         let label: String, symbol: String?
         switch item.rowKind {
@@ -118,7 +138,7 @@ enum TranscriptPresentation {
         let status = presentation.statusKind
         switch item.rowKind {
         case .reasoning:
-            say(presentation.isProgress ? "Thinking" : "Thought for \(thoughtSeconds(item))s")
+            say(presentation.isProgress ? "Thinking" : thoughtSeconds(item).map { "Thought for \($0)s" } ?? "Thought")
         case .tool(.fileChange):
             let verb = switch status {
             case .progress: "Editing "
@@ -162,12 +182,17 @@ enum TranscriptPresentation {
         guard items.indices.contains(index), index > 0, items[index].rowKind == .assistant,
               isActivity(items[index - 1].rowKind), items[index - 1].turnID == items[index].turnID,
               !presentation(for: items[index]).isProgress else { return nil }
-        let seconds = [8, 14, 23, 41, 64, 107, 172][seed(items[index].id) % 7]
+        let timing = items[index].coreTiming
+        let seconds = timing == nil ? [8, 14, 23, 41, 64, 107, 172][seed(items[index].id) % 7] : timing?.seconds()
+        guard let seconds else { return nil }
         return "Worked for " + (seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s")
     }
 
     /// How long a finished thought took, stable per row.
-    static func thoughtSeconds(_ item: TranscriptItem) -> Int { [2, 3, 4, 6, 8, 11, 14][seed(item.id) % 7] }
+    static func thoughtSeconds(_ item: TranscriptItem) -> Int? {
+        if let timing = item.coreTiming { return timing.seconds(scale: 1000) }
+        return [2, 3, 4, 6, 8, 11, 14][seed(item.id) % 7]
+    }
 
     static func seed(_ text: String) -> Int {
         text.unicodeScalars.reduce(7) { ($0 &* 31 &+ Int($1.value)) & 0xFFFF }

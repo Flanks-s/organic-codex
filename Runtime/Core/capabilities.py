@@ -33,6 +33,13 @@ def capabilities(core):
         'git': feature(('POST','/workspace/git/status') in core.routes and shutil.which('git'), 'Workspace adapter or Git executable unavailable'),
         'terminal': feature(('POST','/terminal/open') in core.routes, 'Workspace terminal adapter unavailable', maxBufferBytes=262144),
     }
+    sidechats = getattr(core, "sidechats", None)
+    reason = "Official App Server is disconnected"
+    if connected and sidechats is not None:
+        reason = sidechats.reason
+    if getattr(core, "app_server_diagnostics", False):
+        reason = "App Server diagnostics are enabled"
+    result["sidechat"] = feature(not reason, reason)
     return {'version': '26102601', 'features': result,
             'paths': {'dataDir': str(paths.data), 'workRoot': str(paths.work), 'resources': str(paths.resources)},
             'routes': sorted(method+' '+url for method, url in core.routes)}

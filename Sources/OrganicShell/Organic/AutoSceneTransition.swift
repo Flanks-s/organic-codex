@@ -16,6 +16,7 @@ extension AutoScene {
         let changing: Set<String>, moving: Set<String>, entering: Set<String>, going: Set<String>
         let snapshots: [String: ColumnNode.Snapshot]
         let reflows: [String: ColumnFullReflow]
+        var deferred: [String: DeferredTarget] = [:]
         let presenceInk: [String: [M10ColumnInkTile]]
         let gaussian:[String:M10ColumnGaussianAsset]
         let flights: [String: [FlightNode]]
@@ -26,19 +27,35 @@ extension AutoScene {
         let fromRest: Bool
         let columnMotion: [String:M10ColumnPlan]
         let presenceMappings: [String:ColumnNode.PresenceMapping]
+        var splitCertificate: SplitPresentationLayout.Plan? = nil
         /// The slot index of the new full column, for receipts.
         var index: Int { order.firstIndex(of: current) ?? 0 }
     }
 
-    func prepare(members nextMembers: [Conversation], current nextCurrent: String, scheme nextScheme: Scheme? = nil, at now: Double,
-                         spring: (response: Double, damping: Double) = Tuning.shared.autoSpring) -> Prepared {
+    func prepare(members nextMembers: [Conversation], current requestedCurrent: String,
+                 scheme nextScheme: Scheme? = nil, at now: Double,
+                 spring: (response: Double, damping: Double) = Tuning.shared.autoSpring,
+                 retainingFocusedOrb: String? = nil,
+                 deferVisibleReflow: Bool = false) -> Prepared {
+        let fitted = fittingSplitTarget(members: nextMembers, current: requestedCurrent, scheme: nextScheme ?? scheme)
+        let nextCurrent = fitted.current
+        var targetScheme = fitted.scheme
+        if targetScheme.mode == .focused {
+            var existing = Set(members.map(\.id))
+            if let retainingFocusedOrb {
+                existing.insert(retainingFocusedOrb)
+            }
+            targetScheme.left.removeAll { !existing.contains($0) }
+            targetScheme.right.removeAll { !existing.contains($0) }
+            targetScheme.parked.removeAll { !existing.contains($0) }
+        }
+        let sch = targetScheme.balanced(members: nextMembers.map(\.id))
         let work=M10ColumnWorkTrace.scope("scene.prepare",["target":nextCurrent]);defer{work.end()}
         M10ColumnWorkTrace.count("scene.prepare.entry",["target":nextCurrent,"result":"miss","reason":"synchronous-fallback-or-explicit-fixture"])
         if ModeSignposts.enabled {ModeSignposts.Trace().record("OrganicPrepare",detail:"target=\(nextCurrent) miss synchronous-fallback-or-explicit-fixture")}
 
         // A window can have moved to another display since its last transition. Offscreen/injected profiles stay put.
         if let screen=sceneView.window?.screen { profile=DisplayProfile.of(screen) }
-        let sch = nextScheme ?? scheme
         let contentTop=fullContentTop(for:sch)
         var mark = CACurrentMediaTime(), breakdown: [String: Double] = [:]
         func lap(_ name: String) { let t = CACurrentMediaTime(); breakdown[name, default: 0] += (t - mark) * 1000; mark = t }
@@ -51,7 +68,9 @@ extension AutoScene {
         let reach = Double(max(size.width, size.height))
         let involved = columns + leaving.values + shown.filter { id in !columns.contains { $0.conversation.id == id } && leaving[id] == nil }
             .compactMap { id in nodes[id] ?? node(id, slot: shown.firstIndex(of: id)!, in: next) }
+        let admitWork = M10ColumnWorkTrace.scope("scene.admitUnmountedTranscripts")
         admitUnmountedTranscripts(involved)
+        admitWork.end()
         // The springs on screen now, for what was drawn before this transition (the exposure looks one frame back).
         var previous: [String: (rect: RectSpring, form: Spring, presence: Spring)] = [:]
         for column in involved {
@@ -99,6 +118,7 @@ extension AutoScene {
         // nothing applied yet).
         var snapshots: [String: ColumnNode.Snapshot] = [:]
         var reflows: [String: ColumnFullReflow] = [:]
+        var deferred: [String: DeferredTarget] = [:]
         for column in involved {
             let id = column.conversation.id
             let fullSlot=shown.firstIndex(of:id),fullOldSlot=columns.firstIndex{$0===column} ?? fullSlot ?? 0
@@ -107,11 +127,34 @@ extension AutoScene {
             // target from the first frame, over the next column (header orb reorder, board 10-31).
             let moves=abs(rects[id]!.target.minX-column.rect.sample(t).rect.minX)>0.5/scale
             if column.form.to>0.5,forms[id]!.to>0.5,(widthChanges || moves || presence[id]!.duration>0) {
+                if deferVisibleReflow, entering.contains(id), presence[id]!.duration > 0, let slot = fullSlot,
+                   column.canPrepareTargetInIdle(fullWidth: fullWidth(slot, next), contentTop: contentTop) {
+                    let full = fullWidth(slot, next), brief = briefWidth(slot, next)
+                    let area = column.expectedTargetArea(fullWidth: full, contentTop: contentTop)
+                    if let reflow = ColumnFullReflow(from: [], pending: area, width: rects[id]!.w, scale: scale) {
+                        reflows[id] = reflow
+                        deferred[id] = DeferredTarget(full: full, brief: brief, top: contentTop, reflow: reflow)
+                        continue
+                    }
+                }
                 // Full-state presence needs the same native/screenshot exchange as a form flight. It must not
                 // leave the actual NSTextView opaque above a shrinking/fading card. On interrupted width reflow
                 // retain the CURRENT mixture, rather than jumping to its target layout while leaving.
                 let mixture=column.fullMaterials(at:t),hadReflow=column.hasFullReflow
                 if column.hasContinuedTranscriptFlights { moving.remove(id) }
+                if deferVisibleReflow, widthChanges, let slot = fullSlot,
+                   columns.contains(where: { $0 === column }), !column.native.isHidden,
+                   column.canPrepareTargetInIdle(fullWidth: fullWidth(slot, next), contentTop: contentTop) {
+                    let full = fullWidth(slot, next), brief = briefWidth(slot, next)
+                    let area = column.expectedTargetArea(fullWidth: full, contentTop: contentTop)
+                    let departure = column.alignFullMaterials(mixture, to: area.minY)
+                    if let reflow = ColumnFullReflow(from: departure, pending: area,
+                                                     width: rects[id]!.w, scale: scale) {
+                        reflows[id] = reflow
+                        deferred[id] = DeferredTarget(full: full, brief: brief, top: contentTop, reflow: reflow)
+                        continue
+                    }
+                }
                 let target=column.snapshot(fullWidth:fullSlot.map{fullWidth($0,next)} ?? column.rect.target.width,
                                            briefWidth:fullSlot.map{briefWidth($0,next)} ?? briefWidth(fullOldSlot,layout), contentTop:fullSlot == nil ? column.fullContentTop:contentTop)
                 snapshots[id]=target
@@ -207,11 +250,13 @@ extension AutoScene {
         var gaussian:[String:M10ColumnGaussianAsset]=[:]
         for column in involved where column.gaussianEnabled && presence[column.conversation.id]!.duration>0 {
             let id=column.conversation.id
+            if deferred[id] != nil { continue }
             gaussian[id]=column.prepareGaussian(snapshot:snapshots[id],reflow:reflows[id],timeline:timeline,forms:timeline.map{forms[id]!.sample($0).value},hideGoals:moving.contains(id),tracks:tracks)
         }
         var ink: [String: [M10ColumnInkTile]] = [:]
         for column in involved where !column.gaussianEnabled && column.m10Frames["zoom"]?.contains(where: { $0.sample.count > 1 }) == true {
             let id=column.conversation.id
+            if deferred[id] != nil { continue }
             if let reflow=reflows[id],let snapshot=snapshots[id] {
                 ink[id]=column.prepareReflowInk(reflow,snapshot:snapshot,tracks:tracks)
             } else if forms[id]!.duration>0 {
@@ -229,15 +274,22 @@ extension AutoScene {
         lap("exposureInk")
         return Prepared(members: nextMembers, current: nextCurrent, scheme: sch, next: next, order: nextOrder, rects: rects, forms: forms, presence: presence,
                         dock: dockSprings, changing: changing, moving: moving, entering: entering, going: going,
-                        snapshots: snapshots, reflows: reflows, presenceInk: ink, gaussian:gaussian, flights: newFlights, tracks: tracks, duration: duration, samples: timeline.times.count,
+                        snapshots: snapshots, reflows: reflows, deferred: deferred, presenceInk: ink,
+                        gaussian: gaussian, flights: newFlights, tracks: tracks, duration: duration,
+                        samples: timeline.times.count,
                         flightCount: flightCount, peak: peak, smeared: smeared, revisions: revisions, fromRest: !isMoving,
                         columnMotion:Dictionary(uniqueKeysWithValues:involved.map { ($0.conversation.id,M10ColumnPlan(times:timeline.times,materials:$0.m10Frames)) }),
                         presenceMappings:Dictionary(uniqueKeysWithValues:involved.map {($0.conversation.id,$0.presenceMapping)}))
     }
 
-    func prepareInIdle(members nextMembers: [Conversation], current nextCurrent: String, scheme nextScheme: Scheme? = nil, at now: Double,
-                         spring: (response: Double, damping: Double) = Tuning.shared.autoSpring, idle:M11IdlePreparation) async throws -> Prepared {
-        let sch=nextScheme ?? scheme,contentTop=fullContentTop(for:nextScheme ?? scheme)
+    func prepareInIdle(members nextMembers: [Conversation], current requestedCurrent: String,
+                       scheme nextScheme: Scheme? = nil, at now: Double,
+                       spring: (response: Double, damping: Double) = Tuning.shared.autoSpring,
+                       idle: M11IdlePreparation) async throws -> Prepared {
+        let fitted = fittingSplitTarget(members: nextMembers, current: requestedCurrent, scheme: nextScheme ?? scheme)
+        let nextCurrent = fitted.current
+        let sch = fitted.scheme
+        let contentTop = fullContentTop(for: sch)
         try await idle.step("plan.geometry") {}
         let t = now - began
         let (next, nextOrder) = arrange(nextMembers, current: nextCurrent, scheme: sch)
@@ -414,7 +466,9 @@ extension AutoScene {
                         columnMotion:motions,presenceMappings:mappings)
     }
 
-    func transition(to next: [Conversation], current c: String, scheme sch: Scheme, spring: (response: Double, damping: Double), reason: String) {
+    func transition(to next: [Conversation], current c: String, scheme sch: Scheme,
+                    spring: (response: Double, damping: Double), reason: String,
+                    retainingFocusedOrb: String? = nil) {
         M10ColumnWorkTrace.beginWindow("scheme")
         let work=M10ColumnWorkTrace.scope("scene.transition",["reason":reason]);defer{work.end()}
         let start = CACurrentMediaTime()
@@ -440,19 +494,69 @@ extension AutoScene {
         discardNewChatPreparation()
         for other in prewarmed.values { unstage(other) }
         prewarmed = [:];lastPrewarmClear="transition"
-        commit(hit ? cached!.plan:prepare(members: next, current: c, scheme: sch, at: now(), spring: spring), reason: reason, prewarmed: hit, start: start)
+        let plan = hit ? cached!.plan : prepare(members: next, current: c, scheme: sch, at: now(), spring: spring,
+                                                retainingFocusedOrb: retainingFocusedOrb)
+        commit(plan, reason: reason, prewarmed: hit, start: start)
     }
 
-    func commit(_ p: Prepared, reason: String, prewarmed hit: Bool, start: Double) {
+    func commit(_ p: Prepared, reason: String, prewarmed hit: Bool, start: Double,
+                structureClaim: OrganicStructureOwner.Claim? = nil) {
+        if let plan = p.splitCertificate {
+            guard validatesSplit(plan), structureClaim != nil,
+                  p.current == plan.current, p.scheme.split == plan.split,
+                  p.members.map(\.id) == members.map(\.id) else { return }
+        }
+        if let structureClaim {
+            guard let source = orbTrash.project(),
+                  structureOwner.validate(structureClaim, window: source.windowID,
+                                          revision: source.revision) else { return }
+        }
+        let certified = p.splitCertificate != nil || structureClaim != nil
+        let ticket = certified ? structureOwner.beginCommit(claim: structureClaim) : nil
+        guard !certified || ticket != nil else { return }
+        if !certified { structureOwner.beginOrdinaryCommit() }
+        functionPanelTransitionWillCommit(p, reason: reason)
+        defer {
+            structureOwner.finishCommit(ticket)
+            onSplitEligibilityChanged?()
+        }
+        onLongIndexSourceWillChange?()
+        dock.admitSplitSources(certified: p.splitCertificate != nil)
+        if p.splitCertificate != nil, scheme.mode == .auto { autoSnapshot = (members, current, scheme.parked) }
+        reconcileSplitCompare(next: p.scheme)
+        sunHover?.retire(resumeTide: false)
         let work=M10ColumnWorkTrace.scope("scene.commit",["reason":reason,"hit":hit,"flights":p.flightCount]);defer{work.end()}
         discardNewChatPreparation()
         // A transition ends a peek at once (the bud's glass is taken over where it is); see DECISIONS #7.
-        dismissPeek()
+        if let host = peekReply {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            if dock.holdSplitReply(host, segments: p.scheme.split, layout: p.next) {
+                peekReply = nil
+                for item in p.going.compactMap({ dock.items[$0] }) where !item.full && item.conversation.draft.isEmpty {
+                    item.wordGaussian.reset()
+                    item.wordTrail.reset()
+                    item.label.layer?.removeAllAnimations()
+                    item.label.alphaValue = 0
+                }
+            }
+            dismissPeek()
+            CATransaction.commit()
+        } else {
+            dismissPeek()
+        }
+        cancelDeferredTargets()
         cancelIdlePreparation();prewarmTask?.cancel();prewarmTask=nil;prewarmScheduled=false;prewarmQueue=nil
         let now = self.now(), interrupted = isMoving
         let preparedAt = CACurrentMediaTime()
         let membersChanged = members.map(\.id) != p.members.map(\.id)
-        members = p.members; current = p.current; order = p.order; scheme = p.scheme
+        members = p.members
+        current = p.current
+        order = p.order
+        scheme = p.scheme
+        orbTrash.committed(reason:reason,next:p.next)
+        browserPort?.committed(in: self, layout: p.next)
+        if membersChanged { sunHover?.refreshData() }
         if membersChanged { onMembersChange?(members) }
         let shown = Array(p.order.prefix(p.next.columns.count))
         columns = shown.compactMap { nodes[$0] }
@@ -514,8 +618,10 @@ extension AutoScene {
         columnMotionPlans=p.columnMotion
         dock.still = isFocused && fullyFocused
         began = now; ends = now + p.duration
+        placeSidechat(at: now)
         generation += 1
         let g = generation
+        startDeferredTargets(p)
         let dockCommit=M10ColumnWorkTrace.scope("scene.commit.dock")
         // One commit origin and the last written Dock snapshot serve every Dock channel.
         dock.transitionEpoch = dock.makeTransitionEpoch(at:now)
@@ -585,6 +691,8 @@ extension AutoScene {
 
     /// The transition is over: drop the flights, show the rest forms, apply content that changed meanwhile.
     func settle() {
+        M10ColumnWorkTrace.count("scene.settle", ["generation": generation])
+        defer { dock.resumeSunHoverTide(source: "settle") }
         defer {onModeEndpointVisibilityChanged?()}
         clearReorderText()
         dirty.formUnion(pendingMovingRenders);pendingMovingRenders=[]
@@ -604,12 +712,16 @@ extension AutoScene {
         // A prepared switch doesn't go through prepare: an orb that came back brief needs this for its own preparation.
         admitUnmountedTranscripts(columns)
         for (i, column) in columns.enumerated() {
-            column.removeAnimations()
+            if deferredTargets[column.conversation.id] == nil { column.removeAnimations() }
             column.place(column.rect.target, form: column.form.to)
             column.rect = .rest(column.rect.target)
             column.form = .rest(column.form.to)
             column.presence = .rest(1)
             column.showPresent()
+            if deferredTargets[column.conversation.id] != nil {
+                dirty.insert(column.conversation.id)
+                continue
+            }
             if dirty.contains(column.conversation.id) || column.needsReanchor {
                 column.renderDisplay(fullWidth: fullWidth(i, layout), briefWidth: briefWidth(i, layout), force: true)
             }
@@ -617,7 +729,7 @@ extension AutoScene {
             column.endTranscriptMotion()
             column.separator.opacity = i < columns.count - 1 ? 1 : 0
         }
-        dirty = []
+        dirty = dirty.intersection(Set(deferredTargets.keys))
         if tuningPending { tuningPending = false; DispatchQueue.main.async { [weak self] in self?.tuningChanged() } }
         CATransaction.commit()
         restIslands()
@@ -628,12 +740,16 @@ extension AutoScene {
         settles.append(CACurrentMediaTime())
         updateStatus()
         tellTarget()
+        fulfillFunctionPanelRequest()
         if !manualSettle { DispatchQueue.main.async { [weak self] in self?.requestPrewarm() } }
     }
 
     func frame(_ target: Double) {
         let work=M10ColumnWorkTrace.scope("scene.frame",["t":target]);defer{work.end()}
+        placeSidechat(at: target)
+        if sidechatPane?.hasMotion == true { sidechatPane?.advance(at: target) }
         endPressIfButtonReleased()
+        orbTrash.validateCarrier()
         handoffTranscripts(at:target)
         if let d = draftColumn {
             let wasMoving=d.isMoving
@@ -659,6 +775,8 @@ extension AutoScene {
         }
         // Header destinations are ready before the Dock computes and applies its single glass batch.
         dock.frame(at: target, elapsed: began >= 0 ? target - began : .infinity)
+        orbFlights.frame(target)
+        orbHint.frame(target)
         peekNode.placeCapsuleShadow(dock.peekCapsuleFrame)
     }
 }

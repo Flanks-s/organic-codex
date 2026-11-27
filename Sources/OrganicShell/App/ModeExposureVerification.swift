@@ -141,7 +141,7 @@ import QuartzCore
                 func render(_ f: ModeFlight) -> ([UInt8],CGImage) {
                     root.sublayers?.forEach{$0.removeFromSuperlayer()}
                     let restore=f.verificationPaint(into:root,scale:scale,elapsed:t)
-                    let b=renderer.render(at:CACurrentMediaTime()+3600+t);let image=renderer.image(b)
+                    let b=renderer.render(at:VerificationClock.renderOrigin+t);let image=renderer.image(b)
                     restore();return(b,image)
                 }
                 let a=render(off),b=render(on)
@@ -227,10 +227,10 @@ import QuartzCore
                     } else {
                         let layer=exposure.renderingLayer,parent=layer.superlayer
                         root.addSublayer(layer)
-                        let bytes=renderer.render(at:CACurrentMediaTime()+3600+t)
+                        let bytes=renderer.render(at:VerificationClock.renderOrigin+t)
                         parent?.addSublayer(layer);return(bytes,renderer.image(bytes))
                     }
-                    let bytes=renderer.render(at:CACurrentMediaTime()+3600+t);return(bytes,renderer.image(bytes))
+                    let bytes=renderer.render(at:VerificationClock.renderOrigin+t);return(bytes,renderer.image(bytes))
                 }
                 let a=render(false),b=render(true)
                 if k==0 || k==30 {check(maxDiff(a.0,b.0)==0,"\(name) \(scale)x endpoint exact")}
@@ -418,7 +418,7 @@ import QuartzCore
                             }
                         }
                         if index % 12 == 0 || index == count {
-                            let paintTime = CACurrentMediaTime() + 3600 + t
+                            let paintTime = VerificationClock.renderOrigin + t
                             func render(_ f: ModeFlight) -> [UInt8] {
                                 renderer.root.sublayers?.forEach { $0.removeFromSuperlayer() }
                                 // Compare just the newly prewarmed token. me's separate native gradient capture can
